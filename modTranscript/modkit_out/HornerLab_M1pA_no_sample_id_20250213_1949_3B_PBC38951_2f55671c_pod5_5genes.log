@@ -1,0 +1,30 @@
+[modkit-logging/src/lib.rs::69][2025-10-14 13:48:47][DEBUG] command line: modkit pileup zt_tagged/HornerLab_M1pA_no_sample_id_20250213_1949_3B_PBC38951_2f55671c_pod5_5genes.zt_tagged.bam modkit_out --ref hg38.fa --filter-threshold A:.8 --filter-threshold C:.8 --filter-threshold G:.8 --filter-threshold T:.8 --mod-thresholds 17596:0.99 --mod-thresholds a:0.99 --mod-thresholds m:0.99 --mod-thresholds 17802:0.99 --mod-thresholds 69426:0.99 --mod-thresholds 19228:0.99 --mod-thresholds 19229:0.99 --mod-thresholds 19227:0.99 --log-filepath modkit_out/HornerLab_M1pA_no_sample_id_20250213_1949_3B_PBC38951_2f55671c_pod5_5genes.log --max-depth 1000 --interval-size 100000 --prefix HornerLab_M1pA_no_sample_id_20250213_1949_3B_PBC38951_2f55671c_pod5_5genes --partition-tag ZT -t 8
+[modkit-core/src/command_utils.rs::44][2025-10-14 13:48:47][INFO] parsed user-input threshold 0.99 for mod-code 69426
+[modkit-core/src/command_utils.rs::44][2025-10-14 13:48:47][INFO] parsed user-input threshold 0.99 for mod-code 19229
+[modkit-core/src/command_utils.rs::44][2025-10-14 13:48:47][INFO] parsed user-input threshold 0.99 for mod-code 19227
+[modkit-core/src/command_utils.rs::44][2025-10-14 13:48:47][INFO] parsed user-input threshold 0.99 for mod-code a
+[modkit-core/src/command_utils.rs::44][2025-10-14 13:48:47][INFO] parsed user-input threshold 0.99 for mod-code 17802
+[modkit-core/src/command_utils.rs::44][2025-10-14 13:48:47][INFO] parsed user-input threshold 0.99 for mod-code 19228
+[modkit-core/src/command_utils.rs::44][2025-10-14 13:48:47][INFO] parsed user-input threshold 0.99 for mod-code m
+[modkit-core/src/command_utils.rs::44][2025-10-14 13:48:47][INFO] parsed user-input threshold 0.99 for mod-code 17596
+[modkit-core/src/command_utils.rs::295][2025-10-14 13:48:47][INFO] calculated chunk size: 12, interval size 100000, processing 1200000 positions concurrently
+[modkit-core/src/command_utils.rs::183][2025-10-14 13:48:47][INFO] using threshold 0.8 for base A
+[modkit-core/src/command_utils.rs::183][2025-10-14 13:48:47][INFO] using threshold 0.8 for base C
+[modkit-core/src/command_utils.rs::183][2025-10-14 13:48:47][INFO] using threshold 0.8 for base G
+[modkit-core/src/command_utils.rs::183][2025-10-14 13:48:47][INFO] using threshold 0.8 for base T
+[modkit-core/src/command_utils.rs::60][2025-10-14 13:48:47][INFO] no default pass threshold was provided, so base modifications at primary sequence bases other than T,C,G,A will not be filtered
+[modkit-core/src/pileup/subcommand.rs::655][2025-10-14 13:48:47][INFO] Using filter threshold 0.8 for T.
+[modkit-core/src/pileup/subcommand.rs::655][2025-10-14 13:48:47][INFO] Using filter threshold 0.8 for C.
+[modkit-core/src/pileup/subcommand.rs::655][2025-10-14 13:48:47][INFO] Using filter threshold 0.8 for G.
+[modkit-core/src/pileup/subcommand.rs::655][2025-10-14 13:48:47][INFO] Using filter threshold 0.8 for A.
+[modkit-core/src/pileup/subcommand.rs::673][2025-10-14 13:48:47][INFO] Using filter threshold 0.99 for mod code 69426.
+[modkit-core/src/pileup/subcommand.rs::673][2025-10-14 13:48:47][INFO] Using filter threshold 0.99 for mod code 19229.
+[modkit-core/src/pileup/subcommand.rs::673][2025-10-14 13:48:47][INFO] Using filter threshold 0.99 for mod code 19227.
+[modkit-core/src/pileup/subcommand.rs::673][2025-10-14 13:48:47][INFO] Using filter threshold 0.99 for mod code a.
+[modkit-core/src/pileup/subcommand.rs::673][2025-10-14 13:48:47][INFO] Using filter threshold 0.99 for mod code 17802.
+[modkit-core/src/pileup/subcommand.rs::673][2025-10-14 13:48:47][INFO] Using filter threshold 0.99 for mod code 19228.
+[modkit-core/src/pileup/subcommand.rs::673][2025-10-14 13:48:47][INFO] Using filter threshold 0.99 for mod code m.
+[modkit-core/src/pileup/subcommand.rs::673][2025-10-14 13:48:47][INFO] Using filter threshold 0.99 for mod code 17596.
+[modkit-core/src/interval_chunks.rs::531][2025-10-14 13:48:47][DEBUG] there are 455 contig(s) to work on (455 parts)
+[modkit-core/src/interval_chunks.rs::558][2025-10-14 13:49:30][DEBUG] no more records to process
+[modkit-core/src/pileup/subcommand.rs::812][2025-10-14 13:49:30][INFO] Done, processed 381420 rows. Processed ~1728 reads and skipped zero reads.

@@ -1,0 +1,11 @@
+[modkit-logging/src/lib.rs::69][2025-11-02 05:09:57][DEBUG] command line: modkit pileup zt_tagged/HornerLab_Z2pA_no_sample_id_20250213_1951_3F_PBC38885_f4e4aacc_pod5_5genes.zt_tagged.bam modkit_out_ZN/HornerLab_Z2pA_no_sample_id_20250213_1951_3F_PBC38885_f4e4aacc_pod5_5genes/HornerLab_Z2pA_no_sample_id_20250213_1951_3F_PBC38885_f4e4aacc_pod5_5genes_a_filtered_mod.bed --ref hg38.fa --filter-threshold A:.8 --mod-thresholds a:0.99 --partition-tag ZN --max-depth 1000 --interval-size 100000 -t 64 --log-filepath modkit_out_ZN/HornerLab_Z2pA_no_sample_id_20250213_1951_3F_PBC38885_f4e4aacc_pod5_5genes/HornerLab_Z2pA_no_sample_id_20250213_1951_3F_PBC38885_f4e4aacc_pod5_5genes_a_filtered_mod_bed_log
+[modkit-core/src/command_utils.rs::44][2025-11-02 05:09:57][INFO] parsed user-input threshold 0.99 for mod-code a
+[modkit-core/src/command_utils.rs::295][2025-11-02 05:09:57][INFO] calculated chunk size: 96, interval size 100000, processing 9600000 positions concurrently
+[modkit-core/src/writers.rs::1020][2025-11-02 05:09:57][INFO] creating modkit_out_ZN/HornerLab_Z2pA_no_sample_id_20250213_1951_3F_PBC38885_f4e4aacc_pod5_5genes/HornerLab_Z2pA_no_sample_id_20250213_1951_3F_PBC38885_f4e4aacc_pod5_5genes_a_filtered_mod.bed
+[modkit-core/src/command_utils.rs::166][2025-11-02 05:09:57][INFO] using threshold 0.8 for base A
+[modkit-core/src/command_utils.rs::60][2025-11-02 05:09:57][INFO] no default pass threshold was provided, so base modifications at primary sequence bases other than A will not be filtered
+[modkit-core/src/pileup/subcommand.rs::655][2025-11-02 05:09:57][INFO] Using filter threshold 0.8 for A.
+[modkit-core/src/pileup/subcommand.rs::673][2025-11-02 05:09:57][INFO] Using filter threshold 0.99 for mod code a.
+[modkit-core/src/interval_chunks.rs::531][2025-11-02 05:09:57][DEBUG] there are 455 contig(s) to work on (455 parts)
+[modkit-core/src/interval_chunks.rs::558][2025-11-02 05:11:02][DEBUG] no more records to process
+[modkit-core/src/pileup/subcommand.rs::812][2025-11-02 05:11:02][INFO] Done, processed 323415 rows. Processed ~3710 reads and skipped zero reads.
