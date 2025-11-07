@@ -11,7 +11,7 @@ A Snakemake pipeline for analyzing RNA modifications from BAM files.
 5. Configure `config/config.yaml` with your samples and references.
 6. Run `snakemake` from the workflow directory.
 
-## Sample Preparation
+## Input File Requirements
 
 ## Pipeline Parameters and Usage
 
