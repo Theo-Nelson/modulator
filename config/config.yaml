@@ -1,0 +1,35 @@
+# Configuration for modulator pipeline
+
+# Samples
+samples:
+  - HornerLab_M1pA_no_sample_id_20250213_1949_3B_PBC38951_2f55671c_pod5_5genes
+  - HornerLab_M2pA_no_sample_id_20250213_1949_3C_PBC17736_c6754256_pod5_5genes
+  - HornerLab_M3pA_no_sample_id_20250213_1950_3D_PBC17512_3a773761_pod5_5genes
+  - HornerLab_Z1pA_no_sample_id_20250213_1950_3E_PBC48691_3a030c77_pod5_5genes
+  - HornerLab_Z2pA_no_sample_id_20250213_1951_3F_PBC38885_f4e4aacc_pod5_5genes
+  - HornerLab_Z3pA_no_sample_id_20250213_1951_3G_PBC48550_1032943c_pod5_5genes
+
+# Reference files
+reference_genome: "resources/hg38.fa"
+reference_gtf: "resources/hg38.ncbiRefSeq.gtf.gz"
+
+# Mods and reference bases
+mods: ["17596", "a", "m", "17802", "69426", "19228", "19229", "19227"]
+ref_bases: ["A", "A", "C", "T", "A", "C", "G", "T"]
+
+# Threads
+threads: 64
+
+# Prefix for outputs
+prefix: "fivegenes_readbacked_annot"
+
+# Assembly filters (relaxed for test data)
+min_reads: 1
+min_frac: 0.0001
+
+# Minimum coverage
+min_cov: 5
+min_cov_test: 20
+
+# Top k for plots
+topk: 10

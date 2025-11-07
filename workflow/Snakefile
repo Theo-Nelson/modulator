@@ -1,0 +1,30 @@
+configfile: "../config/config.yaml"
+
+def get_bam_path(sample):
+    if '5genes' in sample:
+        return f"../resources/test_bams/ALCAM_NHSL1_SERAC1_MXD1_RIOK3_reads/{sample}.bam"
+    else:
+        return f"../resources/test_bams/MXD1_reads/{sample}.bam"
+
+include: "rules/assemble.smk"
+include: "rules/modkit_zn.smk"
+include: "rules/aggregate_zn.smk"
+include: "rules/modkit_zt.smk"
+include: "rules/aggregate_zt.smk"
+include: "rules/test_diffs.smk"
+
+rule all:
+    input:
+        f"results/assemble/{config['prefix']}.gtf",
+        f"results/assemble/{config['prefix']}_classification_summary.tsv",
+        expand(f"results/assemble/zt_tagged/{{sample}}.zt_tagged.bam", sample=config["samples"]),
+        expand("results/modkit_zn/{sample}", sample=config["samples"]),
+        f"results/aggregate_zn/{config['prefix']}_sites_long.tsv",
+        f"results/aggregate_zn/{config['prefix']}__per_gene_mod",
+        expand("results/modkit_zt/{sample}", sample=config["samples"]),
+        f"results/aggregate_zt/{config['prefix']}_long.tsv",
+        f"results/aggregate_zt/{config['prefix']}_frac_pivot.tsv",
+        f"results/aggregate_zt/{config['prefix']}_cov_pivot.tsv",
+        f"results/aggregate_zt/{config['prefix']}_Nmod_pivot.tsv",
+        f"results/test_diffs/{config['prefix']}__ZN_site_diff_results.tsv",
+        f"results/test_diffs/{config['prefix']}__figs"

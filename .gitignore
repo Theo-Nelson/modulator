@@ -1,0 +1,29 @@
+# Results
+results/
+
+# hg38 Reference
+*.fa
+*.fai
+
+# Logs
+*.log
+
+# Temporary files
+*.tmp
+*.bak
+
+# Snakemake
+.snakemake/
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+
+# Jupyter
+.ipynb_checkpoints
+
+# OS
+.DS_Store
+Thumbs.db
+LICENSE.md
