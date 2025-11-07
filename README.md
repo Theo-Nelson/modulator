@@ -15,14 +15,59 @@ A Snakemake pipeline for analyzing RNA modifications from BAM files.
 
 ## Pipeline Parameters and Usage
 
+Minimal command to run on demo data:
+
 ```bash
-cd workflow
-snakemake
+snakemake -j 8 \
+  --configfile ../config/config.yaml \
+  --config \
+    reference_fa=/path/to/ref.fa \
+    reference_gtf=/path/to/ref.gtf \
+  --rerun-incomplete --printshellcmds
 ```
 
-This pipeline assembles transcripts from BAM files, runs modkit pileup for modifications, aggregates results per gene and transcript, and tests for differences in modification stoichiometry between transcripts.
+Expanded command to specify samples and references:
 
+```bash
+snakemake -j 8 \
+  --configfile ../config/config.yaml \
+  --config \
+    reference_fa=/path/to/ref.fa \
+    reference_gtf=/path/to/ref.gtf \
+    bams_dir=/path/to/your/bams \
+    bam_glob='*.bam' \
+    prefix=fivegenes_readbacked_annot \
+    threads=64 \
+    mods='["17596","a","m","17802","69426","19228","19229","19227"]' \
+    ref_bases='["A","A","C","T","A","C","G","T"]' \
+    min_cov=5 \
+    min_cov_test=20 \
+    topk=10 \
+    assembler='{primary_only: true,
+                min_mapq: 10,
+                min_introns_read: 1,
+                require_softclip3p: 0,
+                apa_window: 20,
+                tes_window: null,
+                min_reads: 40,
+                min_frac: 0.00,
+                min_introns: 1,
+                min_polya_length: 12,
+                min_polya_purity: 0.5,
+                polya_support_frac: 0.5,
+                tes_match_tol: 25,
+                exact_tes_tol: 10,
+                write_zt_bams: false,
+                write_zt_tagged_sample_bams: true,
+                emit_modkit_manifest: false,
+                min_reads_per_sample_for_mod: 5,
+                min_total_reads_for_mod: 20}' \
+  --rerun-incomplete --printshellcmds
+```
 
+### Assembly Parameters
+
+The following table explains the different parameter functions available for transcript assembly. 
 
 | Parameter | Type | Default | Typical Range / Options | Description |
 |------------|------|----------|--------------------------|--------------|
@@ -69,4 +114,7 @@ A few notes on how these parameters cooperate:
 ## Citation
 
 ## Contributors 
+
+* [Theodore Nelson](https://github.com/Theo-Nelson), Weill Cornell Medicine
+* [Michael Goneos](https://github.com/mgoneos), Weill Cornell Medicine 
 
