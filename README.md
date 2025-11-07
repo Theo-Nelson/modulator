@@ -70,3 +70,8 @@ A few notes on how these parameters cooperate:
 
 ## Contributors 
 
+### Contributors
+
+* [Theodore Nelson](https://github.com/Theo-Nelson), Weill Cornell Medicine
+* [Michael Goneos](https://github.com/mgoneos), Weill Cornell Medicine 
+
