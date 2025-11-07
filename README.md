@@ -4,10 +4,11 @@ A Snakemake pipeline for analyzing RNA modifications from BAM files.
 
 ## Installation
 
-1. Clone the repository.
-2. Install Snakemake and conda.
-3. Configure `config/config.yaml` with your samples and references.
-4. Run `snakemake` from the workflow directory.
+1. Set up micromamba in your HPC environment: https://mamba.readthedocs.io/en/latest/installation/micromamba-installation.html
+2. Clone the repository.
+3. Install Snakemake and conda. 
+4. Configure `config/config.yaml` with your samples and references.
+5. Run `snakemake` from the workflow directory.
 
 ## Usage
 
