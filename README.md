@@ -12,13 +12,18 @@ A Snakemake pipeline for analyzing RNA modifications from BAM files.
 6. Configure `config/config.yaml` with your samples and references.
 7. Run `snakemake` from the workflow directory.
 
-## Usage
+## Sample Preparation
+
+## Pipeline Parameters and Usage
 
 ```bash
 cd workflow
 snakemake
 ```
 
-## Description
+## Citation
 
 This pipeline assembles transcripts from BAM files, runs modkit pileup for modifications, aggregates results per gene and transcript, and tests for differences in modification stoichiometry between transcripts.
+
+## Contributors 
+
