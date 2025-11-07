@@ -1,18 +1,19 @@
 #!/usr/bin/env python3
 """
-Read-backed TES/APA assembler (v8)
+Read-backed TES/APA assembler (v9)
 
-What's new vs v7
+What's new vs v8
 ----------------
-1) **Robust writer guard**: fixes occasional KeyError when writing per-transcript
-   subset BAMs (writers dict may not contain a ZT label if that transcript/sample
-   wasn't eligible). We now skip safely if `zt` not in `writers`.
-2) **Deterministic 5' truncation assignment**: within each APA cluster, truncated
-   reads are preferentially assigned to the *assembled transcript (canon chain)*
-   with the **most full-length support**, then by **total support**, then by
-   **longer chain**. This avoids accidental/random distribution to weaker isoforms.
-3) Keeps v7 features: ZT/ZG/ZN tagging, ZN = transcript index *within gene* (1..k),
-   per-sample tagged BAMs (same count as inputs), compatible GTF + summary TSV.
+1) New outputs (besides GTF, metrics, and classification summary):
+   - <prefix>_tx_counts.tsv               : transcript (rows) x sample (cols) counts for KEPT transcripts
+   - <prefix>_tx_counts.pca.png           : per-sample PCA scatter from log1p(counts)
+   - <prefix>_per_sample_stats.tsv        : basic per-sample stats from the counts table
+2) New CLI:
+   - --out-prefix: base path for all auxiliary outputs (defaults to out-gtf without .gtf)
+3) Keeps v8 features:
+   - Robust writer guard for per-transcript BAMs
+   - Deterministic 5' truncation assignment prioritizing strongest isoform
+   - ZT/ZG/ZN tagging, per-sample tagged BAMs
 
 Tags on assigned reads
 ----------------------
@@ -20,12 +21,12 @@ Tags on assigned reads
 - ZG (i): gene_index (1..G) – deterministic within run
 - ZT (Z): "{gene_name}.{gene_id}.G{ZG}.T{ZN}" (human-readable)
 
-Outputs
--------
-- <out>.gtf and <out>_classification_summary.tsv with zt_label/gene_index/transcript_index
+Standard Outputs
+----------------
+- <out>.gtf and <out>_classification_summary.tsv
+- <prefix>_metrics.tsv
 - zt_tagged/<sample>.zt_tagged.bam  (ALL reads retained; tags added where available)
 - zt_bams/<sample>.<ZT>.bam         (optional per-transcript subset BAMs)
-
 """
 
 import argparse, os, sys, glob, re, gzip
@@ -236,7 +237,7 @@ def annotate_isoform(iso, gtf_txs, tes_match_tol, exact_tes_tol):
 # ---------- main ----------
 
 def main():
-    ap = argparse.ArgumentParser(description="TES/APA assembler v8 with robust writer guards and priority truncation assignment")
+    ap = argparse.ArgumentParser(description="TES/APA assembler v9 with extra counts/PCA/stats outputs")
     # Inputs
     ap.add_argument("--bams", nargs="+")
     ap.add_argument("--glob")
@@ -276,6 +277,8 @@ def main():
     ap.add_argument("--min-reads-per-sample-for-mod", type=int, default=5)
     ap.add_argument("--min-total-reads-for-mod", type=int, default=20)
     ap.add_argument("--out-gtf", default="readbacked_annot.gtf")
+    ap.add_argument("--out-prefix", default=None,
+                    help="Prefix for extra outputs (counts/PCA/stats). If omitted, uses out-gtf without .gtf")
 
     args = ap.parse_args()
 
@@ -294,6 +297,7 @@ def main():
     gtf_txs = load_gtf(args.gtf) if args.gtf else []
     print(f"[INFO] Loaded {len(gtf_txs)} transcripts from {args.gtf}" if args.gtf else "[INFO] No GTF supplied", file=sys.stderr)
 
+    # Effective window for clustering
     apa_window = args.apa_window if args.apa_window is not None else (args.tes_window if args.tes_window else 20)
 
     # Gather per-read features
@@ -331,7 +335,7 @@ def main():
     groups = defaultdict(list)
     by_cs = defaultdict(list)
     for r in reads:
-        by_cs[(r["chrom"], r["strand"])].append(r)
+        by_cs[(r["chrom"], r["strand"])] .append(r)
 
     for (chrom, strand), rlist in by_cs.items():
         positions = sorted(r["tes"] for r in rlist)
@@ -448,9 +452,11 @@ def main():
                 sample_ct=sample_ct, chain_counts=chain_counts
             ))
 
-    prefix = args.out_gtf.replace(".gtf","")
-    metrics_path = prefix + "_metrics.tsv"
+    # Resolve prefix & write metrics
+    prefix = args.out_prefix if args.out_prefix else args.out_gtf.replace(".gtf","")
     os.makedirs(os.path.dirname(args.out_gtf) or ".", exist_ok=True)
+
+    metrics_path = f"{prefix}_metrics.tsv"
     with open(metrics_path, "w") as m:
         m.write("#chrom\ttes_1based\tstrand\tintron_chain_tx_order\tn_introns\tread_support\tfrac_global\tpolya_support_frac\tmedian_mapq\tmedian_tail_len\tmedian_tail_purity\tn_unique_chains\tn_full_length_reads\tincluded_trunc\tsample_counts\tchain_counts\tkept\n")
         for row in metrics_rows:
@@ -514,7 +520,7 @@ def main():
                 out.write(f"{chrom}\tReadBacked\texon\t{s}\t{e}\t1000\t{strand}\t.\t{attrs} exon_number \"{j}\";\n")
 
     # Classification summary
-    summary_path = prefix + "_classification_summary.tsv"
+    summary_path = f"{prefix}_classification_summary.tsv"
     with open(summary_path, "w") as s:
         s.write("#code\tzt_label\tgene_index\ttranscript_index\tchrom\tstrand\tiso_tes\tiso_chain_tx\tgtf_gene_id\tgtf_gene_name\tgtf_transcript_id\tgtf_tes\tgtf_chain_tx\ttes_delta_bp\texon_overlap_bp\tmatch_source\tclassification\tread_support\tfrac_global\tpolya_support_frac\tsample_counts\n")
         for iso in sorted(kept, key=lambda x: (x["gene_index"], x["tx_index"])):
@@ -527,6 +533,77 @@ def main():
                 ann["classification"], iso["count"], f"{iso['frac_global']:.3f}", f"{iso['polya_frac']:.4f}",
                 "|".join(f"{k}:{v}" for k,v in sorted(iso["sample_ct"].items()))
             ]))+"\n")
+
+    # === Extra outputs: transcript counts, PCA (samples), per-sample stats ===
+    import pandas as pd
+    import numpy as np
+    import matplotlib
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+
+    # collect samples and transcript IDs
+    all_samples = sorted({s for iso in kept for s in iso["sample_ct"].keys()})
+    tx_ids = [iso["zt_label"] for iso in kept]
+
+    # counts matrix (KEPT transcripts)
+    data = []
+    for iso in kept:
+        row = [iso["sample_ct"].get(s, 0) for s in all_samples]
+        data.append(row)
+    counts_df = pd.DataFrame(data, index=tx_ids, columns=all_samples)
+    counts_path = f"{prefix}_tx_counts.tsv"
+    counts_df.to_csv(counts_path, sep="\t")
+
+    # PCA on samples (features = transcripts), using log1p counts
+    X = np.log1p(counts_df.values.T)  # shape: (n_samples, n_transcripts)
+    if X.size and X.shape[0] >= 1 and X.shape[1] >= 1:
+        Xc = X - X.mean(axis=0, keepdims=True)
+        # SVD
+        U, S, Vt = np.linalg.svd(Xc, full_matrices=False)
+        pcs = min(2, S.size)
+        PC = U[:, :pcs] * S[:pcs] if pcs else np.zeros((X.shape[0], 0))
+        var_expl = (S**2) / (S**2).sum() if S.size else np.zeros_like(S)
+
+        pca_png = f"{prefix}_tx_counts.pca.png"
+        plt.figure(figsize=(6,5))
+        if pcs >= 2:
+            plt.scatter(PC[:,0], PC[:,1])
+            for i, name in enumerate(all_samples):
+                plt.text(PC[i,0], PC[i,1], name, fontsize=8, ha="left", va="bottom")
+            plt.xlabel(f"PC1 ({var_expl[0]*100:.1f}% var)")
+            plt.ylabel(f"PC2 ({var_expl[1]*100:.1f}% var)")
+        else:
+            # fall back: 1D PC or all zeros
+            x = PC[:,0] if pcs >= 1 else np.zeros(X.shape[0])
+            plt.scatter(x, np.zeros_like(x))
+            for i, name in enumerate(all_samples):
+                plt.text(x[i], 0.0, name, fontsize=8, ha="left", va="bottom")
+            xl = f"PC1 ({var_expl[0]*100:.1f}% var)" if pcs>=1 else "PC1"
+            plt.xlabel(xl); plt.ylabel("PC2")
+        plt.title("Sample PCA (log1p transcript counts)")
+        plt.tight_layout()
+        plt.savefig(pca_png, dpi=150)
+        plt.close()
+    else:
+        pca_png = f"{prefix}_tx_counts.pca.png"
+        # write an empty placeholder figure
+        plt.figure(figsize=(6,5))
+        plt.title("Sample PCA (no data)")
+        plt.savefig(pca_png, dpi=150)
+        plt.close()
+
+    # per-sample stats
+    rows = []
+    for s in all_samples:
+        col = counts_df[s]
+        detected = (col > 0)
+        total_reads = int(col.sum())
+        n_tx = int(detected.sum())
+        med_reads = float(col[detected].median()) if n_tx > 0 else 0.0
+        rows.append(dict(sample=s, total_reads=total_reads, n_transcripts=n_tx, median_reads_per_tx=med_reads))
+    stats_df = pd.DataFrame(rows).sort_values("sample")
+    stats_path = f"{prefix}_per_sample_stats.tsv"
+    stats_df.to_csv(stats_path, sep="\t", index=False)
 
     # Build read -> (ZT, ZG, ZN) map
     assign = defaultdict(dict)
@@ -630,11 +707,13 @@ def main():
             except Exception: pass
             print(f"[OK] Wrote ZT/ZN-tagged sample BAM: {out_path}", file=sys.stderr)
 
-    print(f"[OK] Wrote {args.out_gtf}", file=sys.stderr)
+    print(f"[OK] Wrote GTF: {args.out_gtf}", file=sys.stderr)
     print(f"[OK] Metrics: {metrics_path}", file=sys.stderr)
     print(f"[OK] Classification summary: {summary_path}", file=sys.stderr)
+    print(f"[OK] Counts: {counts_path}", file=sys.stderr)
+    print(f"[OK] PCA plot: {pca_png}", file=sys.stderr)
+    print(f"[OK] Per-sample stats: {stats_path}", file=sys.stderr)
 
 if __name__ == "__main__":
-    from collections import defaultdict
     main()
 

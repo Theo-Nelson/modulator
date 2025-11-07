@@ -1,6 +1,6 @@
 rule aggregate_modkit_zn:
     input:
-        modkit_dirs = expand("results/modkit_zn/{sample}", sample=config["samples"]),
+        modkit_dirs = expand("results/modkit_zn/{sample}", sample=SAMPLES),
         gtf = f"results/assemble/{config['prefix']}.gtf"
     output:
         long_tsv = f"results/aggregate_zn/{config['prefix']}_sites_long.tsv",

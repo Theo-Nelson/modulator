@@ -1,6 +1,6 @@
 rule aggregate_modkit_zt:
     input:
-        modkit_dirs = expand("results/modkit_zt/{sample}", sample=config["samples"]),
+        modkit_dirs = expand("results/modkit_zt/{sample}", sample=SAMPLES),
         summary_tsv = f"results/assemble/{config['prefix']}_classification_summary.tsv"
     output:
         long_tsv = f"results/aggregate_zt/{config['prefix']}_long.tsv",

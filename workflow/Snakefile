@@ -1,14 +1,29 @@
+# --- references (unchanged) ---
 REF_FA  = config.get("reference_fa",  config.get("reference", {}).get("fasta"))
 REF_GTF = config.get("reference_gtf", config.get("reference", {}).get("gtf"))
 
 configfile: "../config/config.yaml"
 
-def get_bam_path(sample):
-    if '5genes' in sample:
-        return f"../resources/test_bams/ALCAM_NHSL1_SERAC1_MXD1_RIOK3_reads/{sample}.bam"
-    else:
-        return f"../resources/test_bams/MXD1_reads/{sample}.bam"
+# --- autodiscover BAMs/SAMPLES from a directory ---
+import os, glob
 
+# users can override these in config/config.yaml
+BAMS_DIR  = config.get("bams_dir", "../resources/test_bams/ALCAM_NHSL1_SERAC1_MXD1_RIOK3_reads")
+BAM_GLOB  = config.get("bam_glob", "*.bam")
+
+def _discover_samples():
+    paths = glob.glob(os.path.join(BAMS_DIR, BAM_GLOB))
+    return sorted({os.path.splitext(os.path.basename(p))[0] for p in paths})
+
+SAMPLES = _discover_samples()
+
+# make these visible to included rule files
+# (assemble.smk expects BAMS_DIR, BAM_GLOB, SAMPLES)
+BAMS_DIR = BAMS_DIR
+BAM_GLOB = BAM_GLOB
+SAMPLES  = SAMPLES
+
+# --- include rules ---
 include: "rules/assemble.smk"
 include: "rules/modkit_zn.smk"
 include: "rules/aggregate_zn.smk"
@@ -16,18 +31,23 @@ include: "rules/modkit_zt.smk"
 include: "rules/aggregate_zt.smk"
 include: "rules/test_diffs.smk"
 
+# --- final targets ---
 rule all:
     input:
         f"results/assemble/{config['prefix']}.gtf",
         f"results/assemble/{config['prefix']}_classification_summary.tsv",
-        expand(f"results/assemble/zt_tagged/{{sample}}.zt_tagged.bam", sample=config["samples"]),
-        expand("results/modkit_zn/{sample}", sample=config["samples"]),
+        f"results/assemble/{config['prefix']}_tx_counts.tsv",
+        f"results/assemble/{config['prefix']}_tx_counts.pca.png",
+        f"results/assemble/{config['prefix']}_per_sample_stats.tsv",
+        expand("results/assemble/zt_tagged/{sample}.zt_tagged.bam", sample=SAMPLES),
+        expand("results/modkit_zn/{sample}", sample=SAMPLES),
         f"results/aggregate_zn/{config['prefix']}_sites_long.tsv",
         f"results/aggregate_zn/{config['prefix']}__per_gene_mod",
-        expand("results/modkit_zt/{sample}", sample=config["samples"]),
+        expand("results/modkit_zt/{sample}", sample=SAMPLES),
         f"results/aggregate_zt/{config['prefix']}_long.tsv",
         f"results/aggregate_zt/{config['prefix']}_frac_pivot.tsv",
         f"results/aggregate_zt/{config['prefix']}_cov_pivot.tsv",
         f"results/aggregate_zt/{config['prefix']}_Nmod_pivot.tsv",
         f"results/test_diffs/{config['prefix']}__ZN_site_diff_results.tsv",
         f"results/test_diffs/{config['prefix']}__figs"
+
