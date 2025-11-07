@@ -1,8 +1,7 @@
-name: modulator
+# workflow/envs/modulator.yaml
 channels:
   - conda-forge
   - bioconda
-  - defaults
 dependencies:
   - python=3.13.7
   - pandas=2.3.3
@@ -10,4 +9,6 @@ dependencies:
   - matplotlib=3.10.6
   - pysam=0.23.3
   - samtools=1.22.1
-  - scipy   # not in your list; left unpinned to resolve for py3.13
+  - scipy
+  - ont-modkit=0.5.0
+

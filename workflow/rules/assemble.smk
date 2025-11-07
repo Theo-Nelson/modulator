@@ -1,7 +1,7 @@
 rule assemble_transcripts:
     input:
         bams = lambda wildcards: [get_bam_path(s) for s in config["samples"]],
-        gtf = f"../{config['reference_gtf']}"
+        gtf = REF_GTF
     output:
         gtf = f"results/assemble/{config['prefix']}.gtf",
         summary = f"results/assemble/{config['prefix']}_classification_summary.tsv",

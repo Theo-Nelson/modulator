@@ -1,3 +1,6 @@
+REF_FA  = config.get("reference_fa",  config.get("reference", {}).get("fasta"))
+REF_GTF = config.get("reference_gtf", config.get("reference", {}).get("gtf"))
+
 configfile: "../config/config.yaml"
 
 def get_bam_path(sample):

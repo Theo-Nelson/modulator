@@ -1,7 +1,7 @@
 rule modkit_pileup_zn:
     input:
         bam = "results/assemble/zt_tagged/{sample}.zt_tagged.bam",
-        ref = f"../{config['reference_genome']}"
+        ref = REF_FA
     output:
         beds = directory("results/modkit_zn/{sample}")
     params:
