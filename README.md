@@ -21,9 +21,9 @@ cd workflow
 snakemake
 ```
 
-## Citation
-
 This pipeline assembles transcripts from BAM files, runs modkit pileup for modifications, aggregates results per gene and transcript, and tests for differences in modification stoichiometry between transcripts.
+
+## Citation
 
 ## Contributors 
 
