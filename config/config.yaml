@@ -10,8 +10,10 @@ samples:
   - HornerLab_Z3pA_no_sample_id_20250213_1951_3G_PBC48550_1032943c_pod5_5genes
 
 # Reference files
-reference_genome: "resources/hg38.fa"
-reference_gtf: "resources/hg38.ncbiRefSeq.gtf.gz"
+reference:
+  fasta: nonexistant_genome.fa
+  gtf:   nonexistant_annotation.gtf
+
 
 # Mods and reference bases
 mods: ["17596", "a", "m", "17802", "69426", "19228", "19229", "19227"]
