@@ -1,6 +1,6 @@
 # modulator: Transcript-Specific Modification Calling for Nanopore Direct-RNA Sequencing Data
 
-A Snakemake pipeline for analyzing RNA modifications from BAM files.
+A Snakemake pipeline for analyzing RNA modifications from aligned BAM files.
 
 ## Installation
 
