@@ -1,6 +1,6 @@
 rule test_transcript_diffs:
     input:
-        in_tsv = f"results/aggregate_zn/{config['prefix']}_sites_long.tsv"
+        in_tsv = f"results/aggregate_zn/{config['prefix']}_FILTERED_sites_long.tsv"
     output:
         results_tsv = f"results/test_diffs/{config['prefix']}__ZN_site_diff_results.tsv",
         figs_dir = directory(f"results/test_diffs/{config['prefix']}__figs")
@@ -20,3 +20,4 @@ rule test_transcript_diffs:
             --topk {params.topk} \
             --verbose
         """
+

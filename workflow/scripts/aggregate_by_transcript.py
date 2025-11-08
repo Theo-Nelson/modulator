@@ -1,22 +1,25 @@
 #!/usr/bin/env python3
 """
-Aggregate modkit bedMethyl outputs partitioned by ZT (transcript code).
+Aggregate modkit bedMethyl outputs partitioned by ZT (transcript code) into per-site tables.
 
-v4 changes:
-  • Compatible with assembler v7 ZT labels like "GENE.GENEID.G# .T#" (dots, no underscores)
-    so we can still split <sample>_<ZT>.bed on the last underscore safely even when
-    sample names contain underscores.
-  • Adds optional parsing of .bed.gz and defensive filename handling.
-  • Writes the same four outputs as v3: *_long.tsv, *_frac_pivot.tsv, *_cov_pivot.tsv, *_Nmod_pivot.tsv
-  • Joins optional classification summary and recognizes 'zt_label', 'gene_index', 'transcript_index'.
+Semantics (important):
+- RAW = all parsed rows (after duplicate collapsing), no site filter.
+- FILTERED = keep a site (chrom,start0,end0,strand,mod_code) if **ANY** row at that site
+             passes row-level checks; if kept, include **all** rows at that site.
 
-Usage is unchanged except you should run modkit with --partition-tag ZT after using
-assembler v7, which sets ZT to a deterministic transcript label.
+Outputs (when enabled):
+  <out_prefix>_RAW_long.tsv
+  <out_prefix>_RAW_frac_pivot.tsv
+  <out_prefix>_RAW_cov_pivot.tsv
+  <out_prefix>_RAW_Nmod_pivot.tsv
+  <out_prefix>_FILTERED_long.tsv
+  <out_prefix>_FILTERED_frac_pivot.tsv
+  <out_prefix>_FILTERED_cov_pivot.tsv
+  <out_prefix>_FILTERED_Nmod_pivot.tsv
 """
 
 import os, sys, argparse, glob, gzip
-from collections import defaultdict
-from typing import Dict, Tuple, List
+from typing import Tuple
 
 try:
     import pandas as pd
@@ -31,49 +34,65 @@ BED_COLS = [
     "Ndelete", "Nfail", "Ndiff", "Nnocall"
 ]
 
-
 def parse_args():
-    ap = argparse.ArgumentParser(description="Aggregate modkit bedMethyl files partitioned by ZT")
-    ap.add_argument("--modkit-dir", required=True,
-                    help="Directory with <sample>_<ZT>.bed from `modkit pileup --partition-tag ZT`")
-    ap.add_argument("--summary-tsv",
-                    help="Optional assembler classification summary TSV to join on 'code'/'zt_label' (header may start with '#code')")
-    ap.add_argument("--out-prefix", required=True, help="Prefix for output TSVs")
+    ap = argparse.ArgumentParser(description="Aggregate ZT-partitioned modkit outputs per-site with filtering")
+    ap.add_argument("--modkit-dir", required=True)
+    ap.add_argument("--summary-tsv", help="Assembler summary to join on 'code'/'zt_label'")
+    ap.add_argument("--out-prefix", required=True)
     ap.add_argument("--min-cov", type=int, default=0,
-                    help="If >0, zero-out frac_modified where summed Nvalid_cov < MIN_COV (row kept)")
+                    help="Zero frac_modified for display when Nvalid_cov < MIN_COV (does NOT affect filtering)")
+
+    # filtering knobs (row-level checks)
+    ap.add_argument("--filter-enable", action="store_true")
+    ap.add_argument("--count-diff-factor", type=float, default=3.0,
+                    help="Row FAIL if Ndiff > factor * Nvalid_cov")
+    ap.add_argument("--mod-fail-margin", type=int, default=1,
+                    help="Row FAIL if Nmod <= Nfail + margin")
+
+    # outputs
+    ap.add_argument("--emit-raw", dest="emit_raw", action="store_true")
+    ap.add_argument("--no-emit-raw", dest="emit_raw", action="store_false"); ap.set_defaults(emit_raw=True)
+    ap.add_argument("--emit-filtered", dest="emit_filt", action="store_true")
+    ap.add_argument("--no-emit-filtered", dest="emit_filt", action="store_false"); ap.set_defaults(emit_filt=True)
+    ap.add_argument("--write-long", dest="write_long", action="store_true")
+    ap.add_argument("--no-write-long", dest="write_long", action="store_false"); ap.set_defaults(write_long=True)
+    ap.add_argument("--write-pivots", dest="write_pivots", action="store_true")
+    ap.add_argument("--no-write-pivots", dest="write_pivots", action="store_false"); ap.set_defaults(write_pivots=True)
+
+    # lightweight debug (summary counts only)
+    ap.add_argument("--debug-summary", action="store_true",
+                    help="Print counts of rows/sites passing/failing to stderr")
+
     ap.add_argument("--verbose", action="store_true")
     return ap.parse_args()
-
 
 def is_header_line(line: str) -> bool:
     s = line.strip()
     return (not s) or s.startswith("#") or s.startswith("track") or s.startswith("browser")
 
-
 def sample_and_code_from_path(path: str) -> Tuple[str, str]:
-    """Infer sample and partition code from filename by splitting at the last underscore.
-    Works if partition (ZT) contains no underscores. assembler v7 ensures this by using dots.
-    Returns (sample, code) or (None, None) if the pattern doesn't match.
+    """
+    Support both:
+      - Nested: <modkit_dir>/<SAMPLE>/<CODE>.bed(.gz)
+      - Flat:   <modkit_dir>/<SAMPLE>_<CODE>.bed(.gz)
     """
     base = os.path.basename(path)
-    if base.endswith(".bed.gz"):
-        base = base[:-7]
-    elif base.endswith(".bed"):
-        base = base[:-4]
-    # Ignore trailing _ungrouped if present
-    if base.endswith("_ungrouped"):
-        return None, None
-    if "_" not in base:
-        return None, None
-    sample, code = base.rsplit("_", 1)
-    return sample, code
+    if base.endswith(".bed.gz"): base = base[:-7]
+    elif base.endswith(".bed"):  base = base[:-4]
+    if base == "ungrouped": return None, None
 
+    parent = os.path.basename(os.path.dirname(path))
+    # nested: parent is sample, filename is code
+    if parent and parent != os.path.basename(os.path.abspath(path)):
+        return parent, base
+
+    # flat fallback
+    if "_" in base:
+        return base.rsplit("_", 1)
+    return None, None
 
 def open_textmaybe_gzip(path):
-    if path.endswith(".gz"):
-        return gzip.open(path, "rt")
-    return open(path, "r")
-
+    return gzip.open(path, "rt") if path.endswith(".gz") else open(path, "r")
 
 def safe_int(x, default=0):
     try:
@@ -84,39 +103,18 @@ def safe_int(x, default=0):
         except Exception:
             return default
 
-
-def read_bed_summing_counts(path: str) -> Dict[str, Dict[str, int]]:
-    """
-    Sum counts per mod_code across the entire bed file.
-    Returns: mod_code -> counts dict
-    """
-    sums: Dict[str, Dict[str, int]] = defaultdict(lambda: {
-        "Nvalid_cov": 0, "Nmod": 0, "Ncanonical": 0, "Nother_mod": 0,
-        "Ndelete": 0, "Nfail": 0, "Ndiff": 0, "Nnocall": 0, "sites": 0
-    })
-    with open_textmaybe_gzip(path) as f:
-        for line in f:
-            if is_header_line(line):
-                continue
-            parts = line.rstrip("\n").split("\t")
-            if len(parts) < 18:
-                parts = line.strip().split()
-                if len(parts) < 18:
-                    continue
-            parts = parts[:18]
-            d = dict(zip(BED_COLS, parts))
-            mod = d["mod_code"]
-            sums[mod]["Nvalid_cov"] += safe_int(d["Nvalid_cov"])
-            sums[mod]["Nmod"]       += safe_int(d["Nmod"])
-            sums[mod]["Ncanonical"] += safe_int(d["Ncanonical"])
-            sums[mod]["Nother_mod"] += safe_int(d["Nother_mod"])
-            sums[mod]["Ndelete"]    += safe_int(d["Ndelete"])
-            sums[mod]["Nfail"]      += safe_int(d["Nfail"])
-            sums[mod]["Ndiff"]      += safe_int(d["Ndiff"])
-            sums[mod]["Nnocall"]    += safe_int(d["Nnocall"])
-            sums[mod]["sites"]      += 1
-    return sums
-
+def parse_bed_row(parts):
+    parts = parts[:18]
+    d = dict(zip(BED_COLS, parts))
+    d["start0"] = safe_int(d["start0"])
+    d["end0"]   = safe_int(d["end0"])
+    for k in ["Nvalid_cov","Nmod","Ncanonical","Nother_mod","Ndelete","Nfail","Ndiff","Nnocall"]:
+        d[k] = safe_int(d[k])
+    try:
+        d["frac_modified"] = float(d["frac_modified"])
+    except Exception:
+        d["frac_modified"] = 0.0
+    return d
 
 def robust_load_summary(path: str, verbose=False) -> pd.DataFrame:
     if not path or not os.path.exists(path):
@@ -124,106 +122,90 @@ def robust_load_summary(path: str, verbose=False) -> pd.DataFrame:
     lines = []
     with open(path) as f:
         for ln in f:
-            if ln.strip() == "":
-                continue
-            lines.append(ln.rstrip("\n"))
-
-    header_idx = None
-    header = None
+            if ln.strip(): lines.append(ln.rstrip("\n"))
+    header = None; header_idx = 0
     for i, ln in enumerate(lines):
         h = ln.lstrip("#")
         if "\t" in h and any(c.strip() == "code" for c in h.split("\t")):
-            header_idx = i
-            header = [c.strip() for c in h.split("\t")]
+            header_idx = i; header = [c.strip() for c in h.split("\t")]
             break
     if header is None:
-        header_idx = 0
         header = [c.strip() for c in lines[0].lstrip("#").split("\t")]
-        if verbose:
-            print("[warn] Could not find explicit 'code' header; using first line as header", file=sys.stderr)
+        if verbose: print("[warn] Using first line as header for summary.", file=sys.stderr)
 
     rows = []
-    expected = len(header)
     for ln in lines[header_idx+1:]:
-        if ln.startswith("#"):
-            continue
+        if ln.startswith("#"): continue
         parts = ln.split("\t")
-        if len(parts) < expected:
-            parts = parts + [""] * (expected - len(parts))
-        elif len(parts) > expected:
-            parts = parts[:expected]
-        rows.append({header[j]: parts[j] for j in range(expected)})
+        if len(parts) < len(header): parts += [""]*(len(header)-len(parts))
+        elif len(parts) > len(header): parts = parts[:len(header)]
+        rows.append({header[j]: parts[j] for j in range(len(header))})
 
     df = pd.DataFrame(rows)
-
-    # Normalize 'code' column name if it's '#code' or similar
     if "code" not in df.columns:
         for c in list(df.columns):
             if c.lstrip("#").strip() == "code":
                 df = df.rename(columns={c: "code"})
                 break
-
-    # Prefer 'zt_label' if present
     if "zt_label" in df.columns and "code" in df.columns:
         df["code"] = df["zt_label"].fillna(df["code"]).astype(str)
     elif "zt_label" in df.columns and "code" not in df.columns:
         df = df.rename(columns={"zt_label": "code"})
-
     if "code" in df.columns:
         df["code"] = df["code"].astype(str).str.strip()
-
     return df
-
 
 def main():
     args = parse_args()
 
-    # Look for .bed files either directly in modkit_dir or in sample subdirectories
-    beds = sorted(glob.glob(os.path.join(args.modkit_dir, "*.bed"))) + \
-           sorted(glob.glob(os.path.join(args.modkit_dir, "*.bed.gz"))) + \
-           sorted(glob.glob(os.path.join(args.modkit_dir, "*", "*.bed"))) + \
-           sorted(glob.glob(os.path.join(args.modkit_dir, "*", "*.bed.gz")))
+    beds = (
+        sorted(glob.glob(os.path.join(args.modkit_dir, "*.bed"))) +
+        sorted(glob.glob(os.path.join(args.modkit_dir, "*.bed.gz"))) +
+        sorted(glob.glob(os.path.join(args.modkit_dir, "*", "*.bed"))) +
+        sorted(glob.glob(os.path.join(args.modkit_dir, "*", "*.bed.gz")))
+    )
     if not beds:
         sys.exit(f"No .bed or .bed.gz files found in {args.modkit_dir}")
 
-    rows_long: List[dict] = []
-
+    rows = []
     for bed in beds:
         sample, code = sample_and_code_from_path(bed)
         if sample is None or code is None:
-            if args.verbose:
-                print(f"[skip] {os.path.basename(bed)} (unparseable filename)", file=sys.stderr)
             continue
+        with open_textmaybe_gzip(bed) as f:
+            for line in f:
+                if is_header_line(line): continue
+                parts = line.rstrip("\n").split("\t")
+                if len(parts) < 18:
+                    parts = line.strip().split()
+                    if len(parts) < 18: continue
+                d = parse_bed_row(parts)
+                rows.append({
+                    "code": code, "sample": sample,
+                    "chrom": d["chrom"], "start0": d["start0"], "end0": d["end0"], "strand": d["strand"],
+                    "mod_code": d["mod_code"],
+                    "Nvalid_cov": d["Nvalid_cov"], "Nmod": d["Nmod"], "Ncanonical": d["Ncanonical"],
+                    "Nother_mod": d["Nother_mod"], "Ndelete": d["Ndelete"], "Nfail": d["Nfail"],
+                    "Ndiff": d["Ndiff"], "Nnocall": d["Nnocall"],
+                })
 
-        sums_by_mod = read_bed_summing_counts(bed)
-        for mod, cnts in sums_by_mod.items():
-            Ncov = cnts["Nvalid_cov"]
-            Nmod = cnts["Nmod"]
-            frac = (Nmod / Ncov) if Ncov > 0 else 0.0
-            if args.min_cov and Ncov < args.min_cov:
-                frac = 0.0
-            rows_long.append({
-                "code": code,
-                "sample": sample,
-                "mod_code": mod,
-                "Nvalid_cov": Ncov,
-                "Nmod": Nmod,
-                "Ncanonical": cnts["Ncanonical"],
-                "Nother_mod": cnts["Nother_mod"],
-                "Ndelete": cnts["Ndelete"],
-                "Nfail": cnts["Nfail"],
-                "Ndiff": cnts["Ndiff"],
-                "Nnocall": cnts["Nnocall"],
-                "n_sites": cnts["sites"],
-                "frac_modified": round(frac, 6),
-            })
-
-    if not rows_long:
+    if not rows:
         sys.exit("No data parsed from bed files; check filenames and contents.")
 
-    df_long = pd.DataFrame(rows_long)
+    df = pd.DataFrame(rows)
 
-    # Optional join to classification summary
+    # collapse duplicates within same genomic+code+sample+mod
+    key = ["code","sample","mod_code","chrom","start0","end0","strand"]
+    sumcols = ["Nvalid_cov","Nmod","Ncanonical","Nother_mod","Ndelete","Nfail","Ndiff","Nnocall"]
+    df = df.groupby(key, as_index=False)[sumcols].sum()
+
+    # frac (display only; min-cov does NOT affect filtering)
+    df["frac_modified"] = (df["Nmod"] / df["Nvalid_cov"].where(df["Nvalid_cov"]>0, 1)).fillna(0.0)
+    if args.min_cov:
+        df.loc[df["Nvalid_cov"] < args.min_cov, "frac_modified"] = 0.0
+    df["frac_modified"] = df["frac_modified"].round(6)
+
+    # attach summary metadata if available
     if args.summary_tsv:
         summ = robust_load_summary(args.summary_tsv, verbose=args.verbose)
         if not summ.empty and "code" in summ.columns:
@@ -231,37 +213,60 @@ def main():
                                      "classification","match_source","iso_tes","iso_chain_tx",
                                      "gtf_tes","gtf_chain_tx","tes_delta_bp","exon_overlap_bp",
                                      "read_support","frac_global","polya_support_frac","sample_counts",
-                                     "gene_index","transcript_index"]
+                                     "gene_index","transcript_index","code"]
                          if c in summ.columns]
-            summ_sub = summ[["code"] + keep_cols].drop_duplicates("code")
-            pre = len(df_long)
-            df_long = df_long.merge(summ_sub, on="code", how="left")
-            if args.verbose:
-                print(f"[ok] merged summary on 'code' (rows={pre} -> {len(df_long)})", file=sys.stderr)
-        else:
-            if args.verbose:
-                print("[warn] Summary join skipped (no 'code' column or empty).", file=sys.stderr)
+            summ_sub = summ[keep_cols].drop_duplicates("code")
+            df = df.merge(summ_sub, on="code", how="left")
 
-    # Write long table
-    out_long = f"{args.out_prefix}_long.tsv"
-    df_long.to_csv(out_long, sep="\t", index=False)
-    if args.verbose:
-        print(f"[ok] wrote {out_long}", file=sys.stderr)
+    # ---- SITE FILTERING (ANY-pass keeps site) ----
+    # define site key
+    df["__site_key__"] = list(zip(df["chrom"], df["start0"].astype(int), df["end0"].astype(int), df["strand"], df["mod_code"]))
 
-    # Build pivots
-    def pivot_metric(metric: str, fname_suffix: str):
-        piv = df_long.pivot_table(index=["code","mod_code"], columns="sample", values=metric, aggfunc="first")
-        piv = piv.fillna(0).reset_index()
-        outp = f"{args.out_prefix}_{fname_suffix}.tsv"
-        piv.to_csv(outp, sep="\t", index=False)
-        if args.verbose:
-            print(f"[ok] wrote {outp}", file=sys.stderr)
+    # row-level pass/fail
+    if args.filter_enable:
+        pass_row = (~(df["Ndiff"] > (args.count_diff_factor * df["Nvalid_cov"]))) & \
+                   (df["Nmod"] > (df["Nfail"] + args.mod_fail_margin))
+        passing_sites = set(df.loc[pass_row, "__site_key__"])
+        df_filt = df[df["__site_key__"].isin(passing_sites)].copy()
+    else:
+        pass_row = pd.Series([True]*len(df), index=df.index)
+        df_filt = df.copy()
 
-    pivot_metric("frac_modified", "frac_pivot")
-    pivot_metric("Nvalid_cov",   "cov_pivot")
-    pivot_metric("Nmod",         "Nmod_pivot")
+    # debug summary, if requested
+    if args.debug_summary:
+        n_rows = len(df)
+        n_rows_pass = int(pass_row.sum())
+        n_sites = df["__site_key__"].nunique()
+        n_sites_pass = len(set(df.loc[pass_row, "__site_key__"]))
+        print(f"[debug] rows total={n_rows}, row-pass={n_rows_pass}", file=sys.stderr)
+        print(f"[debug] sites total={n_sites}, site-pass(any)={n_sites_pass}", file=sys.stderr)
 
-    print("[OK] Aggregation complete.")
+    base = args.out_prefix
+
+    def write_long_and_pivots(sub: pd.DataFrame, tag: str):
+        if args.write_long:
+            out_long = f"{base}_{tag}_long.tsv"
+            sub.drop(columns=["__site_key__"], errors="ignore").to_csv(out_long, sep="\t", index=False)
+        if args.write_pivots:
+            def pivot_metric(metric: str, fname_suffix: str):
+                piv = sub.pivot_table(
+                    index=["chrom","start0","end0","strand","code","mod_code"],
+                    columns="sample", values=metric, aggfunc="first"
+                ).fillna(0).reset_index()
+                piv.to_csv(f"{base}_{tag}_{fname_suffix}.tsv", sep="\t", index=False)
+            pivot_metric("frac_modified", "frac_pivot")
+            pivot_metric("Nvalid_cov",   "cov_pivot")
+            pivot_metric("Nmod",         "Nmod_pivot")
+
+    # write RAW (pre-filter)
+    if args.emit_raw:
+        write_long_and_pivots(df, "RAW")
+
+    # write FILTERED (post-site keep)
+    if args.emit_filt:
+        write_long_and_pivots(df_filt, "FILTERED")
+
+    print("[OK] ZT aggregation complete.", file=sys.stderr)
 
 if __name__ == "__main__":
     main()

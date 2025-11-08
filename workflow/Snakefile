@@ -1,82 +1,129 @@
-# --- references (unchanged) ---
+configfile: "../config/config.yaml"
+
+import os, glob, json
+
+# --- turn stringified dicts/lists from --config into real objects ---
+def _autoparse(value):
+    if isinstance(value, str):
+        s = value.strip()
+        if (s.startswith("{") and s.endswith("}")) or (s.startswith("[") and s.endswith("]")):
+            try:
+                return json.loads(s)
+            except Exception:
+                try:
+                    import yaml  # optional: PyYAML
+                    return yaml.safe_load(s)
+                except Exception:
+                    return value
+    return value
+
+for k in ("assembler", "modkit", "aggregation", "toggles", "mods", "ref_bases"):
+    if k in config:
+        config[k] = _autoparse(config[k])
+
+# --- references ---
 REF_FA  = config.get("reference_fa",  config.get("reference", {}).get("fasta"))
 REF_GTF = config.get("reference_gtf", config.get("reference", {}).get("gtf"))
 
-configfile: "../config/config.yaml"
-
+# after parsing, this will be a dict even if passed as a blob via --config
 MODKIT_CFG = config.get("modkit", {})
 
+# -------- helpers --------
+def _is_set(v):
+    if v is None:
+        return False
+    if isinstance(v, str) and v.strip().lower() in {"", "none", "null", "na"}:
+        return False
+    return True
+
+def _as_bool(v, default=False):
+    if v is None:
+        return default
+    if isinstance(v, bool):
+        return v
+    if isinstance(v, (int, float)):
+        return v != 0
+    if isinstance(v, str):
+        s = v.strip().lower()
+        if s in {"1", "true", "yes", "y", "on"}:
+            return True
+        if s in {"0", "false", "no", "n", "off"}:
+            return False
+        if s in {"", "none", "null", "na"}:
+            return default
+    return bool(v)
+
 def _as_flags_from_common(common, sample, which):
-    """Render modkit flags from config['modkit']['common'] for a given sample and which = 'modkit_zn'|'modkit_zt'."""
     flags = []
 
     # Logging
     log_tmpl = common.get("log_file_template")
-    if log_tmpl:
+    if _is_set(log_tmpl):
         flags += ["--log-filepath", log_tmpl.format(sample=sample, which=which)]
 
     # Selection
-    if common.get("region"):             flags += ["--region", str(common["region"])]
-    if common.get("max_depth") is not None:
-        flags += ["--max-depth", str(common["max_depth"])]
-    if common.get("include_bed"):        flags += ["--include-bed", common["include_bed"]]
-    if common.get("include_unmapped"):   flags += ["--include-unmapped"]
-    if common.get("edge_filter"):        flags += ["--edge-filter", str(common["edge_filter"])]
-    if common.get("invert_edge_filter"): flags += ["--invert-edge-filter"]
+    if _is_set(common.get("region")):             flags += ["--region", str(common["region"])]
+    if common.get("max_depth") is not None:       flags += ["--max-depth", str(common["max_depth"])]
+    if _is_set(common.get("include_bed")):        flags += ["--include-bed", str(common["include_bed"])]
+    if _as_bool(common.get("include_unmapped")):  flags += ["--include-unmapped"]
+    if _is_set(common.get("edge_filter")):        flags += ["--edge-filter", str(common["edge_filter"])]
+    if _as_bool(common.get("invert_edge_filter")):flags += ["--invert-edge-filter"]
 
     # Compute
     threads_val = str(common.get("threads", "{threads}")).replace("{threads}", str(config.get("threads", 4)))
-    if threads_val:                      flags += ["-t", threads_val]
-    if common.get("interval_size"):      flags += ["--interval-size", str(common["interval_size"])]
-    if common.get("queue_size"):         flags += ["--queue-size", str(common["queue_size"])]
-    if common.get("chunk_size"):         flags += ["--chunk-size", str(common["chunk_size"])]
+    if _is_set(threads_val):                      flags += ["-t", threads_val]
+    if _is_set(common.get("interval_size")):      flags += ["--interval-size", str(common["interval_size"])]
+    if _is_set(common.get("queue_size")):         flags += ["--queue-size", str(common["queue_size"])]
+    if _is_set(common.get("chunk_size")):         flags += ["--chunk-size", str(common["chunk_size"])]
 
     # Sampling
-    if common.get("num_reads"):          flags += ["--num-reads", str(common["num_reads"])]
-    if common.get("sampling_frac"):      flags += ["--sampling-frac", str(common["sampling_frac"])]
-    if common.get("seed") is not None:   flags += ["--seed", str(common["seed"])]
-    if common.get("sample_region"):      flags += ["--sample-region", str(common["sample_region"])]
-    if common.get("sampling_interval_size"):
+    if _is_set(common.get("num_reads")):          flags += ["--num-reads", str(common["num_reads"])]
+    if _is_set(common.get("sampling_frac")):      flags += ["--sampling-frac", str(common["sampling_frac"])]
+    seed_val = common.get("seed")
+    if not (isinstance(seed_val, str) and seed_val.strip().lower() in {"none","null",""}):
+        if seed_val is not None:
+            flags += ["--seed", str(seed_val)]
+    if _is_set(common.get("sample_region")):      flags += ["--sample-region", str(common["sample_region"])]
+    if _is_set(common.get("sampling_interval_size")):
         flags += ["--sampling-interval-size", str(common["sampling_interval_size"])]
 
     # Filtering
-    if common.get("no_filtering"):       flags += ["--no-filtering"]
+    if _as_bool(common.get("no_filtering")):      flags += ["--no-filtering"]
     if common.get("filter_percentile") is not None:
         flags += ["--filter-percentile", str(common["filter_percentile"])]
     for ft in (common.get("filter_thresholds") or []):
-        flags += ["--filter-threshold", str(ft)]
+        if _is_set(ft):
+            flags += ["--filter-threshold", str(ft)]
     for mt in (common.get("mod_thresholds") or []):
-        # modkit 0.5.0: flag name is --mod-threshold (singular)
-        if ":" in str(mt):
-            flags += ["--mod-threshold", str(mt)]
+        if _is_set(mt) and ":" in str(mt):
+            flags += ["--mod-threshold", str(mt)]  # modkit 0.5.0
 
     # Modified base options
     for ign in (common.get("ignore") or []):
-        flags += ["--ignore", str(ign)]
-    if common.get("force_allow_implicit"): flags += ["--force-allow-implicit"]
+        if _is_set(ign):
+            flags += ["--ignore", str(ign)]
+    if _as_bool(common.get("force_allow_implicit")): flags += ["--force-allow-implicit"]
     for m in (common.get("motif") or []):
-        if ":" in str(m):
+        if _is_set(m) and ":" in str(m):
             motif, off = str(m).split(":", 1)
             flags += ["--motif", motif, str(off)]
-    if common.get("cpg"):                flags += ["--cpg"]
-    if common.get("ref_mask"):           flags += ["--mask"]
-    if common.get("combine_mods"):       flags += ["--combine-mods"]
-    if common.get("combine_strands"):    flags += ["--combine-strands"]
+    if _as_bool(common.get("cpg")):               flags += ["--cpg"]
+    if _as_bool(common.get("ref_mask")):          flags += ["--mask"]
+    if _as_bool(common.get("combine_mods")):      flags += ["--combine-mods"]
+    if _as_bool(common.get("combine_strands")):   flags += ["--combine-strands"]
 
     # Output
-    if common.get("only_tabs"):          flags += ["--only-tabs"]
-    if common.get("mixed_delim"):        flags += ["--mixed-delim"]
-    if common.get("bedgraph"):           flags += ["--bedgraph"]
-    if common.get("header"):             flags += ["--header"]
-    if common.get("prefix"):             flags += ["--prefix", str(common["prefix"])]
-    if common.get("suppress_progress"):  flags += ["--suppress-progress"]
+    if _as_bool(common.get("only_tabs")):         flags += ["--only-tabs"]
+    if _as_bool(common.get("mixed_delim")):       flags += ["--mixed-delim"]
+    if _as_bool(common.get("bedgraph")):          flags += ["--bedgraph"]
+    if _as_bool(common.get("header")):            flags += ["--header"]
+    if _is_set(common.get("prefix")):             flags += ["--prefix", str(common["prefix"])]
+    if _as_bool(common.get("suppress_progress", True)):
+        flags += ["--suppress-progress"]
 
     return flags
 
 # --- autodiscover BAMs/SAMPLES from a directory ---
-import os, glob
-
-# users can override these in config/config.yaml
 BAMS_DIR  = config.get("bams_dir", "../resources/test_bams/ALCAM_NHSL1_SERAC1_MXD1_RIOK3_reads")
 BAM_GLOB  = config.get("bam_glob", "*.bam")
 
@@ -86,8 +133,7 @@ def _discover_samples():
 
 SAMPLES = _discover_samples()
 
-# make these visible to included rule files
-# (assemble.smk expects BAMS_DIR, BAM_GLOB, SAMPLES)
+# expose for includes
 BAMS_DIR = BAMS_DIR
 BAM_GLOB = BAM_GLOB
 SAMPLES  = SAMPLES
@@ -103,20 +149,35 @@ include: "rules/test_diffs.smk"
 # --- final targets ---
 rule all:
     input:
+        # assemble outputs (unchanged)
         f"results/assemble/{config['prefix']}.gtf",
         f"results/assemble/{config['prefix']}_classification_summary.tsv",
         f"results/assemble/{config['prefix']}_tx_counts.tsv",
         f"results/assemble/{config['prefix']}_tx_counts.pca.png",
         f"results/assemble/{config['prefix']}_per_sample_stats.tsv",
+
+        # zt_tagged BAMs (unchanged)
         expand("results/assemble/zt_tagged/{sample}.zt_tagged.bam", sample=SAMPLES),
+
+        # ZN modkit pileups (unchanged targets for the directories)
         expand("results/modkit_zn/{sample}", sample=SAMPLES),
-        f"results/aggregate_zn/{config['prefix']}_sites_long.tsv",
-        f"results/aggregate_zn/{config['prefix']}__per_gene_mod",
+
+        # ZN aggregation — use FILTERED artifacts
+        f"results/aggregate_zn/{config['prefix']}_FILTERED_sites_long.tsv",
+        # require the per-gene tables directory for FILTERED
+        directory(f"results/aggregate_zn/{config['prefix']}_FILTERED__per_gene_mod"),
+
+        # ZT modkit pileups (unchanged targets for the directories)
         expand("results/modkit_zt/{sample}", sample=SAMPLES),
-        f"results/aggregate_zt/{config['prefix']}_long.tsv",
-        f"results/aggregate_zt/{config['prefix']}_frac_pivot.tsv",
-        f"results/aggregate_zt/{config['prefix']}_cov_pivot.tsv",
-        f"results/aggregate_zt/{config['prefix']}_Nmod_pivot.tsv",
+
+        # ZT aggregation — use FILTERED artifacts
+        f"results/aggregate_zt/{config['prefix']}_FILTERED_long.tsv",
+        f"results/aggregate_zt/{config['prefix']}_FILTERED_frac_pivot.tsv",
+        f"results/aggregate_zt/{config['prefix']}_FILTERED_cov_pivot.tsv",
+        f"results/aggregate_zt/{config['prefix']}_FILTERED_Nmod_pivot.tsv",
+
+        # Stoichiometry diffs — point at FILTERED ZN long table
         f"results/test_diffs/{config['prefix']}__ZN_site_diff_results.tsv",
         f"results/test_diffs/{config['prefix']}__figs"
+
 
