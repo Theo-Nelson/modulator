@@ -1,19 +1,33 @@
 # Configuration for modulator pipeline
 
-# Samples
-samples:
-  - HornerLab_M1pA_no_sample_id_20250213_1949_3B_PBC38951_2f55671c_pod5_5genes
-  - HornerLab_M2pA_no_sample_id_20250213_1949_3C_PBC17736_c6754256_pod5_5genes
-  - HornerLab_M3pA_no_sample_id_20250213_1950_3D_PBC17512_3a773761_pod5_5genes
-  - HornerLab_Z1pA_no_sample_id_20250213_1950_3E_PBC48691_3a030c77_pod5_5genes
-  - HornerLab_Z2pA_no_sample_id_20250213_1951_3F_PBC38885_f4e4aacc_pod5_5genes
-  - HornerLab_Z3pA_no_sample_id_20250213_1951_3G_PBC48550_1032943c_pod5_5genes
+bams_dir: "../resources/test_bams/ALCAM_NHSL1_SERAC1_MXD1_RIOK3_reads"  # <== point to your BAM dir
+bam_glob: "*.bam"                                                       # pattern to match BAMs
 
-# Reference files
 reference:
   fasta: nonexistant_genome.fa
   gtf:   nonexistant_annotation.gtf
 
+# assembler defaults (all overridable via --config assembler.<key>=val)
+assembler:
+  primary_only: true
+  min_mapq: 10
+  min_introns_read: 1
+  require_softclip3p: 0
+  apa_window: 20
+  tes_window: null
+  min_reads: 40
+  min_frac: 0.00
+  min_introns: 1
+  min_polya_length: 12
+  min_polya_purity: 0.5
+  polya_support_frac: 0.5
+  tes_match_tol: 25
+  exact_tes_tol: 10
+  write_zt_bams: false
+  write_zt_tagged_sample_bams: true
+  emit_modkit_manifest: false
+  min_reads_per_sample_for_mod: 5
+  min_total_reads_for_mod: 20
 
 # Mods and reference bases
 mods: ["17596", "a", "m", "17802", "69426", "19228", "19229", "19227"]

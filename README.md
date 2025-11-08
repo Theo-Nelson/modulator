@@ -1,11 +1,11 @@
 # modulator: Transcript-Specific Modification Calling for Nanopore Direct-RNA Sequencing Data
 
-A Snakemake pipeline for analyzing RNA modifications from BAM files.
+A Snakemake pipeline for analyzing RNA modifications from aligned BAM files.
 
 ## Installation
 
 1. Set up micromamba in your HPC environment: https://mamba.readthedocs.io/en/latest/installation/micromamba-installation.html
-2. Set up a custom micromamba environment for modulator: `micromamba create -y -n modulator -c conda-forge -c bioconda python=3.13.7 pandas=2.3.3 numpy=2.3.3 matplotlib=3.10.6 pysam=0.23.3 samtools=1.22.1 scipy snakemake`  
+2. Set up a custom micromamba environment for modulator: `micromamba create -y -n modulator -c conda-forge -c bioconda python=3.13.7 pandas=2.3.3 numpy=2.3.3 matplotlib=3.10.6 pysam=0.23.3 samtools=1.22.1 scipy snakemake ont-modkit=0.5.0`  
 3. Activate the environment: `micromamba activate modulator`
 4. Clone the repository: `git clone https://github.com/Theo-Nelson/modulator.git`
 5. Configure `config/config.yaml` with your samples and references.
@@ -62,6 +62,44 @@ snakemake -j 8 \
                 emit_modkit_manifest: false,
                 min_reads_per_sample_for_mod: 5,
                 min_total_reads_for_mod: 20}' \
+    modkit='{common: {
+                log_file_template: "results/{which}/{sample}.log",
+                region: null,
+                max_depth: 1000,
+                include_bed: null,
+                include_unmapped: false,
+                edge_filter: null,
+                invert_edge_filter: false,
+                threads: "{threads}",
+                interval_size: 100000,
+                queue_size: 1000,
+                chunk_size: null,
+                num_reads: 10042,
+                sampling_frac: null,
+                seed: null,
+                sample_region: null,
+                sampling_interval_size: 1000000,
+                no_filtering: false,
+                # Choose ONE of the following; thresholds win if present:
+                # filter_percentile: 0.1,
+                filter_thresholds: ["A:0.8","C:0.8","G:0.8","T:0.8"],
+                mod_thresholds: ["17596:0.99","a:0.99","m:0.99","17802:0.99","69426:0.99","19228:0.99","19229:0.99","19227:0.99"],
+                ignore: [],
+                force_allow_implicit: false,
+                motif: [],
+                cpg: false,
+                ref_mask: false,
+                combine_mods: false,
+                combine_strands: false,
+                mixed_delim: false,
+                only_tabs: false,
+                bedgraph: false,
+                header: false,
+                prefix: null,
+                suppress_progress: true
+             },
+             zn: { partition_tag: "ZN", per_mod_bed: true },
+             zt: { partition_tag: "ZT" }}' \
   --rerun-incomplete --printshellcmds
 ```
 
@@ -96,6 +134,54 @@ A few notes on how these parameters cooperate:
 - **TES logic:** `tes_window` (if not `null`) overrides `apa_window` for 3′ end clustering.  
 - **Poly(A) evidence:** A read provides poly(A/T) support if its 3′ soft-clip length ≥ `min_polya_length` **and** purity ≥ `min_polya_purity`.  
 - **Filtering:** Isoforms must pass *all* filters (`min_reads`, `min_frac`, `min_introns`, `polya_support_frac`) to be retained.  
+
+### Modkit Parameters
+
+The following table explains the different parameter functions available for modkit, which map to the parameters in the ONT's [Advanced Usage Guide](https://github.com/nanoporetech/modkit/blob/master/book/src/advanced_usage.md). 
+
+| Key | Type | Default | Range/Options | Maps to |
+|---|---|---:|---|---|
+| `log_file_template` | str | `"results/{which}/{sample}.log"` | any path | `--log-filepath` |
+| `region` | str/null | `null` | `chr`, `chr:start-end` | `--region` |
+| `max_depth` | int | `1000` | `1–2,147,483,647` | `--max-depth` |
+| `include_bed` | str/null | `null` | path | `--include-bed` |
+| `include_unmapped` | bool | `false` | `true/false` | `--include-unmapped` |
+| `edge_filter` | str/int/null | `null` | `N` or `"N,M"` | `--edge-filter` |
+| `invert_edge_filter` | bool | `false` | `true/false` | `--invert-edge-filter` |
+| `threads` | int/str | `"{threads}"` | `1+` | `-t/--threads` |
+| `interval_size` | int | `100000` | `1+` | `--interval-size` |
+| `queue_size` | int | `1000` | `1+` | `--queue-size` |
+| `chunk_size` | int/null | `null` | `1+` | `--chunk-size` |
+| `num_reads` | int | `10042` | `1+` | `--num-reads` |
+| `sampling_frac` | float/null | `null` | `0–1` | `--sampling-frac` |
+| `seed` | int/null | `null` | any int | `--seed` |
+| `sample_region` | str/null | `null` | `chr`/`chr:start-end` | `--sample-region` |
+| `sampling_interval_size` | int | `1000000` | `1+` | `--sampling-interval-size` |
+| `no_filtering` | bool | `false` | `true/false` | `--no-filtering` |
+| `filter_percentile` | float/null | (off) | `0–1` | `--filter-percentile` |
+| `filter_thresholds` | list[str] | `["A:0.8","C:0.8","G:0.8","T:0.8"]` | per-base | `--filter-threshold` (repeatable) |
+| `mod_thresholds` | list[str] | eight bases at `0.99` | per-mod | `--mod-threshold` (repeatable) |
+| `ignore` | list[str] | `[]` | e.g., `["h"]` | `--ignore` (repeatable) |
+| `force_allow_implicit` | bool | `false` | `true/false` | `--force-allow-implicit` |
+| `motif` | list[str] | `[]` | e.g., `["CG:0","CGCG:2"]` | `--motif <motif> <offset>` (repeatable) |
+| `cpg` | bool | `false` | `true/false` | `--cpg` |
+| `ref_mask` | bool | `false` | `true/false` | `--mask` |
+| `combine_mods` | bool | `false` | `true/false` | `--combine-mods` |
+| `combine_strands` | bool | `false` | `true/false` | `--combine-strands` |
+| `mixed_delim` | bool | `false` | `true/false` | `--mixed-delim` |
+| `only_tabs` | bool | `false` | `true/false` | `--only-tabs` |
+| `bedgraph` | bool | `false` | `true/false` | `--bedgraph` |
+| `header` | bool | `false` | `true/false` | `--header` |
+| `prefix` | str/null | `null` | any | `--prefix` (bedGraph mode) |
+| `suppress_progress` | bool | `true` | `true/false` | `--suppress-progress` |
+
+These partition tags are hard-coded into the pipeline to split reads according to their transcript assignments. 
+
+| Section | Key | Default | Meaning |
+|---|---|---:|---|
+| `zn` | `partition_tag` | `"ZN"` | Partition by ZN (transcript index per gene) |
+| `zn` | `per_mod_bed` | `true` | Emit one BED per mod (pipeline behavior) |
+| `zt` | `partition_tag` | `"ZT"` | Partition by ZT (gene+tx human-readable code) |
 
 ## Outputs
 
