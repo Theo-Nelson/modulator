@@ -156,6 +156,8 @@ The parameters below control how *modulator* aggregates **ZN** (per-transcript i
 
 ## Outputs
 
+### Assembly Outputs
+
 - **Tagging:**  
   - `ZN`: transcript index within gene (1..k)  
   - `ZG`: gene index (run deterministic)  
@@ -166,7 +168,20 @@ The parameters below control how *modulator* aggregates **ZN** (per-transcript i
   - `<prefix>_tx_counts.pca.png`: PCA of samples (log1p counts)  
   - `<prefix>_per_sample_stats.tsv`: summary per sample (reads, transcripts, median per transcript)  
   - `zt_tagged/*.bam`: one tagged BAM per sample  
-  - `zt_bams/*.bam`: per-transcript BAMs (optional) 
+  - `zt_bams/*.bam`: per-transcript BAMs (optional)
+
+### Modkit Outputs
+
+### Aggregation Outputs
+ 
+- **ZN**:  
+  - `{out_prefix}_RAW_sites_long.tsv` and `{out_prefix}_FILTERED_sites_long.tsv`  
+  - `{out_prefix}_RAW__per_gene_mod/` and `{out_prefix}_FILTERED__per_gene_mod/` (pivoted and/or per‑gene files)
+- **ZT**:  
+  - `{out_prefix}_RAW_long.tsv`, `{out_prefix}_RAW_*_pivot.tsv`  
+  - `{out_prefix}_FILTERED_long.tsv`, `{out_prefix}_FILTERED_*_pivot.tsv`
+
+> **Note**: *FILTERED* long tables still include every ZN/sample row at kept sites, preserving per‑transcript stoichiometries while removing entire sites that fail across all rows.
 
 ## Citation
 
