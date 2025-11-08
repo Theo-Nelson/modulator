@@ -80,8 +80,6 @@ snakemake -j 8 \
                 sample_region: null,
                 sampling_interval_size: 1000000,
                 no_filtering: false,
-                # Choose ONE of the following; thresholds win if present:
-                # filter_percentile: 0.1,
                 filter_thresholds: ["A:0.8","C:0.8","G:0.8","T:0.8"],
                 mod_thresholds: ["17596:0.99","a:0.99","m:0.99","17802:0.99","69426:0.99","19228:0.99","19229:0.99","19227:0.99"],
                 ignore: [],
