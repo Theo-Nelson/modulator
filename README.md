@@ -150,11 +150,9 @@ The parameters below control how *modulator* aggregates **ZN** (per-transcript i
 | `write_pivots`             | bool    | `true`  | `true`/`false`           | ZN, ZT | Emit per‑gene × mod pivoted tables (coverage, fraction, Nmod). |
 | `write_raw_per_gene`       | bool    | `false` | `true`/`false`           | ZN     | Also write per‑gene tables for *RAW*. |
 | `write_filtered_per_gene`  | bool    | `true`  | `true`/`false`           | ZN     | Also write per‑gene tables for *FILTERED*. |
-| `min_cov`                  | int     | `5`¹    | `0–20`                   | ZN, ZT | If `Nvalid_cov < min_cov`, set `frac_modified = 0` (row kept). Does **not** affect pass/fail. |
+| `min_cov`                  | int     | `0`     | `0–20`                   | ZN, ZT | If `Nvalid_cov < min_cov`, set `frac_modified = 0` (row kept). Does **not** affect pass/fail. |
 | `out_prefix`               | str     | —       | path                     | ZN, ZT | Prefix for all output files (both RAW and FILTERED variants). |
 | `gtf`                      | path    | —       | path to GTF              | ZN     | GTF used to map sites → genes (union-of-exons span per gene). |
-
-¹ **Default in CLI** is `0`; the pipeline commonly sets `min_cov=5` via `--config min_cov=5`.
 
 ## Outputs
 
