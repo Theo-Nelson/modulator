@@ -158,7 +158,7 @@ The parameters below control how *modulator* aggregates **ZN** (per-transcript i
 
 ### Assembly Outputs
 
-- **Tagging:**  
+- **Within-Bam File Tagging:**  
   - `ZN`: transcript index within gene (1..k)  
   - `ZG`: gene index (run deterministic)  
   - `ZT`: string label of the form `"gene_name.gene_id.G{ZG}.T{ZN}"`  
