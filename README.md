@@ -43,61 +43,10 @@ snakemake -j 8 \
     min_cov=5 \
     min_cov_test=20 \
     topk=10 \
-    assembler='{primary_only: true,
-                min_mapq: 10,
-                min_introns_read: 1,
-                require_softclip3p: 0,
-                apa_window: 20,
-                tes_window: null,
-                min_reads: 40,
-                min_frac: 0.00,
-                min_introns: 1,
-                min_polya_length: 12,
-                min_polya_purity: 0.5,
-                polya_support_frac: 0.5,
-                tes_match_tol: 25,
-                exact_tes_tol: 10,
-                write_zt_bams: false,
-                write_zt_tagged_sample_bams: true,
-                emit_modkit_manifest: false,
-                min_reads_per_sample_for_mod: 5,
-                min_total_reads_for_mod: 20}' \
-    modkit='{common: {
-                log_file_template: "results/{which}/{sample}.log",
-                region: null,
-                max_depth: 1000,
-                include_bed: null,
-                include_unmapped: false,
-                edge_filter: null,
-                invert_edge_filter: false,
-                threads: "{threads}",
-                interval_size: 100000,
-                queue_size: 1000,
-                chunk_size: null,
-                num_reads: 10042,
-                sampling_frac: null,
-                seed: null,
-                sample_region: null,
-                sampling_interval_size: 1000000,
-                no_filtering: false,
-                filter_thresholds: ["A:0.8","C:0.8","G:0.8","T:0.8"],
-                mod_thresholds: ["17596:0.99","a:0.99","m:0.99","17802:0.99","69426:0.99","19228:0.99","19229:0.99","19227:0.99"],
-                ignore: [],
-                force_allow_implicit: false,
-                motif: [],
-                cpg: false,
-                ref_mask: false,
-                combine_mods: false,
-                combine_strands: false,
-                mixed_delim: false,
-                only_tabs: false,
-                bedgraph: false,
-                header: false,
-                prefix: null,
-                suppress_progress: true
-             },
-             zn: { partition_tag: "ZN", per_mod_bed: true },
-             zt: { partition_tag: "ZT" }}' \
+    assembler='{"primary_only": true, "min_mapq": 10, "min_introns_read": 1, "require_softclip3p": 0, "apa_window": 20, "tes_window": null, "min_reads": 40, "min_frac": 0.0, "min_introns": 1, "min_polya_length": 12, "min_polya_purity": 0.5, "polya_support_frac": 0.5, "tes_match_tol": 25, "exact_tes_tol": 10, "write_zt_bams": false, "write_zt_tagged_sample_bams": true, "emit_modkit_manifest": false, "min_reads_per_sample_for_mod": 5, "min_total_reads_for_mod": 20}' \
+    modkit='{"common": {"log_file_template": "results/{which}/{sample}.log", "region": null, "max_depth": 1000, "include_bed": null, "include_unmapped": false, "edge_filter": null, "invert_edge_filter": false, "threads": "{threads}", "interval_size": 100000, "queue_size": 1000, "chunk_size": null, "num_reads": 10042, "sampling_frac": null, "seed": null, "sample_region": null, "sampling_interval_size": 1000000, "no_filtering": false, "filter_thresholds": ["A:0.8","C:0.8","G:0.8","T:0.8"], "mod_thresholds": ["17596:0.99","a:0.99","m:0.99","17802:0.99","69426:0.99","19228:0.99","19229:0.99","19227:0.99"], "ignore": [], "force_allow_implicit": false, "motif": [], "cpg": false, "ref_mask": false, "combine_mods": false, "combine_strands": false, "mixed_delim": false, "only_tabs": false, "bedgraph": false, "header": false, "prefix": null, "suppress_progress": true}, "zn": {"partition_tag": "ZN", "per_mod_bed": true}, "zt": {"partition_tag": "ZT"}}' \
+    aggregation='{"zn": {"filter_enable": true, "count_diff_factor": 3, "mod_fail_margin": 1, "emit_raw": true, "emit_filtered": true, "write_long": true, "write_pivots": true, "write_raw_per_gene": true, "write_filtered_per_gene": true}, "zt": {"filter_enable": true, "count_diff_factor": 3, "mod_fail_margin": 1, "emit_raw": true, "emit_filtered": true, "write_long": true, "write_pivots": true}}' \
+    toggles='{"enable_zn_pileup": true, "enable_zt_pileup": true, "enable_zn_aggregate": true, "enable_zt_aggregate": true}' \
   --rerun-incomplete --printshellcmds
 ```
 
@@ -180,6 +129,32 @@ These partition tags are hard-coded into the pipeline to split reads according t
 | `zn` | `partition_tag` | `"ZN"` | Partition by ZN (transcript index per gene) |
 | `zn` | `per_mod_bed` | `true` | Emit one BED per mod (pipeline behavior) |
 | `zt` | `partition_tag` | `"ZT"` | Partition by ZT (gene+tx human-readable code) |
+
+### Aggregation Parameters
+
+The parameters below control how *modulator* aggregates **ZN** (per-transcript index) and **ZT** (per-transcript code) modkit bedMethyl outputs into long tables and per‑gene/per‑mod pivots.
+
+> **Site keeping rule (when `filter_enable` is true):**  
+> A row **fails** if `(Ndiff > count_diff_factor * Nvalid_cov)` **or** `(Nmod <= Nfail + mod_fail_margin)`.  
+> A **site is kept** in *FILTERED* outputs if **any** row at that site passes (considering all samples and transcripts). **When a site is kept, _all rows_ for that site are retained** (i.e., you keep every ZN/sample line for that genomic position+mod).  
+> `min_cov` affects only the displayed `frac_modified` (set to 0 when `Nvalid_cov < min_cov`) and **does not** influence pass/fail logic.
+
+| Parameter                   | Type    | Default | Typical Range / Options | Scope | Description |
+|----------------------------|---------|---------|--------------------------|-------|-------------|
+| `filter_enable`            | bool    | `true`  | `true`/`false`           | ZN, ZT | Enable site-level filtering using the rule above. |
+| `count_diff_factor`        | float   | `3.0`   | `1–10`                   | ZN, ZT | Threshold factor for the `Ndiff` term in the fail rule. |
+| `mod_fail_margin`          | int     | `1`     | `0–5`                    | ZN, ZT | Additional margin on `Nfail` for the `Nmod` fail rule. |
+| `emit_raw`                 | bool    | `true`  | `true`/`false`           | ZN, ZT | Write *RAW* outputs (pre-filter). |
+| `emit_filtered`            | bool    | `true`  | `true`/`false`           | ZN, ZT | Write *FILTERED* outputs (site-kept logic). |
+| `write_long`               | bool    | `true`  | `true`/`false`           | ZN, ZT | Emit the long TSV (one row per site × sample × transcript × mod). |
+| `write_pivots`             | bool    | `true`  | `true`/`false`           | ZN, ZT | Emit per‑gene × mod pivoted tables (coverage, fraction, Nmod). |
+| `write_raw_per_gene`       | bool    | `false` | `true`/`false`           | ZN     | Also write per‑gene tables for *RAW*. |
+| `write_filtered_per_gene`  | bool    | `true`  | `true`/`false`           | ZN     | Also write per‑gene tables for *FILTERED*. |
+| `min_cov`                  | int     | `5`¹    | `0–20`                   | ZN, ZT | If `Nvalid_cov < min_cov`, set `frac_modified = 0` (row kept). Does **not** affect pass/fail. |
+| `out_prefix`               | str     | —       | path                     | ZN, ZT | Prefix for all output files (both RAW and FILTERED variants). |
+| `gtf`                      | path    | —       | path to GTF              | ZN     | GTF used to map sites → genes (union-of-exons span per gene). |
+
+¹ **Default in CLI** is `0`; the pipeline commonly sets `min_cov=5` via `--config min_cov=5`.
 
 ## Outputs
 
