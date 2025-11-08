@@ -1,13 +1,12 @@
 # Configuration for modulator pipeline
 
-bams_dir: "../resources/test_bams/ALCAM_NHSL1_SERAC1_MXD1_RIOK3_reads"  # <== point to your BAM dir
-bam_glob: "*.bam"                                                       # pattern to match BAMs
+bams_dir: "../resources/test_bams/ALCAM_NHSL1_SERAC1_MXD1_RIOK3_reads"
+bam_glob: "*.bam"
 
 reference:
   fasta: nonexistant_genome.fa
   gtf:   nonexistant_annotation.gtf
 
-# assembler defaults (all overridable via --config assembler.<key>=val)
 assembler:
   primary_only: true
   min_mapq: 10
@@ -29,7 +28,6 @@ assembler:
   min_reads_per_sample_for_mod: 5
   min_total_reads_for_mod: 20
 
-# --- modkit global options (common to ZN and ZT) ---
 modkit:
   common:
     log_file_template: "results/{which}/{sample}.log"
@@ -70,23 +68,55 @@ modkit:
   zt:
     partition_tag: "ZT"
 
-# Mods and reference bases
+toggles:
+  enable_zn_pileup: true
+  enable_zt_pileup: true
+  enable_zn_aggregate: true
+  enable_zt_aggregate: true
+
+# NEW: authoritative home for aggregation options
+aggregation:
+  zn:
+    filter_enable: true
+    count_diff_factor: 3
+    mod_fail_margin: 1
+    emit_raw: true
+    emit_filtered: true
+    write_long: true
+    write_pivots: true
+    write_raw_per_gene: true           # (ZN only)
+    write_filtered_per_gene: true      # (ZN only)
+  zt:
+    filter_enable: true
+    count_diff_factor: 3
+    mod_fail_margin: 1
+    emit_raw: true
+    emit_filtered: true
+    write_long: true
+    write_pivots: true
+
+# legacy keys kept for compatibility (ignored if aggregation.* is set)
+aggregate_outputs:
+  emit_raw: true
+  emit_filtered: true
+  write_long: true
+  write_pivots: true
+  write_raw_per_gene_tables: true
+  write_filtered_per_gene_tables: true
+
+filters:
+  enable_site_filter: true
+  count_diff_factor: 3
+  mod_fail_margin: 1
+
 mods: ["17596", "a", "m", "17802", "69426", "19228", "19229", "19227"]
 ref_bases: ["A", "A", "C", "T", "A", "C", "G", "T"]
 
-# Threads
 threads: 64
-
-# Prefix for outputs
 prefix: "fivegenes_readbacked_annot"
 
-# Assembly filters (relaxed for test data)
 min_reads: 1
-min_frac: 0.0001
-
-# Minimum coverage
+min_frac: 0.00
 min_cov: 5
 min_cov_test: 20
-
-# Top k for plots
 topk: 10
