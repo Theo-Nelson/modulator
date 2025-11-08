@@ -5,32 +5,27 @@ rule modkit_pileup_zt:
     output:
         bed_dir = directory("results/modkit_zt/{sample}")
     params:
-        mods = config["mods"],
-        ref_bases = config["ref_bases"],
-        threads = config["threads"],
-        modkit_bin = "../bin/modkit"
+        common = MODKIT_CFG.get("common", {}),
+        zt_cfg = MODKIT_CFG.get("zt", {})
     conda:
         "../envs/modulator.yaml"
-    shell:
-        """
-        {params.modkit_bin} pileup {input.bam} {output.bed_dir} \
-            --ref {input.ref} \
-            --filter-threshold A:0.8 \
-            --filter-threshold C:0.8 \
-            --filter-threshold G:0.8 \
-            --filter-threshold T:0.8 \
-            --mod-thresholds 17596:0.99 \
-            --mod-thresholds a:0.99 \
-            --mod-thresholds m:0.99 \
-            --mod-thresholds 17802:0.99 \
-            --mod-thresholds 69426:0.99 \
-            --mod-thresholds 19228:0.99 \
-            --mod-thresholds 19229:0.99 \
-            --mod-thresholds 19227:0.99 \
-            --log-filepath results/modkit_zt/{wildcards.sample}.log \
-            --max-depth 1000 \
-            --interval-size 100000 \
-            --prefix {wildcards.sample} \
-            --partition-tag ZT \
-            -t {params.threads}
-        """
+    run:
+        import os, shlex
+        os.makedirs(output.bed_dir, exist_ok=True)
+
+        flags = _as_flags_from_common(params.common, sample=wildcards.sample, which="modkit_zt")
+
+        # partition tag (ZT)
+        ptag = params.zt_cfg.get("partition_tag", "ZT")
+        flags = flags + ["--partition-tag", ptag]
+
+        cmd = (
+            ["modkit", "pileup",
+             shlex.quote(input.bam),
+             shlex.quote(output.bed_dir),
+             "--ref", shlex.quote(input.ref)]
+            + flags
+        )
+
+        shell(" ".join(cmd))
+

@@ -4,6 +4,75 @@ REF_GTF = config.get("reference_gtf", config.get("reference", {}).get("gtf"))
 
 configfile: "../config/config.yaml"
 
+MODKIT_CFG = config.get("modkit", {})
+
+def _as_flags_from_common(common, sample, which):
+    """Render modkit flags from config['modkit']['common'] for a given sample and which = 'modkit_zn'|'modkit_zt'."""
+    flags = []
+
+    # Logging
+    log_tmpl = common.get("log_file_template")
+    if log_tmpl:
+        flags += ["--log-filepath", log_tmpl.format(sample=sample, which=which)]
+
+    # Selection
+    if common.get("region"):             flags += ["--region", str(common["region"])]
+    if common.get("max_depth") is not None:
+        flags += ["--max-depth", str(common["max_depth"])]
+    if common.get("include_bed"):        flags += ["--include-bed", common["include_bed"]]
+    if common.get("include_unmapped"):   flags += ["--include-unmapped"]
+    if common.get("edge_filter"):        flags += ["--edge-filter", str(common["edge_filter"])]
+    if common.get("invert_edge_filter"): flags += ["--invert-edge-filter"]
+
+    # Compute
+    threads_val = str(common.get("threads", "{threads}")).replace("{threads}", str(config.get("threads", 4)))
+    if threads_val:                      flags += ["-t", threads_val]
+    if common.get("interval_size"):      flags += ["--interval-size", str(common["interval_size"])]
+    if common.get("queue_size"):         flags += ["--queue-size", str(common["queue_size"])]
+    if common.get("chunk_size"):         flags += ["--chunk-size", str(common["chunk_size"])]
+
+    # Sampling
+    if common.get("num_reads"):          flags += ["--num-reads", str(common["num_reads"])]
+    if common.get("sampling_frac"):      flags += ["--sampling-frac", str(common["sampling_frac"])]
+    if common.get("seed") is not None:   flags += ["--seed", str(common["seed"])]
+    if common.get("sample_region"):      flags += ["--sample-region", str(common["sample_region"])]
+    if common.get("sampling_interval_size"):
+        flags += ["--sampling-interval-size", str(common["sampling_interval_size"])]
+
+    # Filtering
+    if common.get("no_filtering"):       flags += ["--no-filtering"]
+    if common.get("filter_percentile") is not None:
+        flags += ["--filter-percentile", str(common["filter_percentile"])]
+    for ft in (common.get("filter_thresholds") or []):
+        flags += ["--filter-threshold", str(ft)]
+    for mt in (common.get("mod_thresholds") or []):
+        # modkit 0.5.0: flag name is --mod-threshold (singular)
+        if ":" in str(mt):
+            flags += ["--mod-threshold", str(mt)]
+
+    # Modified base options
+    for ign in (common.get("ignore") or []):
+        flags += ["--ignore", str(ign)]
+    if common.get("force_allow_implicit"): flags += ["--force-allow-implicit"]
+    for m in (common.get("motif") or []):
+        if ":" in str(m):
+            motif, off = str(m).split(":", 1)
+            flags += ["--motif", motif, str(off)]
+    if common.get("cpg"):                flags += ["--cpg"]
+    if common.get("ref_mask"):           flags += ["--mask"]
+    if common.get("combine_mods"):       flags += ["--combine-mods"]
+    if common.get("combine_strands"):    flags += ["--combine-strands"]
+
+    # Output
+    if common.get("only_tabs"):          flags += ["--only-tabs"]
+    if common.get("mixed_delim"):        flags += ["--mixed-delim"]
+    if common.get("bedgraph"):           flags += ["--bedgraph"]
+    if common.get("header"):             flags += ["--header"]
+    if common.get("prefix"):             flags += ["--prefix", str(common["prefix"])]
+    if common.get("suppress_progress"):  flags += ["--suppress-progress"]
+
+    return flags
+
 # --- autodiscover BAMs/SAMPLES from a directory ---
 import os, glob
 

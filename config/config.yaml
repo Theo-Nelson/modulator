@@ -29,6 +29,47 @@ assembler:
   min_reads_per_sample_for_mod: 5
   min_total_reads_for_mod: 20
 
+# --- modkit global options (common to ZN and ZT) ---
+modkit:
+  common:
+    log_file_template: "results/{which}/{sample}.log"
+    region: null
+    max_depth: 1000
+    include_bed: null
+    include_unmapped: false
+    edge_filter: null
+    invert_edge_filter: false
+    threads: "{threads}"
+    interval_size: 100000
+    queue_size: 1000
+    chunk_size: null
+    num_reads: 10042
+    sampling_frac: null
+    seed: null
+    sample_region: null
+    sampling_interval_size: 1000000
+    no_filtering: false
+    filter_thresholds: ["A:0.8","C:0.8","G:0.8","T:0.8"]
+    mod_thresholds: ["17596:0.99","a:0.99","m:0.99","17802:0.99","69426:0.99","19228:0.99","19229:0.99","19227:0.99"]
+    ignore: []
+    force_allow_implicit: false
+    motif: []
+    cpg: false
+    ref_mask: false
+    combine_mods: false
+    combine_strands: false
+    mixed_delim: false
+    only_tabs: false
+    bedgraph: false
+    header: false
+    prefix: null
+    suppress_progress: true
+  zn:
+    partition_tag: "ZN"
+    per_mod_bed: true
+  zt:
+    partition_tag: "ZT"
+
 # Mods and reference bases
 mods: ["17596", "a", "m", "17802", "69426", "19228", "19229", "19227"]
 ref_bases: ["A", "A", "C", "T", "A", "C", "G", "T"]
