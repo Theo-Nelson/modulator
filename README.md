@@ -80,8 +80,6 @@ snakemake -j 8 \
                 sample_region: null,
                 sampling_interval_size: 1000000,
                 no_filtering: false,
-                # Choose ONE of the following; thresholds win if present:
-                # filter_percentile: 0.1,
                 filter_thresholds: ["A:0.8","C:0.8","G:0.8","T:0.8"],
                 mod_thresholds: ["17596:0.99","a:0.99","m:0.99","17802:0.99","69426:0.99","19228:0.99","19229:0.99","19227:0.99"],
                 ignore: [],
@@ -158,7 +156,7 @@ The following table explains the different parameter functions available for mod
 | `sample_region` | str/null | `null` | `chr`/`chr:start-end` | `--sample-region` |
 | `sampling_interval_size` | int | `1000000` | `1+` | `--sampling-interval-size` |
 | `no_filtering` | bool | `false` | `true/false` | `--no-filtering` |
-| `filter_percentile` | float/null | (off) | `0–1` | `--filter-percentile` |
+| `filter_percentile` | float/null | (not an option in modulator) | `0–1` | `--filter-percentile` |
 | `filter_thresholds` | list[str] | `["A:0.8","C:0.8","G:0.8","T:0.8"]` | per-base | `--filter-threshold` (repeatable) |
 | `mod_thresholds` | list[str] | eight bases at `0.99` | per-mod | `--mod-threshold` (repeatable) |
 | `ignore` | list[str] | `[]` | e.g., `["h"]` | `--ignore` (repeatable) |
