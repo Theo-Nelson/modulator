@@ -40,7 +40,7 @@ snakemake -j 8 \
     threads=64 \
     mods='["17596","a","m","17802","69426","19228","19229","19227"]' \
     ref_bases='["A","A","C","T","A","C","G","T"]' \
-    min_cov=5 \
+    min_cov=0 \
     min_cov_test=20 \
     topk=10 \
     assembler='{primary_only: true,
@@ -98,6 +98,29 @@ snakemake -j 8 \
              },
              zn: { partition_tag: "ZN", per_mod_bed: true },
              zt: { partition_tag: "ZT" }}' \
+    aggregation='{zn: { filter_enable: true,
+                        count_diff_factor: 3,
+                        mod_fail_margin: 1,
+                        emit_raw: true,
+                        emit_filtered: true,
+                        write_long: true,
+                        write_pivots: true,
+                        write_raw_per_gene: true,
+                        write_filtered_per_gene: true },
+                  zt: { filter_enable: true,
+                        count_diff_factor: 3,
+                        mod_fail_margin: 1,
+                        emit_raw: true,
+                        emit_filtered: true,
+                        write_long: true,
+                        write_pivots: true }}' \
+    test_diffs='{min_cov: 20,
+                 topk: 10,
+                 test: "auto",
+                 pseudocount: 0.5,
+                 alternative: "two-sided",
+                 gene_filter: null,
+                 mod_filter: null}' \
   --rerun-incomplete --printshellcmds
 ```
 
@@ -181,9 +204,51 @@ These partition tags are hard-coded into the pipeline to split reads according t
 | `zn` | `per_mod_bed` | `true` | Emit one BED per mod (pipeline behavior) |
 | `zt` | `partition_tag` | `"ZT"` | Partition by ZT (gene+tx human-readable code) |
 
+### Aggregation Parameters
+
+The parameters below control how *modulator* aggregates **ZN** (per-transcript index) and **ZT** (per-transcript code) modkit bedMethyl outputs into long tables and per‑gene/per‑mod pivots.
+
+> **Site keeping rule (when `filter_enable` is true):**  
+> A row **fails** if `(Ndiff > count_diff_factor * Nvalid_cov)` **or** `(Nmod <= Nfail + mod_fail_margin)`.  
+> A **site is kept** in *FILTERED* outputs if **any** row at that site passes (considering all samples and transcripts). **When a site is kept, _all rows_ for that site are retained** (i.e., you keep every ZN/sample line for that genomic position+mod).  
+> `min_cov` affects only the displayed `frac_modified` (set to 0 when `Nvalid_cov < min_cov`) and **does not** influence pass/fail logic.
+
+| Parameter                   | Type    | Default | Typical Range / Options | Scope | Description |
+|----------------------------|---------|---------|--------------------------|-------|-------------|
+| `filter_enable`            | bool    | `true`  | `true`/`false`           | ZN, ZT | Enable site-level filtering using the rule above. |
+| `count_diff_factor`        | float   | `3.0`   | `1–10`                   | ZN, ZT | Threshold factor for the `Ndiff` term in the fail rule. |
+| `mod_fail_margin`          | int     | `1`     | `0–5`                    | ZN, ZT | Additional margin on `Nfail` for the `Nmod` fail rule. |
+| `emit_raw`                 | bool    | `true`  | `true`/`false`           | ZN, ZT | Write *RAW* outputs (pre-filter). |
+| `emit_filtered`            | bool    | `true`  | `true`/`false`           | ZN, ZT | Write *FILTERED* outputs (site-kept logic). |
+| `write_long`               | bool    | `true`  | `true`/`false`           | ZN, ZT | Emit the long TSV (one row per site × sample × transcript × mod). |
+| `write_pivots`             | bool    | `true`  | `true`/`false`           | ZN, ZT | Emit per‑gene × mod pivoted tables (coverage, fraction, Nmod). |
+| `write_raw_per_gene`       | bool    | `false` | `true`/`false`           | ZN     | Also write per‑gene tables for *RAW*. |
+| `write_filtered_per_gene`  | bool    | `true`  | `true`/`false`           | ZN     | Also write per‑gene tables for *FILTERED*. |
+| `min_cov`                  | int     | `0`     | `0–20`                   | ZN, ZT | If `Nvalid_cov < min_cov`, set `frac_modified = 0` (row kept). Does **not** affect pass/fail. |
+| `out_prefix`               | str     | —       | path                     | ZN, ZT | Prefix for all output files (both RAW and FILTERED variants). |
+| `gtf`                      | path    | —       | path to GTF              | ZN     | GTF used to map sites → genes (union-of-exons span per gene). |
+
+### Differential Site-Level Per-Transcript Within Locus Test Parameters
+
+These parameters allow for the identification of sites with differences across transcripts within the same gene locus. 
+
+| Key | Type | Default | Description |
+|---|---|---|---|
+| `test_diffs.min_cov` | int | `20` | Minimum **pooled** coverage per ZN at a site to include that ZN in testing. A site is tested only if ≥2 ZN pass. (This mirrors `min_cov_test`.) |
+| `test_diffs.topk` | int | `10` | Number of top sites to plot as figures. |
+| `test_diffs.test` | str | `"auto"` | `"auto"` chooses Fisher (2×2) or Chi-square (r×2) automatically; `"fisher"` forces Fisher (requires exactly 2 ZN); `"chi2"` forces Chi-square for any r≥2. |
+| `test_diffs.pseudocount` | float | `0.5` | Pseudocount added to each cell for Chi-square stability (ignored for Fisher). |
+| `test_diffs.alternative` | str | `"two-sided"` | Fisher alternative hypothesis: `"two-sided"`, `"greater"`, or `"less"`. |
+| `test_diffs.gene_filter` | list[str] / null | `null` | Optional gene_name whitelist. |
+| `test_diffs.mod_filter` | list[str] / null | `null` | Optional mod_code whitelist (e.g., `["a","m"]`). |
+
+**How the test works:** For each site `(gene_name, mod_code, chrom, start0, end0, strand)`, counts are **pooled across samples** within each ZN: `Ncov = Σ Nvalid_cov`, `Nmod = Σ Nmod`, `Nunmod = Ncov − Nmod`. Build a contingency table (rows=ZN, cols=[Nmod, Nunmod]) and test differences in stoichiometry across ZN; adjust p-values with Benjamini–Hochberg (`p_adj_bh`).
+
 ## Outputs
 
-- **Tagging:**  
+### Assembly Outputs
+
+- **Within-Bam File Tagging:**  
   - `ZN`: transcript index within gene (1..k)  
   - `ZG`: gene index (run deterministic)  
   - `ZT`: string label of the form `"gene_name.gene_id.G{ZG}.T{ZN}"`  
@@ -193,7 +258,20 @@ These partition tags are hard-coded into the pipeline to split reads according t
   - `<prefix>_tx_counts.pca.png`: PCA of samples (log1p counts)  
   - `<prefix>_per_sample_stats.tsv`: summary per sample (reads, transcripts, median per transcript)  
   - `zt_tagged/*.bam`: one tagged BAM per sample  
-  - `zt_bams/*.bam`: per-transcript BAMs (optional) 
+  - `zt_bams/*.bam`: per-transcript BAMs (optional)
+
+### Modkit Outputs
+
+### Aggregation Outputs
+ 
+- **ZN**:  
+  - `{out_prefix}_RAW_sites_long.tsv` and `{out_prefix}_FILTERED_sites_long.tsv`  
+  - `{out_prefix}_RAW__per_gene_mod/` and `{out_prefix}_FILTERED__per_gene_mod/` (pivoted and/or per‑gene files)
+- **ZT**:  
+  - `{out_prefix}_RAW_long.tsv`, `{out_prefix}_RAW_*_pivot.tsv`  
+  - `{out_prefix}_FILTERED_long.tsv`, `{out_prefix}_FILTERED_*_pivot.tsv`
+
+> **Note**: *FILTERED* long tables still include every ZN/sample row at kept sites, preserving per‑transcript stoichiometries while removing entire sites that fail across all rows.
 
 ## Citation
 
