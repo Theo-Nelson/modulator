@@ -154,6 +154,22 @@ The parameters below control how *modulator* aggregates **ZN** (per-transcript i
 | `out_prefix`               | str     | —       | path                     | ZN, ZT | Prefix for all output files (both RAW and FILTERED variants). |
 | `gtf`                      | path    | —       | path to GTF              | ZN     | GTF used to map sites → genes (union-of-exons span per gene). |
 
+### Differential Site-Level Per-Transcript Within Locus Test Parameters
+
+These parameters allow for the identification of sites with differences across transcripts within the same gene locus. 
+
+| Key | Type | Default | Description |
+|---|---|---|---|
+| `test_diffs.min_cov` | int | `20` | Minimum **pooled** coverage per ZN at a site to include that ZN in testing. A site is tested only if ≥2 ZN pass. (This mirrors `min_cov_test`.) |
+| `test_diffs.topk` | int | `10` | Number of top sites to plot as figures. |
+| `test_diffs.test` | str | `"auto"` | `"auto"` chooses Fisher (2×2) or Chi-square (r×2) automatically; `"fisher"` forces Fisher (requires exactly 2 ZN); `"chi2"` forces Chi-square for any r≥2. |
+| `test_diffs.pseudocount` | float | `0.5` | Pseudocount added to each cell for Chi-square stability (ignored for Fisher). |
+| `test_diffs.alternative` | str | `"two-sided"` | Fisher alternative hypothesis: `"two-sided"`, `"greater"`, or `"less"`. |
+| `test_diffs.gene_filter` | list[str] / null | `null` | Optional gene_name whitelist. |
+| `test_diffs.mod_filter` | list[str] / null | `null` | Optional mod_code whitelist (e.g., `["a","m"]`). |
+
+**How the test works:** For each site `(gene_name, mod_code, chrom, start0, end0, strand)`, counts are **pooled across samples** within each ZN: `Ncov = Σ Nvalid_cov`, `Nmod = Σ Nmod`, `Nunmod = Ncov − Nmod`. Build a contingency table (rows=ZN, cols=[Nmod, Nunmod]) and test differences in stoichiometry across ZN; adjust p-values with Benjamini–Hochberg (`p_adj_bh`).
+
 ## Outputs
 
 ### Assembly Outputs
