@@ -40,13 +40,87 @@ snakemake -j 8 \
     threads=64 \
     mods='["17596","a","m","17802","69426","19228","19229","19227"]' \
     ref_bases='["A","A","C","T","A","C","G","T"]' \
-    min_cov=5 \
+    min_cov=0 \
     min_cov_test=20 \
     topk=10 \
-    assembler='{"primary_only": true, "min_mapq": 10, "min_introns_read": 1, "require_softclip3p": 0, "apa_window": 20, "tes_window": null, "min_reads": 40, "min_frac": 0.0, "min_introns": 1, "min_polya_length": 12, "min_polya_purity": 0.5, "polya_support_frac": 0.5, "tes_match_tol": 25, "exact_tes_tol": 10, "write_zt_bams": false, "write_zt_tagged_sample_bams": true, "emit_modkit_manifest": false, "min_reads_per_sample_for_mod": 5, "min_total_reads_for_mod": 20}' \
-    modkit='{"common": {"log_file_template": "results/{which}/{sample}.log", "region": null, "max_depth": 1000, "include_bed": null, "include_unmapped": false, "edge_filter": null, "invert_edge_filter": false, "threads": "{threads}", "interval_size": 100000, "queue_size": 1000, "chunk_size": null, "num_reads": 10042, "sampling_frac": null, "seed": null, "sample_region": null, "sampling_interval_size": 1000000, "no_filtering": false, "filter_thresholds": ["A:0.8","C:0.8","G:0.8","T:0.8"], "mod_thresholds": ["17596:0.99","a:0.99","m:0.99","17802:0.99","69426:0.99","19228:0.99","19229:0.99","19227:0.99"], "ignore": [], "force_allow_implicit": false, "motif": [], "cpg": false, "ref_mask": false, "combine_mods": false, "combine_strands": false, "mixed_delim": false, "only_tabs": false, "bedgraph": false, "header": false, "prefix": null, "suppress_progress": true}, "zn": {"partition_tag": "ZN", "per_mod_bed": true}, "zt": {"partition_tag": "ZT"}}' \
-    aggregation='{"zn": {"filter_enable": true, "count_diff_factor": 3, "mod_fail_margin": 1, "emit_raw": true, "emit_filtered": true, "write_long": true, "write_pivots": true, "write_raw_per_gene": true, "write_filtered_per_gene": true}, "zt": {"filter_enable": true, "count_diff_factor": 3, "mod_fail_margin": 1, "emit_raw": true, "emit_filtered": true, "write_long": true, "write_pivots": true}}' \
-    toggles='{"enable_zn_pileup": true, "enable_zt_pileup": true, "enable_zn_aggregate": true, "enable_zt_aggregate": true}' \
+    assembler='{primary_only: true,
+                min_mapq: 10,
+                min_introns_read: 1,
+                require_softclip3p: 0,
+                apa_window: 20,
+                tes_window: null,
+                min_reads: 40,
+                min_frac: 0.00,
+                min_introns: 1,
+                min_polya_length: 12,
+                min_polya_purity: 0.5,
+                polya_support_frac: 0.5,
+                tes_match_tol: 25,
+                exact_tes_tol: 10,
+                write_zt_bams: false,
+                write_zt_tagged_sample_bams: true,
+                emit_modkit_manifest: false,
+                min_reads_per_sample_for_mod: 5,
+                min_total_reads_for_mod: 20}' \
+    modkit='{common: {
+                log_file_template: "results/{which}/{sample}.log",
+                region: null,
+                max_depth: 1000,
+                include_bed: null,
+                include_unmapped: false,
+                edge_filter: null,
+                invert_edge_filter: false,
+                threads: "{threads}",
+                interval_size: 100000,
+                queue_size: 1000,
+                chunk_size: null,
+                num_reads: 10042,
+                sampling_frac: null,
+                seed: null,
+                sample_region: null,
+                sampling_interval_size: 1000000,
+                no_filtering: false,
+                filter_thresholds: ["A:0.8","C:0.8","G:0.8","T:0.8"],
+                mod_thresholds: ["17596:0.99","a:0.99","m:0.99","17802:0.99","69426:0.99","19228:0.99","19229:0.99","19227:0.99"],
+                ignore: [],
+                force_allow_implicit: false,
+                motif: [],
+                cpg: false,
+                ref_mask: false,
+                combine_mods: false,
+                combine_strands: false,
+                mixed_delim: false,
+                only_tabs: false,
+                bedgraph: false,
+                header: false,
+                prefix: null,
+                suppress_progress: true
+             },
+             zn: { partition_tag: "ZN", per_mod_bed: true },
+             zt: { partition_tag: "ZT" }}' \
+    aggregation='{zn: { filter_enable: true,
+                        count_diff_factor: 3,
+                        mod_fail_margin: 1,
+                        emit_raw: true,
+                        emit_filtered: true,
+                        write_long: true,
+                        write_pivots: true,
+                        write_raw_per_gene: true,
+                        write_filtered_per_gene: true },
+                  zt: { filter_enable: true,
+                        count_diff_factor: 3,
+                        mod_fail_margin: 1,
+                        emit_raw: true,
+                        emit_filtered: true,
+                        write_long: true,
+                        write_pivots: true }}' \
+    test_diffs='{min_cov: 20,
+                 topk: 10,
+                 test: "auto",
+                 pseudocount: 0.5,
+                 alternative: "two-sided",
+                 gene_filter: null,
+                 mod_filter: null}' \
   --rerun-incomplete --printshellcmds
 ```
 
