@@ -17,7 +17,8 @@ def _autoparse(value):
                     return value
     return value
 
-for k in ("assembler", "modkit", "aggregation", "toggles", "mods", "ref_bases"):
+# add "test_diffs" to the list of keys that may be JSON/YAML blobs
+for k in ("assembler", "modkit", "aggregation", "toggles", "mods", "ref_bases", "test_diffs"):
     if k in config:
         config[k] = _autoparse(config[k])
 

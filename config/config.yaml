@@ -117,6 +117,13 @@ prefix: "fivegenes_readbacked_annot"
 
 min_reads: 1
 min_frac: 0.00
-min_cov: 5
-min_cov_test: 20
-topk: 10
+min_cov: 0
+
+test_diffs:
+  min_cov: 20          # overrides min_cov_test if present
+  topk: 10             # plots
+  test: auto           # auto | fisher | chi2
+  pseudocount: 0.5     # for chi-square stability
+  alternative: two-sided   # fisher alternative
+  gene_filter: null     # e.g., ["ALCAM","RIOK3"]
+  mod_filter: null      # e.g., ["a","m"]
