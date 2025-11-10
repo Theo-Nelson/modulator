@@ -118,7 +118,6 @@ prefix: "fivegenes_readbacked_annot"
 min_reads: 1
 min_frac: 0.00
 min_cov: 0
-<<<<<<< HEAD
 
 test_diffs:
   min_cov: 20          # overrides min_cov_test if present
