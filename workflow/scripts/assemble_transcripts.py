@@ -31,6 +31,7 @@ Standard Outputs
 
 import argparse, os, sys, glob, re, gzip
 from collections import defaultdict, Counter
+from concurrent.futures import ProcessPoolExecutor, as_completed
 import pysam
 
 # ---------- utils ----------
@@ -134,6 +135,202 @@ def is_suffix(longer, shorter):
 
 def chain_to_str(chain):
     return "." if not chain else ";".join(f"{d}-{a}" for d,a in chain)
+
+# ---------- Streaming Cluster Manager ----------
+
+class StreamingClusterManager:
+    """Manages active TES clusters with automatic flushing as coordinates advance."""
+    def __init__(self, apa_window):
+        self.apa_window = apa_window
+        self.active_clusters = defaultdict(list)  # key: (chrom, strand) -> list of clusters
+        self.finalized_clusters = []  # clusters ready for isoform processing
+        self.last_pos = defaultdict(lambda: -1)  # key: (chrom, strand) -> last TES seen
+        
+    def add_read(self, read_dict):
+        """Add a read to appropriate cluster or create new cluster."""
+        chrom = read_dict["chrom"]
+        strand = read_dict["strand"]
+        tes = read_dict["tes"]
+        key = (chrom, strand)
+        
+        # Flush old clusters when we've moved far enough ahead
+        if self.last_pos[key] >= 0:
+            flush_threshold = tes - (self.apa_window * 3)  # conservative margin
+            self._flush_clusters_before(key, flush_threshold)
+        
+        self.last_pos[key] = max(self.last_pos[key], tes)
+        
+        # Find or create cluster
+        cluster_list = self.active_clusters[key]
+        matched = None
+        for cluster in cluster_list:
+            if abs(cluster["rep_tes"] - tes) <= self.apa_window:
+                matched = cluster
+                break
+        
+        if matched:
+            matched["members"].append(read_dict)
+            # Update rep_tes to median (simple approach: just track)
+            matched["positions"].append(tes)
+        else:
+            # New cluster
+            new_cluster = {
+                "chrom": chrom,
+                "strand": strand,
+                "rep_tes": tes,
+                "positions": [tes],
+                "members": [read_dict]
+            }
+            cluster_list.append(new_cluster)
+    
+    def _flush_clusters_before(self, key, threshold):
+        """Move clusters with max TES before threshold to finalized."""
+        cluster_list = self.active_clusters[key]
+        remaining = []
+        for cluster in cluster_list:
+            max_tes = max(cluster["positions"])
+            if max_tes < threshold:
+                # Finalize this cluster
+                self.finalized_clusters.append(cluster)
+            else:
+                remaining.append(cluster)
+        self.active_clusters[key] = remaining
+    
+    def flush_all(self):
+        """Finalize all remaining active clusters."""
+        for key, cluster_list in self.active_clusters.items():
+            self.finalized_clusters.extend(cluster_list)
+        self.active_clusters.clear()
+    
+    def get_finalized_clusters(self):
+        """Return list of finalized clusters grouped by (chrom, strand)."""
+        groups = defaultdict(list)
+        for cluster in self.finalized_clusters:
+            # Recompute representative TES as most common position
+            positions = cluster["positions"]
+            c = Counter(positions)
+            rep = sorted(c.items(), key=lambda x: (x[1], x[0]))[-1][0]
+            groups[(cluster["chrom"], cluster["strand"])].append({
+                "tes": rep,
+                "members": cluster["members"]
+            })
+        return groups
+
+# ---------- Chunked parallel helpers ----------
+
+def _parse_region_to_parts(region_str):
+    """Parse region like 'chr:start-end' or 'chr' into (chrom, start, end or None)."""
+    if region_str is None:
+        return None
+    s = str(region_str)
+    if ":" in s:
+        chrom, rest = s.split(":", 1)
+        if "-" in rest:
+            a, b = rest.split("-", 1)
+            try:
+                return chrom, int(a.replace(",","")), int(b.replace(",",""))
+            except Exception:
+                return chrom, None, None
+        else:
+            return chrom, None, None
+    return s, None, None
+
+def _make_regions_from_header(bam_path, chunk_bases, overlap_bases, only_region=None):
+    """Generate region strings from BAM header with fixed-size chunks and overlap."""
+    import pysam
+    regs = []
+    with pysam.AlignmentFile(bam_path, "rb") as fh:
+        sq = fh.header.get("SQ", [])
+        if only_region:
+            ochr, ost, oend = _parse_region_to_parts(only_region)
+        else:
+            ochr = ost = oend = None
+        for ent in sq:
+            chrom = ent.get("SN")
+            ln = int(ent.get("LN", 0))
+            if not chrom or ln <= 0:
+                continue
+            if ochr and chrom != ochr:
+                continue
+            start0 = 1 if (ost is None) else max(1, ost)
+            end0 = ln if (oend is None) else min(ln, oend)
+            if chunk_bases <= 0:
+                regs.append(f"{chrom}:{start0}-{end0}")
+            else:
+                step = int(chunk_bases)
+                ov = int(max(0, overlap_bases))
+                s = start0
+                while s <= end0:
+                    e = min(end0, s + step - 1)
+                    # expand with overlap inside available bounds
+                    ss = max(start0, s - ov)
+                    ee = min(end0, e + ov)
+                    regs.append(f"{chrom}:{ss}-{ee}")
+                    s = e + 1
+    return regs
+
+def _process_region_worker(args):
+    """Worker: process a region across all BAMs, return list of clusters dicts.
+    Returns a list of {chrom,strand,tes,members} clusters.
+    """
+    (region, bam_paths, filters, apa_window) = args
+    import pysam
+    cm = StreamingClusterManager(apa_window)
+    for bam in bam_paths:
+        if not os.path.exists(bam):
+            continue
+        sample = os.path.basename(bam).replace(".bam", "")
+        with pysam.AlignmentFile(bam, "rb") as fh:
+            it = fh.fetch(region=region)
+            for aln in it:
+                if aln.is_unmapped: continue
+                if filters["primary_only"] and (aln.is_secondary or aln.is_supplementary): continue
+                if aln.mapping_quality < filters["min_mapq"]: continue
+                tx = get_tx_strand(aln)
+                sclen, tail = softclip3p_len_and_seq(aln, tx)
+                if filters["require_softclip3p"] > 0 and sclen < filters["require_softclip3p"]: continue
+                purity = polya_purity(tail, tx) if sclen > 0 else 0.0
+                chain = intron_chain_1based(aln)
+                if len(chain) < filters["min_introns_read"]: continue
+                chain_tx = chain_tx_order(chain, tx)
+                chrom = fh.get_reference_name(aln.reference_id)
+                read_dict = dict(
+                    chrom=chrom, strand=tx, tes=tes_pos1(aln, tx),
+                    chain=chain, chain_tx=chain_tx, n_introns=len(chain),
+                    exons=exon_blocks_from_aln(aln),
+                    bam=os.path.basename(bam), sample=sample, qname=aln.query_name,
+                    mapq=aln.mapping_quality, sclen=sclen, purity=purity
+                )
+                cm.add_read(read_dict)
+    cm.flush_all()
+    # convert to flat list of clusters
+    out = []
+    for (chrom, strand), lst in cm.get_finalized_clusters().items():
+        for cl in lst:
+            out.append({"chrom": chrom, "strand": strand, "tes": cl["tes"], "members": cl["members"]})
+    return out
+
+def _merge_region_clusters(cluster_lists, apa_window):
+    """Merge clusters from multiple regions by TES proximity within apa_window."""
+    by_cs = defaultdict(list)
+    for clist in cluster_lists:
+        for c in clist:
+            by_cs[(c["chrom"], c["strand"])].append(c)
+    merged_groups = defaultdict(list)
+    for (chrom, strand), lst in by_cs.items():
+        if not lst:
+            continue
+        # positions for clustering
+        positions = sorted(c["tes"] for c in lst)
+        clusters = cluster_positions(positions, apa_window)
+        for cl in clusters:
+            rep_pos = cl["rep"]
+            members = []
+            for c in lst:
+                if abs(c["tes"] - rep_pos) <= apa_window:
+                    members.extend(c["members"])  # combine
+            merged_groups[(chrom, strand)].append(dict(tes=rep_pos, members=members))
+    return merged_groups
 
 # ---------- GTF parsing ----------
 _attr_re = re.compile(r'(\S+)\s+"([^"]+)"')
@@ -317,6 +514,18 @@ def main():
     ap.add_argument("--out-gtf", default="readbacked_annot.gtf")
     ap.add_argument("--out-prefix", default=None,
                     help="Prefix for extra outputs (counts/PCA/stats). If omitted, uses out-gtf without .gtf")
+    
+    # Performance options
+    ap.add_argument("--streaming", action="store_true", default=True,
+                    help="Use streaming cluster mode (lower memory, default: True)")
+    ap.add_argument("--no-streaming", dest="streaming", action="store_false",
+                    help="Disable streaming mode (load all reads into memory)")
+    ap.add_argument("--progress-interval", type=int, default=100000,
+                    help="Print progress every N reads (default: 100000, 0 to disable)")
+    ap.add_argument("--chunk-bases", type=int, default=0,
+                    help="If >0 and threads>1, process in parallel genomic chunks of this size (bp) with overlap.")
+    ap.add_argument("--chunk-overlap-bases", type=int, default=None,
+                    help="Optional explicit chunk overlap in bp (default: 3*apa_window).")
 
     args = ap.parse_args()
 
@@ -343,52 +552,75 @@ def main():
     # Effective window for clustering
     apa_window = args.apa_window if args.apa_window is not None else (args.tes_window if args.tes_window else 20)
 
-    # Gather per-read features
-    reads = []
-    for bam in bams:
-        if not os.path.exists(bam):
-            print(f"[WARN] Missing BAM: {bam}", file=sys.stderr); continue
-        sample = os.path.basename(bam).replace(".bam","")
-        with pysam.AlignmentFile(bam, "rb") as fh:
-            it = fh.fetch(region=args.region) if args.region else fh.fetch()
-            for aln in it:
-                if aln.is_unmapped: continue
-                if args.primary_only and (aln.is_secondary or aln.is_supplementary): continue
-                if aln.mapping_quality < args.min_mapq: continue
-                tx = get_tx_strand(aln)
-                sclen, tail = softclip3p_len_and_seq(aln, tx)
-                if args.require_softclip3p > 0 and sclen < args.require_softclip3p: continue
-                purity = polya_purity(tail, tx) if sclen > 0 else 0.0
-                chain = intron_chain_1based(aln)
-                if len(chain) < args.min_introns_read: continue
-                chain_tx = chain_tx_order(chain, tx)
-                chrom = fh.get_reference_name(aln.reference_id)
-                reads.append(dict(
-                    chrom=chrom, strand=tx, tes=tes_pos1(aln, tx),
-                    chain=chain, chain_tx=chain_tx, n_introns=len(chain),
-                    exons=exon_blocks_from_aln(aln),
-                    bam=os.path.basename(bam), sample=sample, qname=aln.query_name,
-                    mapq=aln.mapping_quality, sclen=sclen, purity=purity
-                ))
+    # Decide execution mode: single-process streaming vs chunked parallel
+    use_parallel_chunks = bool(args.streaming and args.chunk_bases and args.chunk_bases > 0 and args.threads and args.threads > 1)
 
-    if not reads:
-        sys.exit("No usable reads found after filters")
-
-    # Group by (chrom, strand) -> APA clusters
-    groups = defaultdict(list)
-    by_cs = defaultdict(list)
-    for r in reads:
-        by_cs[(r["chrom"], r["strand"])] .append(r)
-
-    for (chrom, strand), rlist in by_cs.items():
-        positions = sorted(r["tes"] for r in rlist)
-        if not positions:
-            continue
-        clusters = cluster_positions(positions, apa_window)
-        for cl in clusters:
-            rep_pos = cl["rep"]
-            members = [r for r in rlist if abs(r["tes"] - rep_pos) <= apa_window]
-            groups[(chrom, strand)].append(dict(tes=rep_pos, members=members))
+    if use_parallel_chunks:
+        # Build regions with overlap
+        overlap_bases = args.chunk_overlap_bases if args.chunk_overlap_bases is not None else (3 * apa_window)
+        # Regions derived from the first BAM header; applied to all BAMs
+        regions = _make_regions_from_header(bams[0], args.chunk_bases, overlap_bases, only_region=args.region)
+        print(f"[INFO] Parallel chunk mode: {len(regions)} regions, chunk={args.chunk_bases}bp, overlap={overlap_bases}bp, threads={args.threads}", file=sys.stderr)
+        # Prepare filters bundle for worker
+        filters = dict(primary_only=bool(args.primary_only), min_mapq=int(args.min_mapq),
+                       require_softclip3p=int(args.require_softclip3p), min_introns_read=int(args.min_introns_read))
+        cluster_lists = []
+        with ProcessPoolExecutor(max_workers=args.threads) as ex:
+            futs = []
+            for reg in regions:
+                futs.append(ex.submit(_process_region_worker, (reg, bams, filters, apa_window)))
+            for i, fut in enumerate(as_completed(futs), 1):
+                cl = fut.result()
+                cluster_lists.append(cl)
+                if i % max(1, len(regions)//10) == 0:
+                    print(f"[INFO] Completed {i}/{len(regions)} regions", file=sys.stderr)
+        # Merge clusters from regions
+        groups = _merge_region_clusters(cluster_lists, apa_window)
+        total_reads_processed = sum(len(c["members"]) for cl in cluster_lists for c in cl)
+        if total_reads_processed == 0:
+            sys.exit("No usable reads found after filters")
+    else:
+        # Single-process streaming over whole BAM set
+        from pysam import AlignmentFile
+        cluster_manager = StreamingClusterManager(apa_window)
+        total_reads_processed = 0
+        print(f"[INFO] Processing reads in streaming mode (window={apa_window})", file=sys.stderr)
+        for bam in bams:
+            if not os.path.exists(bam):
+                print(f"[WARN] Missing BAM: {bam}", file=sys.stderr); continue
+            sample = os.path.basename(bam).replace(".bam","")
+            with AlignmentFile(bam, "rb") as fh:
+                it = fh.fetch(region=args.region) if args.region else fh.fetch()
+                for aln in it:
+                    if aln.is_unmapped: continue
+                    if args.primary_only and (aln.is_secondary or aln.is_supplementary): continue
+                    if aln.mapping_quality < args.min_mapq: continue
+                    tx = get_tx_strand(aln)
+                    sclen, tail = softclip3p_len_and_seq(aln, tx)
+                    if args.require_softclip3p > 0 and sclen < args.require_softclip3p: continue
+                    purity = polya_purity(tail, tx) if sclen > 0 else 0.0
+                    chain = intron_chain_1based(aln)
+                    if len(chain) < args.min_introns_read: continue
+                    chain_tx = chain_tx_order(chain, tx)
+                    chrom = fh.get_reference_name(aln.reference_id)
+                    read_dict = dict(
+                        chrom=chrom, strand=tx, tes=tes_pos1(aln, tx),
+                        chain=chain, chain_tx=chain_tx, n_introns=len(chain),
+                        exons=exon_blocks_from_aln(aln),
+                        bam=os.path.basename(bam), sample=sample, qname=aln.query_name,
+                        mapq=aln.mapping_quality, sclen=sclen, purity=purity
+                    )
+                    cluster_manager.add_read(read_dict)
+                    total_reads_processed += 1
+                    if args.progress_interval > 0 and total_reads_processed % args.progress_interval == 0:
+                        n_active = sum(len(clusters) for clusters in cluster_manager.active_clusters.values())
+                        n_finalized = len(cluster_manager.finalized_clusters)
+                        print(f"[INFO] Processed {total_reads_processed:,} reads (active clusters: {n_active}, finalized: {n_finalized})", file=sys.stderr)
+        cluster_manager.flush_all()
+        print(f"[INFO] Finalized {len(cluster_manager.finalized_clusters)} total clusters from {total_reads_processed:,} reads", file=sys.stderr)
+        if total_reads_processed == 0:
+            sys.exit("No usable reads found after filters")
+        groups = cluster_manager.get_finalized_clusters()
 
     # Collapse & assign 5' truncations with priority to strongest isoform
     isoforms = []

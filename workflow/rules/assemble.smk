@@ -24,7 +24,7 @@ rule assemble_transcripts:
     params:
         out_gtf      = f"results/assemble/{config['prefix']}.gtf",
         out_prefix   = f"results/assemble/{config['prefix']}",
-        script       = "scripts/assemble_transcripts.py",
+        script       = "workflow/scripts/assemble_transcripts.py",
         bam_glob     = BAM_GLOB,
         threads      = config.get("threads", 8),
 

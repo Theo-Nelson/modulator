@@ -151,6 +151,8 @@ The following table explains the different parameter functions available for tra
 | `emit_modkit_manifest` | boolean | `false` | `true` / `false` | Also write a manifest (`zt_bams/modkit_manifest.tsv`) for modkit processing. |
 | `min_reads_per_sample_for_mod` | integer | `5` | `1–50` | Minimum per-sample read support for creating a per-transcript BAM. |
 | `min_total_reads_for_mod` | integer | `20` | `10–200` | Minimum total read support (across samples) for a transcript to be eligible for modkit BAM output. |
+| `streaming` | boolean | `true` | `true` / `false` | Use streaming mode for memory-efficient processing. Disable with `false` for legacy behavior. |
+| `progress_interval` | integer | `100000` | `0+` | Print progress every N reads (0 to disable). Useful for monitoring large datasets. |
 
 A few notes on how these parameters cooperate:
 

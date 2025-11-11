@@ -1,6 +1,6 @@
 # Configuration for modulator pipeline
 
-bams_dir: "../resources/test_bams/ALCAM_NHSL1_SERAC1_MXD1_RIOK3_reads"
+bams_dir: "resources/test_bams/ALCAM_NHSL1_SERAC1_MXD1_RIOK3_reads"
 bam_glob: "*.bam"
 
 reference:

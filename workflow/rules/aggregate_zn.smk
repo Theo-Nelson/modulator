@@ -7,7 +7,7 @@ rule aggregate_modkit_zn:
         pivots   = directory(f"results/aggregate_zn/{config['prefix']}_FILTERED__per_gene_mod")
     params:
         out_prefix = f"results/aggregate_zn/{config['prefix']}",
-        script     = "scripts/aggregate_by_gene.py",
+        script     = "workflow/scripts/aggregate_by_gene.py",
         min_cov    = config.get("min_cov", 5),
         enabled    = config.get("toggles", {}).get("enable_zn_aggregate", True),
 

@@ -6,7 +6,7 @@ rule test_transcript_diffs:
         figs_dir = directory(f"results/test_diffs/{config['prefix']}__figs")
     params:
         out_prefix = f"results/test_diffs/{config['prefix']}",
-        script = "scripts/test_stoichiometry_diffs.py",
+        script = "workflow/scripts/test_stoichiometry_diffs.py",
         # existing knobs
         min_cov = config.get("min_cov_test", 20),
         topk = config.get("topk", 10),

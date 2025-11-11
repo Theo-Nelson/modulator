@@ -13,7 +13,7 @@ rule aggregate_modkit_zt:
         filt_nmod   = f"results/aggregate_zt/{config['prefix']}_FILTERED_Nmod_pivot.tsv"
     params:
         out_prefix = f"results/aggregate_zt/{config['prefix']}",
-        script     = "scripts/aggregate_by_transcript.py",
+        script     = "workflow/scripts/aggregate_by_transcript.py",
         min_cov    = config.get("min_cov", 5),
         enabled    = config.get("toggles", {}).get("enable_zt_aggregate", True),
 

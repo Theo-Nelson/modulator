@@ -4,6 +4,7 @@ results/
 # hg38 Reference
 *.fa
 *.fai
+*.gtf.gz
 
 # Logs
 *.log
