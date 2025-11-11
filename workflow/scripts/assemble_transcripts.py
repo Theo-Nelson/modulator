@@ -191,6 +191,20 @@ def load_gtf(gtf_path):
         tx.chain_tx = intron_chain_from_exons(tx.exons, tx.strand)
     return list(txs.values())
 
+# Build fast lookup structures for GTF transcripts to accelerate annotation
+def build_gtf_index(gtf_txs):
+    """Return two indices:
+    - by_cs: dict[(chrom,strand)] -> list of transcripts for that key
+    - tes_sorted: dict[(chrom,strand)] -> list of (tes_1based, transcript) sorted by tes
+    """
+    by_cs = defaultdict(list)
+    for tx in gtf_txs:
+        by_cs[(tx.chrom, tx.strand)].append(tx)
+    tes_sorted = {}
+    for k, lst in by_cs.items():
+        tes_sorted[k] = sorted([(t.tes_1based, t) for t in lst], key=lambda x: x[0])
+    return by_cs, tes_sorted
+
 # ---------- annotation ----------
 
 def exon_overlap_len(ex1, ex2):
@@ -201,9 +215,29 @@ def exon_overlap_len(ex1, ex2):
             if hi>=lo: tot += (hi-lo+1)
     return tot
 
-def annotate_isoform(iso, gtf_txs, tes_match_tol, exact_tes_tol):
+def annotate_isoform(iso, gtf_by_cs, tes_sorted_index, tes_match_tol, exact_tes_tol):
     chrom, strand, tes = iso["chrom"], iso["strand"], iso["tes"]
-    cands = [tx for tx in gtf_txs if tx.chrom==chrom and tx.strand==strand and abs(int(tx.tes_1based)-int(tes)) <= tes_match_tol]
+    # Candidates by TES proximity using pre-sorted TES list
+    key = (chrom, strand)
+    cands = []
+    if key in tes_sorted_index:
+        arr = tes_sorted_index[key]
+        # binary search window around tes
+        # find left bound
+        lo, hi = 0, len(arr)
+        while lo < hi:
+            mid = (lo + hi) // 2
+            if arr[mid][0] < tes - tes_match_tol:
+                lo = mid + 1
+            else:
+                hi = mid
+        left = lo
+        # iterate until beyond upper bound
+        i = left
+        upper = tes + tes_match_tol
+        while i < len(arr) and arr[i][0] <= upper:
+            cands.append(arr[i][1])
+            i += 1
     match_source = "TES_TOL" if cands else "NONE"
     best = None
     if cands:
@@ -212,7 +246,11 @@ def annotate_isoform(iso, gtf_txs, tes_match_tol, exact_tes_tol):
             return (abs(tx.tes_1based - tes), same_chain, -exon_overlap_len(iso["rep_exons"], tx.exons), -len(tx.chain_tx))
         best = min(cands, key=rank)
     else:
-        overlaps = [tx for tx in gtf_txs if tx.chrom==chrom and tx.strand==strand and exon_overlap_len(iso["rep_exons"], tx.exons) > 0]
+        # fallback: overlap search within chrom/strand bin only
+        overlaps = []
+        for tx in gtf_by_cs.get(key, []):
+            if exon_overlap_len(iso["rep_exons"], tx.exons) > 0:
+                overlaps.append(tx)
         if overlaps:
             best = max(overlaps, key=lambda tx: exon_overlap_len(iso["rep_exons"], tx.exons))
             match_source = "OVERLAP"
@@ -293,9 +331,14 @@ def main():
     if not bams:
         sys.exit("No BAMs found")
 
-    # Load GTF
+    # Load GTF + indices
     gtf_txs = load_gtf(args.gtf) if args.gtf else []
-    print(f"[INFO] Loaded {len(gtf_txs)} transcripts from {args.gtf}" if args.gtf else "[INFO] No GTF supplied", file=sys.stderr)
+    if args.gtf:
+        gtf_by_cs, gtf_tes_sorted = build_gtf_index(gtf_txs)
+        print(f"[INFO] Loaded {len(gtf_txs)} transcripts from {args.gtf}", file=sys.stderr)
+    else:
+        gtf_by_cs, gtf_tes_sorted = {}, {}
+        print("[INFO] No GTF supplied", file=sys.stderr)
 
     # Effective window for clustering
     apa_window = args.apa_window if args.apa_window is not None else (args.tes_window if args.tes_window else 20)
@@ -467,7 +510,7 @@ def main():
 
     # Annotate and bucket by gene
     def annotate_isoform_safe(iso):
-        return annotate_isoform(iso, gtf_txs, args.tes_match_tol, args.exact_tes_tol) if gtf_txs else dict(
+        return annotate_isoform(iso, gtf_by_cs, gtf_tes_sorted, args.tes_match_tol, args.exact_tes_tol) if gtf_txs else dict(
             classification="NOVEL_LOCUS", gene_id="NA", gene_name="NA", matched_tid="NA",
             gtf_tes="NA", gtf_chain_tx=tuple(), tes_delta_bp="NA", exon_overlap_bp=0, match_source="NONE")
 
@@ -605,11 +648,14 @@ def main():
     stats_path = f"{prefix}_per_sample_stats.tsv"
     stats_df.to_csv(stats_path, sep="\t", index=False)
 
-    # Build read -> (ZT, ZG, ZN) map
-    assign = defaultdict(dict)
-    for iso in kept:
-        for m in iso["members"]:
-            assign[m["sample"]][m["qname"]] = (iso["zt_label"], iso["gene_index"], iso["tx_index"])  # ZT, ZG, ZN
+    # Build read -> (ZT, ZG, ZN) map only if needed by downstream tagging/exports
+    need_assign = bool(args.write_zt_bams or args.emit_modkit_manifest or args.write_zt_tagged_sample_bams)
+    assign = None
+    if need_assign:
+        assign = defaultdict(dict)
+        for iso in kept:
+            for m in iso["members"]:
+                assign[m["sample"]][m["qname"]] = (iso["zt_label"], iso["gene_index"], iso["tx_index"])  # ZT, ZG, ZN
 
     # Optional: per-transcript subset BAMs
     if args.write_zt_bams or args.emit_modkit_manifest:
@@ -636,9 +682,10 @@ def main():
                     for code in sorted(elig_codes):
                         out_bam = os.path.join(out_dir, f"{sample}.{code}.bam")
                         writers[code] = pysam.AlignmentFile(out_bam, "wb", header=inp.header)
-                    for aln in inp.fetch(region=args.region) if args.region else inp.fetch():
+                    for aln in (inp.fetch(region=args.region) if args.region else inp.fetch()):
                         if aln.is_unmapped: continue
                         if args.primary_only and (aln.is_secondary or aln.is_supplementary): continue
+                        if not assign: continue
                         qn = aln.query_name
                         tup = assign.get(sample, {}).get(qn)
                         if not tup:
@@ -663,8 +710,12 @@ def main():
                 for code in sorted(elig_codes):
                     out_bam = os.path.join(out_dir, f"{sample}.{code}.bam")
                     if os.path.exists(out_bam) and os.path.getsize(out_bam) > 0:
-                        try: pysam.index(out_bam)
-                        except Exception: pass
+                        # Indexing can be expensive; keep default behavior but allow opting out via CLI
+                        if getattr(args, "index_output_bams", True):
+                            try:
+                                pysam.index(out_bam)
+                            except Exception:
+                                pass
                         manifest_rows.append([sample, code, out_bam])
         if args.emit_modkit_manifest:
             mani = os.path.join(out_dir, "modkit_manifest.tsv")
@@ -684,13 +735,13 @@ def main():
             out_path = os.path.join(out_dir2, f"{sample}.zt_tagged.bam")
             with pysam.AlignmentFile(in_path, "rb") as inp, \
                  pysam.AlignmentFile(out_path, "wb", header=inp.header) as outw:
-                for aln in inp.fetch(region=args.region) if args.region else inp.fetch():
+                for aln in (inp.fetch(region=args.region) if args.region else inp.fetch()):
                     if aln.is_unmapped:
                         outw.write(aln); continue
                     if args.primary_only and (aln.is_secondary or aln.is_supplementary):
                         continue
                     qn = aln.query_name
-                    tup = assign.get(sample, {}).get(qn)
+                    tup = assign.get(sample, {}).get(qn) if assign else None
                     if tup:
                         zt, zg, zn = tup
                         try:
@@ -703,8 +754,11 @@ def main():
                             except TypeError:
                                 aln.set_tag(tag, val)
                     outw.write(aln)
-            try: pysam.index(out_path)
-            except Exception: pass
+            if getattr(args, "index_output_bams", True):
+                try:
+                    pysam.index(out_path)
+                except Exception:
+                    pass
             print(f"[OK] Wrote ZT/ZN-tagged sample BAM: {out_path}", file=sys.stderr)
 
     print(f"[OK] Wrote GTF: {args.out_gtf}", file=sys.stderr)
