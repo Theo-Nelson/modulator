@@ -169,7 +169,7 @@ The following table explains the different parameter functions available for mod
 | `include_unmapped` | bool | `false` | `true/false` | `--include-unmapped` |
 | `edge_filter` | str/int/null | `null` | `N` or `"N,M"` | `--edge-filter` |
 | `invert_edge_filter` | bool | `false` | `true/false` | `--invert-edge-filter` |
-| `threads` | int/str | `"{threads}"` | `1+` | `-t/--threads` |
+| `threads` | int/str | `snakemake --cores value` | `1+` | `-t/--threads` |
 | `interval_size` | int | `100000` | `1+` | `--interval-size` |
 | `queue_size` | int | `1000` | `1+` | `--queue-size` |
 | `chunk_size` | int/null | `null` | `1+` | `--chunk-size` |
