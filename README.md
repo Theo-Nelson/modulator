@@ -31,7 +31,7 @@ snakemake -j 8 \
 Expanded command to specify samples and references:
 
 ```bash
-snakemake -j 8 \
+snakemake -j 1 --cores 64 \
   --configfile ../config/config.yaml \
   --config \
     reference_fa=/path/to/ref.fa \
@@ -39,7 +39,6 @@ snakemake -j 8 \
     bams_dir=/path/to/your/bams \
     bam_glob='*.bam' \
     prefix=fivegenes_readbacked_annot \
-    threads=64 \
     mods='["17596","a","m","17802","69426","19228","19229","19227"]' \
     ref_bases='["A","A","C","T","A","C","G","T"]' \
     min_cov=0 \
@@ -70,7 +69,6 @@ snakemake -j 8 \
                 include_unmapped: false,
                 edge_filter: null,
                 invert_edge_filter: false,
-                threads: "{threads}",
                 interval_size: 100000,
                 queue_size: 1000,
                 chunk_size: null,
