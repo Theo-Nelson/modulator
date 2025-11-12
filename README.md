@@ -59,9 +59,7 @@ snakemake -j 8 \
                 polya_support_frac: 0.5,
                 tes_match_tol: 25,
                 exact_tes_tol: 10,
-                write_zt_bams: false,
                 write_zt_tagged_sample_bams: true,
-                emit_modkit_manifest: false,
                 min_reads_per_sample_for_mod: 5,
                 min_total_reads_for_mod: 20}' \
     modkit='{common: {
