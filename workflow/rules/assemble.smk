@@ -15,9 +15,11 @@ OUT_STATS     = f"{ASSEMBLE_DIR}/{PREFIX}_per_sample_stats.tsv"
 ZT_DIR        = f"{ASSEMBLE_DIR}/zt_tagged"
 
 # ---- Discover sample names from BAMs at parse time ----
-_BAMS_DIR   = config["bams_dir"]
-_BAM_GLOB   = config.get("bam_glob", "*.bam")
-_SAMPLE_NAMES = glob_wildcards(os.path.join(_BAMS_DIR, "{sample}.bam")).sample
+_BAMS_DIR = config["bams_dir"]
+_BAM_GLOB = config.get("bam_glob", "*.bam")
+
+_bam_paths = sorted(glob.glob(os.path.join(_BAMS_DIR, _BAM_GLOB)))
+_SAMPLE_NAMES = [os.path.basename(p).replace(".bam", "") for p in _bam_paths]
 
 # ---- Optional per-sample outputs if requested ----
 _REQUIRE_ZT_SAMPLES = bool(config.get("assembler", {}).get("write_zt_tagged_sample_bams", False))
@@ -70,9 +72,9 @@ rule assemble_transcripts:
 
         # Conditional flags (rendered now)
         primary_only_flag    = "--primary-only" if config.get("assembler", {}).get("primary_only", True) else "",
-        write_zt_bams_flag   = "--write-zt-bams" if config.get("assembler", {}).get("write_zt_bams", False) else "",
+        # write_zt_bams_flag   = "--write-zt-bams" if config.get("assembler", {}).get("write_zt_bams", False) else "",
         write_zt_tagged_sample_bams_flag = "--write-zt-tagged-sample-bams" if _REQUIRE_ZT_SAMPLES else "",
-        emit_modkit_manifest_flag      = "--emit-modkit-manifest" if config.get("assembler", {}).get("emit_modkit_manifest", False) else "",
+        # emit_modkit_manifest_flag      = "--emit-modkit-manifest" if config.get("assembler", {}).get("emit_modkit_manifest", False) else "",
 
         # Optional tes_window flag
         tes_window_flag = "" if str(config.get("assembler", {}).get("tes_window", "null")).lower() in ("", "none", "null")
@@ -114,12 +116,11 @@ rule assemble_transcripts:
             --polya-support-frac "{params.polya_support_frac}" \
             --tes-match-tol "{params.tes_match_tol}" \
             --exact-tes-tol "{params.exact_tes_tol}" \
-            {params.write_zt_bams_flag} \
             {params.write_zt_tagged_sample_bams_flag} \
-            {params.emit_modkit_manifest_flag} \
             --min-reads-per-sample-for-mod "{params.min_reads_per_sample_for_mod}" \
             --min-total-reads-for-mod "{params.min_total_reads_for_mod}"
 
         # Ensure the directory() target always exists
         mkdir -p "{ZT_DIR}"
         """
+
