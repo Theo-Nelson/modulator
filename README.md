@@ -20,7 +20,7 @@ A Snakemake pipeline for analyzing RNA modifications from aligned BAM files.
 Minimal command to run on demo data:
 
 ```bash
-snakemake -j 8 \
+snakemake -j 1 \
   --configfile ../config/config.yaml \
   --config \
     reference_fa=/path/to/ref.fa \
