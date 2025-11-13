@@ -1,8 +1,11 @@
+# workflow/Snakefile
 configfile: "config/config.yaml"
 
 import os, glob, json
 
-# --- turn stringified dicts/lists from --config into real objects ---
+# ----------------------------
+# Parse JSON/YAML blobs passed via --config
+# ----------------------------
 def _autoparse(value):
     if isinstance(value, str):
         s = value.strip()
@@ -11,25 +14,26 @@ def _autoparse(value):
                 return json.loads(s)
             except Exception:
                 try:
-                    import yaml  # optional: PyYAML
+                    import yaml
                     return yaml.safe_load(s)
                 except Exception:
                     return value
     return value
 
-# add "test_diffs" to the list of keys that may be JSON/YAML blobs
 for k in ("assembler", "modkit", "aggregation", "toggles", "mods", "ref_bases", "test_diffs"):
     if k in config:
         config[k] = _autoparse(config[k])
 
-# --- references ---
+# ----------------------------
+# References (flattened or nested)
+# ----------------------------
 REF_FA  = config.get("reference_fa",  config.get("reference", {}).get("fasta"))
 REF_GTF = config.get("reference_gtf", config.get("reference", {}).get("gtf"))
-
-# after parsing, this will be a dict even if passed as a blob via --config
 MODKIT_CFG = config.get("modkit", {})
 
-# -------- helpers --------
+# ----------------------------
+# Shared helpers
+# ----------------------------
 def _is_set(v):
     if v is None:
         return False
@@ -46,15 +50,13 @@ def _as_bool(v, default=False):
         return v != 0
     if isinstance(v, str):
         s = v.strip().lower()
-        if s in {"1", "true", "yes", "y", "on"}:
-            return True
-        if s in {"0", "false", "no", "n", "off"}:
-            return False
-        if s in {"", "none", "null", "na"}:
-            return default
+        if s in {"1","true","yes","y","on"}:  return True
+        if s in {"0","false","no","n","off"}: return False
+        if s in {"","none","null","na"}:      return default
     return bool(v)
 
 def _as_flags_from_common(common, sample, which):
+    """Build modkit flags from 'modkit.common' config."""
     flags = []
 
     # Logging
@@ -97,7 +99,7 @@ def _as_flags_from_common(common, sample, which):
             flags += ["--filter-threshold", str(ft)]
     for mt in (common.get("mod_thresholds") or []):
         if _is_set(mt) and ":" in str(mt):
-            flags += ["--mod-threshold", str(mt)]  # modkit 0.5.0
+            flags += ["--mod-threshold", str(mt)]
 
     # Modified base options
     for ign in (common.get("ignore") or []):
@@ -124,9 +126,11 @@ def _as_flags_from_common(common, sample, which):
 
     return flags
 
-# --- autodiscover BAMs/SAMPLES from a directory ---
-BAMS_DIR  = config.get("bams_dir", "../resources/test_bams/ALCAM_NHSL1_SERAC1_MXD1_RIOK3_reads")
-BAM_GLOB  = config.get("bam_glob", "*.bam")
+# ----------------------------
+# Sample discovery
+# ----------------------------
+BAMS_DIR = config.get("bams_dir", "resources/test_bams/ALCAM_NHSL1_SERAC1_MXD1_RIOK3_reads")
+BAM_GLOB = config.get("bam_glob", "*.bam")
 
 def _discover_samples():
     paths = glob.glob(os.path.join(BAMS_DIR, BAM_GLOB))
@@ -134,51 +138,80 @@ def _discover_samples():
 
 SAMPLES = _discover_samples()
 
-# expose for includes
+# Expose for included rules
 BAMS_DIR = BAMS_DIR
 BAM_GLOB = BAM_GLOB
 SAMPLES  = SAMPLES
+REF_FA   = REF_FA
+REF_GTF  = REF_GTF
+MODKIT_CFG = MODKIT_CFG
+_as_flags_from_common = _as_flags_from_common
+_is_set = _is_set
+_as_bool = _as_bool
 
-# --- include rules ---
+# ----------------------------
+# Toggles (force to bool)
+# ----------------------------
+ENABLE_ZN         = _as_bool(config.get("toggles", {}).get("enable_zn_pileup", True))
+ENABLE_ZT         = _as_bool(config.get("toggles", {}).get("enable_zt_pileup", True))
+ENABLE_AGG_ZN     = _as_bool(config.get("toggles", {}).get("enable_zn_aggregate", True))
+ENABLE_AGG_ZT     = _as_bool(config.get("toggles", {}).get("enable_zt_aggregate", True))
+ENABLE_TEST_DIFFS = _as_bool(config.get("toggles", {}).get("enable_test_diffs", True))
+
+# ----------------------------
+# Include rules conditionally
+# ----------------------------
 include: "rules/assemble.smk"
-include: "rules/modkit_zn.smk"
-include: "rules/aggregate_zn.smk"
-include: "rules/modkit_zt.smk"
-include: "rules/aggregate_zt.smk"
+
+if ENABLE_ZN:
+    include: "rules/modkit_zn.smk"
+    if ENABLE_AGG_ZN:
+        include: "rules/aggregate_zn.smk"
+
+if ENABLE_ZT:
+    include: "rules/modkit_zt.smk"
+    if ENABLE_AGG_ZT:
+        include: "rules/aggregate_zt.smk"
+
+# test_diffs rule file can be included unconditionally; targets will decide scheduling
 include: "rules/test_diffs.smk"
 
-# --- final targets ---
+# ----------------------------
+# Final targets (build conditionally)
+# ----------------------------
+ALL_TARGETS = [
+    # Assemble outputs
+    f"results/assemble/{config['prefix']}.gtf",
+    f"results/assemble/{config['prefix']}_classification_summary.tsv",
+    f"results/assemble/{config['prefix']}_tx_counts.tsv",
+    f"results/assemble/{config['prefix']}_tx_counts.pca.png",
+    f"results/assemble/{config['prefix']}_per_sample_stats.tsv",
+    # ZT/ZN-tagged sample BAMs emitted by assemble
+    expand("results/assemble/zt_tagged/{sample}.zt_tagged.bam", sample=SAMPLES),
+]
+
+if ENABLE_ZN:
+    ALL_TARGETS += expand("results/modkit_zn/{sample}", sample=SAMPLES)
+    if ENABLE_AGG_ZN:
+        ALL_TARGETS += [
+            f"results/aggregate_zn/{config['prefix']}_FILTERED_sites_long.tsv",
+        ]
+        # Differential tests depend on ZN FILTERED sites; gate here
+        if ENABLE_TEST_DIFFS:
+            ALL_TARGETS += [
+                f"results/test_diffs/{config['prefix']}__ZN_site_diff_results.tsv",
+                f"results/test_diffs/{config['prefix']}__figs",
+            ]
+
+if ENABLE_ZT:
+    ALL_TARGETS += expand("results/modkit_zt/{sample}", sample=SAMPLES)
+    if ENABLE_AGG_ZT:
+        ALL_TARGETS += [
+            f"results/aggregate_zt/{config['prefix']}_FILTERED_long.tsv",
+            f"results/aggregate_zt/{config['prefix']}_FILTERED_frac_pivot.tsv",
+            f"results/aggregate_zt/{config['prefix']}_FILTERED_cov_pivot.tsv",
+            f"results/aggregate_zt/{config['prefix']}_FILTERED_Nmod_pivot.tsv",
+        ]
+
 rule all:
-    input:
-        # assemble outputs (unchanged)
-        f"results/assemble/{config['prefix']}.gtf",
-        f"results/assemble/{config['prefix']}_classification_summary.tsv",
-        f"results/assemble/{config['prefix']}_tx_counts.tsv",
-        f"results/assemble/{config['prefix']}_tx_counts.pca.png",
-        f"results/assemble/{config['prefix']}_per_sample_stats.tsv",
-
-        # zt_tagged BAMs (unchanged)
-        expand("results/assemble/zt_tagged/{sample}.zt_tagged.bam", sample=SAMPLES),
-
-        # ZN modkit pileups (unchanged targets for the directories)
-        expand("results/modkit_zn/{sample}", sample=SAMPLES),
-
-        # ZN aggregation — use FILTERED artifacts
-        f"results/aggregate_zn/{config['prefix']}_FILTERED_sites_long.tsv",
-        # require the per-gene tables directory for FILTERED
-        directory(f"results/aggregate_zn/{config['prefix']}_FILTERED__per_gene_mod"),
-
-        # ZT modkit pileups (unchanged targets for the directories)
-        expand("results/modkit_zt/{sample}", sample=SAMPLES),
-
-        # ZT aggregation — use FILTERED artifacts
-        f"results/aggregate_zt/{config['prefix']}_FILTERED_long.tsv",
-        f"results/aggregate_zt/{config['prefix']}_FILTERED_frac_pivot.tsv",
-        f"results/aggregate_zt/{config['prefix']}_FILTERED_cov_pivot.tsv",
-        f"results/aggregate_zt/{config['prefix']}_FILTERED_Nmod_pivot.tsv",
-
-        # Stoichiometry diffs — point at FILTERED ZN long table
-        f"results/test_diffs/{config['prefix']}__ZN_site_diff_results.tsv",
-        f"results/test_diffs/{config['prefix']}__figs"
-
-
+    input: ALL_TARGETS
