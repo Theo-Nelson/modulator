@@ -277,5 +277,9 @@ These parameters allow for the identification of sites with differences across t
 ## Contributors 
 
 * [Theodore Nelson](https://github.com/Theo-Nelson), Weill Cornell Medicine
-* [Michael Goneos](https://github.com/mgoneos), Weill Cornell Medicine 
+* [Michael Goneos](https://github.com/mgoneos), Weill Cornell Medicine
+
+This project was supported with computational resources from the National Science Foundation ACCESS Allocation Request BIO240371. 
+
+T.M.N. was supported by a Medical Scientist Training Program grant from the National Institute of General Medical Sciences of the National Institutes of Health under award number: T32GM152349 to the Weill Cornell/Rockefeller/Sloan Kettering Tri-Institutional MD-PhD Program. 
 
