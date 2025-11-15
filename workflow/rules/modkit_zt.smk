@@ -48,3 +48,4 @@ rule modkit_pileup_zt:
                 shlex.quote(output.bed_dir),
                 "--ref", shlex.quote(input.ref)] + flags)
         shell(" ".join(cmd))
+

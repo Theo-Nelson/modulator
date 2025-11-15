@@ -123,4 +123,3 @@ rule assemble_transcripts:
         # Ensure the directory() target always exists
         mkdir -p "{ZT_DIR}"
         """
-

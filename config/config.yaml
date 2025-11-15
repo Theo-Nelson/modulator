@@ -37,7 +37,6 @@ modkit:
     include_unmapped: false
     edge_filter: null
     invert_edge_filter: false
-    threads: "{threads}"
     interval_size: 100000
     queue_size: 1000
     chunk_size: null

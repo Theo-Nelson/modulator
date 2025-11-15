@@ -215,3 +215,4 @@ if ENABLE_ZT:
 
 rule all:
     input: ALL_TARGETS
+
