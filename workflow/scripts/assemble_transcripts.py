@@ -1,40 +1,52 @@
 #!/usr/bin/env python3
 """
-Read-backed TES/APA assembler (v9)
+Read-backed TES/APA assembler (v9, regionized)
 
-What's new vs v8
-----------------
-1) New outputs (besides GTF, metrics, and classification summary):
-   - <prefix>_tx_counts.tsv               : transcript (rows) x sample (cols) counts for KEPT transcripts
-   - <prefix>_tx_counts.pca.png           : per-sample PCA scatter from log1p(counts)
-   - <prefix>_per_sample_stats.tsv        : basic per-sample stats from the counts table
-2) New CLI:
-   - --out-prefix: base path for all auxiliary outputs (defaults to out-gtf without .gtf)
-3) Keeps v8 features:
-   - Robust writer guard for per-transcript BAMs
-   - Deterministic 5' truncation assignment prioritizing strongest isoform
-   - ZT/ZG/ZN tagging, per-sample tagged BAMs
+Key changes vs. prior v9 drafts
+-------------------------------
+- Fast, deterministic regionization by streaming each BAM once per chromosome
+  to find all-sample zero-coverage gaps over coarse bins (--cov-bin-bp).
+- Optional deterministic random breakpoints injected INSIDE all-zero gaps
+  (--max-breakpoints-per-chrom, --rand-seed).
+- Cores = intervals between gaps; each core is processed independently
+  (parallel with --threads). Reads are fetched with ±pad, but an isoform is
+  KEPT only if its TES falls INSIDE the core (prevents duplicates).
+- Deterministic ordering preserved (stable sorts, seeded RNG only for gap injection).
 
-Tags on assigned reads
-----------------------
-- ZN (i): transcript_index within its gene (1..k)
-- ZG (i): gene_index (1..G) – deterministic within run
-- ZT (Z): "{gene_name}.{gene_id}.G{ZG}.T{ZN}" (human-readable)
-
-Standard Outputs
-----------------
-- <out>.gtf and <out>_classification_summary.tsv
+Outputs
+-------
+- <out>.gtf
 - <prefix>_metrics.tsv
-- zt_tagged/<sample>.zt_tagged.bam  (ALL reads retained; tags added where available)
-- zt_bams/<sample>.<ZT>.bam         (optional per-transcript subset BAMs)
+- <prefix>_classification_summary.tsv
+- <prefix>_tx_counts.tsv, <prefix>_tx_counts.pca.png
+- <prefix>_per_sample_stats.tsv
+- zt_tagged/*.zt_tagged.bam  (optional)
+- zt_bams/*.bam + modkit_manifest.tsv (optional)
+
+Typical use
+-----------
+python assemble_transcripts.py \
+  --dir <bam_dir> --glob "*.bam" \
+  --gtf hg38.ncbiRefSeq.gtf \
+  --out-gtf results/assemble/readbacked_annot.gtf \
+  --out-prefix results/assemble/readbacked_annot \
+  --threads 64 \
+  --primary-only --min-mapq 10 --min-introns-read 1 \
+  --min-reads 40 --min-frac 0.00 --min-introns 1 \
+  --min-polya-length 12 --min-polya-purity 0.5 --polya-support-frac 0.5 \
+  --tes-match-tol 25 --exact-tes-tol 10 \
+  --write-zt-tagged-sample-bams \
+  --min-reads-per-sample-for-mod 5 \
+  --min-total-reads-for-mod 20
 """
 
-import argparse, os, sys, glob, re, gzip
+import argparse, os, sys, glob, re, gzip, math, random
 from collections import defaultdict, Counter
 from concurrent.futures import ProcessPoolExecutor, as_completed
+
 import pysam
 
-# ---------- utils ----------
+# --------------------------- utils ---------------------------
 
 def median(vals):
     v = [x for x in vals if x is not None]
@@ -62,12 +74,12 @@ def intron_chain_1based(aln):
     chain = []
     ref = aln.reference_start
     for op, ln in (aln.cigartuples or []):
-        if op == 3:  # N (splice)
+        if op == 3:  # N
             donor = ref + 1
             acceptor = ref + ln
             chain.append((donor, acceptor))
             ref += ln
-        elif op in (0,2,7,8):  # M/D/=/X advance reference
+        elif op in (0,2,7,8):  # M/D/=/X
             ref += ln
     return tuple(chain)
 
@@ -136,203 +148,8 @@ def is_suffix(longer, shorter):
 def chain_to_str(chain):
     return "." if not chain else ";".join(f"{d}-{a}" for d,a in chain)
 
-# ---------- Streaming Cluster Manager ----------
+# --------------------------- GTF parsing ---------------------------
 
-class StreamingClusterManager:
-    """Manages active TES clusters with automatic flushing as coordinates advance."""
-    def __init__(self, apa_window):
-        self.apa_window = apa_window
-        self.active_clusters = defaultdict(list)  # key: (chrom, strand) -> list of clusters
-        self.finalized_clusters = []  # clusters ready for isoform processing
-        self.last_pos = defaultdict(lambda: -1)  # key: (chrom, strand) -> last TES seen
-        
-    def add_read(self, read_dict):
-        """Add a read to appropriate cluster or create new cluster."""
-        chrom = read_dict["chrom"]
-        strand = read_dict["strand"]
-        tes = read_dict["tes"]
-        key = (chrom, strand)
-        
-        # Flush old clusters when we've moved far enough ahead
-        if self.last_pos[key] >= 0:
-            flush_threshold = tes - (self.apa_window * 3)  # conservative margin
-            self._flush_clusters_before(key, flush_threshold)
-        
-        self.last_pos[key] = max(self.last_pos[key], tes)
-        
-        # Find or create cluster
-        cluster_list = self.active_clusters[key]
-        matched = None
-        for cluster in cluster_list:
-            if abs(cluster["rep_tes"] - tes) <= self.apa_window:
-                matched = cluster
-                break
-        
-        if matched:
-            matched["members"].append(read_dict)
-            # Update rep_tes to median (simple approach: just track)
-            matched["positions"].append(tes)
-        else:
-            # New cluster
-            new_cluster = {
-                "chrom": chrom,
-                "strand": strand,
-                "rep_tes": tes,
-                "positions": [tes],
-                "members": [read_dict]
-            }
-            cluster_list.append(new_cluster)
-    
-    def _flush_clusters_before(self, key, threshold):
-        """Move clusters with max TES before threshold to finalized."""
-        cluster_list = self.active_clusters[key]
-        remaining = []
-        for cluster in cluster_list:
-            max_tes = max(cluster["positions"])
-            if max_tes < threshold:
-                # Finalize this cluster
-                self.finalized_clusters.append(cluster)
-            else:
-                remaining.append(cluster)
-        self.active_clusters[key] = remaining
-    
-    def flush_all(self):
-        """Finalize all remaining active clusters."""
-        for key, cluster_list in self.active_clusters.items():
-            self.finalized_clusters.extend(cluster_list)
-        self.active_clusters.clear()
-    
-    def get_finalized_clusters(self):
-        """Return list of finalized clusters grouped by (chrom, strand)."""
-        groups = defaultdict(list)
-        for cluster in self.finalized_clusters:
-            # Recompute representative TES as most common position
-            positions = cluster["positions"]
-            c = Counter(positions)
-            rep = sorted(c.items(), key=lambda x: (x[1], x[0]))[-1][0]
-            groups[(cluster["chrom"], cluster["strand"])].append({
-                "tes": rep,
-                "members": cluster["members"]
-            })
-        return groups
-
-# ---------- Chunked parallel helpers ----------
-
-def _parse_region_to_parts(region_str):
-    """Parse region like 'chr:start-end' or 'chr' into (chrom, start, end or None)."""
-    if region_str is None:
-        return None
-    s = str(region_str)
-    if ":" in s:
-        chrom, rest = s.split(":", 1)
-        if "-" in rest:
-            a, b = rest.split("-", 1)
-            try:
-                return chrom, int(a.replace(",","")), int(b.replace(",",""))
-            except Exception:
-                return chrom, None, None
-        else:
-            return chrom, None, None
-    return s, None, None
-
-def _make_regions_from_header(bam_path, chunk_bases, overlap_bases, only_region=None):
-    """Generate region strings from BAM header with fixed-size chunks and overlap."""
-    import pysam
-    regs = []
-    with pysam.AlignmentFile(bam_path, "rb") as fh:
-        sq = fh.header.get("SQ", [])
-        if only_region:
-            ochr, ost, oend = _parse_region_to_parts(only_region)
-        else:
-            ochr = ost = oend = None
-        for ent in sq:
-            chrom = ent.get("SN")
-            ln = int(ent.get("LN", 0))
-            if not chrom or ln <= 0:
-                continue
-            if ochr and chrom != ochr:
-                continue
-            start0 = 1 if (ost is None) else max(1, ost)
-            end0 = ln if (oend is None) else min(ln, oend)
-            if chunk_bases <= 0:
-                regs.append(f"{chrom}:{start0}-{end0}")
-            else:
-                step = int(chunk_bases)
-                ov = int(max(0, overlap_bases))
-                s = start0
-                while s <= end0:
-                    e = min(end0, s + step - 1)
-                    # expand with overlap inside available bounds
-                    ss = max(start0, s - ov)
-                    ee = min(end0, e + ov)
-                    regs.append(f"{chrom}:{ss}-{ee}")
-                    s = e + 1
-    return regs
-
-def _process_region_worker(args):
-    """Worker: process a region across all BAMs, return list of clusters dicts.
-    Returns a list of {chrom,strand,tes,members} clusters.
-    """
-    (region, bam_paths, filters, apa_window) = args
-    import pysam
-    cm = StreamingClusterManager(apa_window)
-    for bam in bam_paths:
-        if not os.path.exists(bam):
-            continue
-        sample = os.path.basename(bam).replace(".bam", "")
-        with pysam.AlignmentFile(bam, "rb") as fh:
-            it = fh.fetch(region=region)
-            for aln in it:
-                if aln.is_unmapped: continue
-                if filters["primary_only"] and (aln.is_secondary or aln.is_supplementary): continue
-                if aln.mapping_quality < filters["min_mapq"]: continue
-                tx = get_tx_strand(aln)
-                sclen, tail = softclip3p_len_and_seq(aln, tx)
-                if filters["require_softclip3p"] > 0 and sclen < filters["require_softclip3p"]: continue
-                purity = polya_purity(tail, tx) if sclen > 0 else 0.0
-                chain = intron_chain_1based(aln)
-                if len(chain) < filters["min_introns_read"]: continue
-                chain_tx = chain_tx_order(chain, tx)
-                chrom = fh.get_reference_name(aln.reference_id)
-                read_dict = dict(
-                    chrom=chrom, strand=tx, tes=tes_pos1(aln, tx),
-                    chain=chain, chain_tx=chain_tx, n_introns=len(chain),
-                    exons=exon_blocks_from_aln(aln),
-                    bam=os.path.basename(bam), sample=sample, qname=aln.query_name,
-                    mapq=aln.mapping_quality, sclen=sclen, purity=purity
-                )
-                cm.add_read(read_dict)
-    cm.flush_all()
-    # convert to flat list of clusters
-    out = []
-    for (chrom, strand), lst in cm.get_finalized_clusters().items():
-        for cl in lst:
-            out.append({"chrom": chrom, "strand": strand, "tes": cl["tes"], "members": cl["members"]})
-    return out
-
-def _merge_region_clusters(cluster_lists, apa_window):
-    """Merge clusters from multiple regions by TES proximity within apa_window."""
-    by_cs = defaultdict(list)
-    for clist in cluster_lists:
-        for c in clist:
-            by_cs[(c["chrom"], c["strand"])].append(c)
-    merged_groups = defaultdict(list)
-    for (chrom, strand), lst in by_cs.items():
-        if not lst:
-            continue
-        # positions for clustering
-        positions = sorted(c["tes"] for c in lst)
-        clusters = cluster_positions(positions, apa_window)
-        for cl in clusters:
-            rep_pos = cl["rep"]
-            members = []
-            for c in lst:
-                if abs(c["tes"] - rep_pos) <= apa_window:
-                    members.extend(c["members"])  # combine
-            merged_groups[(chrom, strand)].append(dict(tes=rep_pos, members=members))
-    return merged_groups
-
-# ---------- GTF parsing ----------
 _attr_re = re.compile(r'(\S+)\s+"([^"]+)"')
 
 def parse_gtf_attrs(attr_field):
@@ -388,12 +205,7 @@ def load_gtf(gtf_path):
         tx.chain_tx = intron_chain_from_exons(tx.exons, tx.strand)
     return list(txs.values())
 
-# Build fast lookup structures for GTF transcripts to accelerate annotation
 def build_gtf_index(gtf_txs):
-    """Return two indices:
-    - by_cs: dict[(chrom,strand)] -> list of transcripts for that key
-    - tes_sorted: dict[(chrom,strand)] -> list of (tes_1based, transcript) sorted by tes
-    """
     by_cs = defaultdict(list)
     for tx in gtf_txs:
         by_cs[(tx.chrom, tx.strand)].append(tx)
@@ -402,7 +214,7 @@ def build_gtf_index(gtf_txs):
         tes_sorted[k] = sorted([(t.tes_1based, t) for t in lst], key=lambda x: x[0])
     return by_cs, tes_sorted
 
-# ---------- annotation ----------
+# --------------------------- annotation ---------------------------
 
 def exon_overlap_len(ex1, ex2):
     tot=0
@@ -414,27 +226,23 @@ def exon_overlap_len(ex1, ex2):
 
 def annotate_isoform(iso, gtf_by_cs, tes_sorted_index, tes_match_tol, exact_tes_tol):
     chrom, strand, tes = iso["chrom"], iso["strand"], iso["tes"]
-    # Candidates by TES proximity using pre-sorted TES list
     key = (chrom, strand)
     cands = []
     if key in tes_sorted_index:
         arr = tes_sorted_index[key]
-        # binary search window around tes
-        # find left bound
         lo, hi = 0, len(arr)
+        left = 0
+        # lower bound for tes - tol
+        x = tes - tes_match_tol
         while lo < hi:
-            mid = (lo + hi) // 2
-            if arr[mid][0] < tes - tes_match_tol:
-                lo = mid + 1
-            else:
-                hi = mid
+            mid = (lo+hi)//2
+            if arr[mid][0] < x: lo = mid+1
+            else: hi = mid
         left = lo
-        # iterate until beyond upper bound
         i = left
         upper = tes + tes_match_tol
         while i < len(arr) and arr[i][0] <= upper:
-            cands.append(arr[i][1])
-            i += 1
+            cands.append(arr[i][1]); i += 1
     match_source = "TES_TOL" if cands else "NONE"
     best = None
     if cands:
@@ -443,7 +251,6 @@ def annotate_isoform(iso, gtf_by_cs, tes_sorted_index, tes_match_tol, exact_tes_
             return (abs(tx.tes_1based - tes), same_chain, -exon_overlap_len(iso["rep_exons"], tx.exons), -len(tx.chain_tx))
         best = min(cands, key=rank)
     else:
-        # fallback: overlap search within chrom/strand bin only
         overlaps = []
         for tx in gtf_by_cs.get(key, []):
             if exon_overlap_len(iso["rep_exons"], tx.exons) > 0:
@@ -469,15 +276,226 @@ def annotate_isoform(iso, gtf_by_cs, tes_sorted_index, tes_match_tol, exact_tes_
         return dict(classification="NOVEL_LOCUS", gene_id="NA", gene_name="NA",
                     matched_tid="NA", gtf_tes="NA", gtf_chain_tx=tuple(), tes_delta_bp="NA", exon_overlap_bp=0, match_source=match_source)
 
-# ---------- main ----------
+# --------------------------- regionization ---------------------------
+
+def _bins_for_chrom(chrom_len, bin_bp):
+    n = max(1, math.ceil(chrom_len / bin_bp))
+    starts = [i*bin_bp for i in range(n)]
+    ends = [min(chrom_len, (i+1)*bin_bp) for i in range(n)]
+    return list(zip(starts, ends))  # 0-based half-open
+
+def _presence_bins_for_chrom(handles, chrom, chrom_len, bin_bp, status_every_reads=0):
+    import numpy as np
+    bins = _bins_for_chrom(chrom_len, bin_bp)
+    nb = len(bins)
+    union_presence = np.zeros(nb, dtype=np.bool_)
+    for hi, fh in enumerate(handles):
+        seen = 0
+        try:
+            for aln in fh.fetch(contig=chrom):
+                seen += 1
+                if aln.is_unmapped: continue
+                s = aln.reference_start
+                e = aln.reference_end
+                if e <= 0: continue
+                if s < 0: s = 0
+                if e > chrom_len: e = chrom_len
+                if e <= s: continue
+                bs = s // bin_bp
+                be = (e - 1) // bin_bp
+                union_presence[bs:be+1] = True
+                if status_every_reads and (seen % status_every_reads == 0):
+                    print(f"[REGIONIZE] {chrom} reads streamed (bam#{hi+1}): {seen:,}", file=sys.stderr)
+        except KeyError:
+            continue
+    all_zero = ~union_presence
+    return bins, all_zero
+
+def _zero_runs_to_gaps(bins, all_zero, min_gap_bins):
+    gaps = []
+    i = 0
+    n = len(all_zero)
+    while i < n:
+        if not all_zero[i]:
+            i += 1; continue
+        j = i
+        while j < n and all_zero[j]:
+            j += 1
+        if (j - i) >= min_gap_bins:
+            gaps.append((bins[i][0], bins[j-1][1]))  # [s,e)
+        i = j
+    return gaps
+
+def _inject_random_breaks(chrom_len, gaps, bin_bp, max_breaks, seed=1337):
+    if max_breaks <= 0: return []
+    rng = random.Random(seed)
+    # sample candidate bins uniformly; keep only those landing in a gap
+    picked = []
+    if not gaps: return picked
+    # Flatten gaps into cumulative lengths for sampling proportional to gap size
+    total_gap_bp = sum(e-s for s,e in gaps)
+    if total_gap_bp <= 0: return picked
+    # draw up to max_breaks distinct positions
+    tried = 0
+    seen = set()
+    while len(picked) < max_breaks and tried < max_breaks * 20:
+        tried += 1
+        # choose a random point in the union of gaps
+        r = rng.randrange(total_gap_bp)
+        acc = 0
+        for (s,e) in gaps:
+            span = e - s
+            if r < acc + span:
+                pos = s + (r - acc)
+                # snap to bin boundary for stability
+                pos = (pos // bin_bp) * bin_bp
+                if pos <= 0 or pos >= chrom_len: break
+                if pos not in seen:
+                    seen.add(pos)
+                    picked.append((pos, pos))  # point break
+                break
+            acc += span
+    # convert points to degenerate gaps so they act as cuts
+    return [(p, p) for (p, _) in picked]
+
+def _cores_from_gaps(chrom_len, gaps):
+    # gaps are [s,e) disjoint (not guaranteed, but OK). Build complement intervals
+    pts = [0]
+    for s,e in gaps:
+        s = max(0, min(chrom_len, s))
+        e = max(0, min(chrom_len, e))
+        if e <= s: continue
+        pts.append(s); pts.append(e)
+    pts.append(chrom_len)
+    pts = sorted(set(pts))
+    cores = []
+    for i in range(len(pts)-1):
+        s, e = pts[i], pts[i+1]
+        if e > s:
+            cores.append((s,e))
+    # merge tiny slivers created by point breaks (zero-length removed above).
+    return cores
+
+# --------------------------- per-core processing ---------------------------
+
+def _process_core(core_args):
+    """
+    Fetch reads for a (chrom, s, e) core with padding; cluster TES; assign truncations.
+    Only keep isoforms whose TES is within [s,e] (core span) to avoid duplicates.
+    Return list of isoform dicts (without annotation yet).
+    """
+    (chrom, s, e, pad_bp, bam_paths, filters, iso_params) = core_args
+    apa_window = iso_params["apa_window"]
+    # collect reads across all BAMs
+    mem = []
+    for bam in bam_paths:
+        sample = os.path.basename(bam).replace(".bam","")
+        if not os.path.exists(bam): continue
+        with pysam.AlignmentFile(bam, "rb") as fh:
+            s_fetch = max(0, s - pad_bp)
+            e_fetch = e + pad_bp
+            try:
+                it = fh.fetch(contig=chrom, start=s_fetch, end=e_fetch)
+            except ValueError:
+                continue
+            for aln in it:
+                if aln.is_unmapped: continue
+                if filters["primary_only"] and (aln.is_secondary or aln.is_supplementary): continue
+                if aln.mapping_quality < filters["min_mapq"]: continue
+                tx = get_tx_strand(aln)
+                sclen, tail = softclip3p_len_and_seq(aln, tx)
+                if filters["require_softclip3p"] > 0 and sclen < filters["require_softclip3p"]: continue
+                purity = polya_purity(tail, tx) if sclen > 0 else 0.0
+                chain = intron_chain_1based(aln)
+                if len(chain) < filters["min_introns_read"]: continue
+                chain_tx = chain_tx_order(chain, tx)
+                rd_chrom = fh.get_reference_name(aln.reference_id)
+                if rd_chrom != chrom:  # safety
+                    continue
+                rd = dict(
+                    chrom=chrom, strand=tx, tes=tes_pos1(aln, tx),
+                    chain=chain, chain_tx=chain_tx, n_introns=len(chain),
+                    exons=exon_blocks_from_aln(aln),
+                    bam=os.path.basename(bam), sample=sample, qname=aln.query_name,
+                    mapq=aln.mapping_quality, sclen=sclen, purity=purity
+                )
+                mem.append(rd)
+
+    if not mem:
+        return []
+
+    # cluster TES within this core (TES can be near edges due to pad; we keep only TES in [s,e])
+    by_cs = defaultdict(list)
+    for r in mem:
+        by_cs[(r["chrom"], r["strand"])].append(r)
+
+    isoforms = []
+    for (c,strand), rlist in by_cs.items():
+        positions = sorted(r["tes"] for r in rlist)
+        if not positions: continue
+        clusters = cluster_positions(positions, apa_window)
+        for cl in clusters:
+            rep_pos = cl["rep"]
+            # only consider isoforms whose TES (rep_pos) falls inside the core span
+            if not (s <= rep_pos <= e):
+                continue
+            members = [r for r in rlist if abs(r["tes"] - rep_pos) <= apa_window]
+            if not members: continue
+
+            # determine canon chains (full-length) and assign truncations deterministically
+            exact_counts = Counter(tuple(m["chain_tx"]) for m in members)
+            canons = list(exact_counts.keys())
+            canon_rank = sorted(
+                canons, key=lambda ch: (exact_counts[ch], exact_counts[ch], len(ch)), reverse=True
+            )
+            assigned = set()
+            chain_to_idxs = defaultdict(list)
+            for i, m in enumerate(members):
+                chain_to_idxs[tuple(m["chain_tx"])].append(i)
+
+            for canon in canon_rank:
+                idxs = []
+                for ch, idxlist in chain_to_idxs.items():
+                    if is_suffix(canon, ch):
+                        for i in idxlist:
+                            if i not in assigned:
+                                idxs.append(i)
+                if not idxs:
+                    continue
+                for i in idxs: assigned.add(i)
+
+                grp = [members[i] for i in idxs]
+                full_len_members = [m for m in grp if tuple(m["chain_tx"]) == canon]
+                rep = max(full_len_members or grp,
+                          key=lambda m: (m["exons"][-1][1]-m["exons"][0][0]))
+                rep_exons = list(rep["exons"])
+                tes = rep_pos
+                if strand == "+":
+                    if rep_exons[-1][1] != tes:
+                        rep_exons[-1] = (rep_exons[-1][0], tes)
+                else:
+                    if rep_exons[0][0] != tes:
+                        rep_exons[0] = (tes, rep_exons[0][1])
+                polya_ok = sum(1 for m in grp if m["sclen"] >= iso_params["min_polya_length"]
+                               and m["purity"] >= iso_params["min_polya_purity"])
+                polya_frac = polya_ok/len(grp) if grp else 0.0
+                isoforms.append(dict(
+                    chrom=chrom, strand=strand, tes=tes,
+                    chain_tx=canon, n_introns=len(canon),
+                    members=grp, rep_exons=rep_exons,
+                    polya_frac=polya_frac,
+                ))
+    return isoforms
+
+# --------------------------- main ---------------------------
 
 def main():
-    ap = argparse.ArgumentParser(description="TES/APA assembler v9 with extra counts/PCA/stats outputs")
+    ap = argparse.ArgumentParser(description="TES/APA assembler v9 (regionized)")
     # Inputs
     ap.add_argument("--bams", nargs="+")
     ap.add_argument("--glob")
     ap.add_argument("--dir")
-    ap.add_argument("--region")
+    ap.add_argument("--region", help="Limit to chrom[:start-end]")
     ap.add_argument("--gtf")
     ap.add_argument("--threads", type=int, default=0)
 
@@ -489,7 +507,6 @@ def main():
 
     # Isoform support thresholds
     ap.add_argument("--apa-window", type=int, default=20)
-    ap.add_argument("--tes-window", type=int, default=None)
     ap.add_argument("--min-reads", type=int, default=10)
     ap.add_argument("--min-frac", type=float, default=0.05)
     ap.add_argument("--min-introns", type=int, default=0)
@@ -504,28 +521,23 @@ def main():
     ap.add_argument("--exact-tes-tol", type=int, default=10)
 
     # Outputs
-    ap.add_argument("--write-zt-bams", action="store_true",
-                    help="Write per-transcript subset BAMs (tags added)")
-    ap.add_argument("--write-zt-tagged-sample-bams", action="store_true",
-                    help="Write one tagged BAM per input BAM (ALL reads retained)")
+    ap.add_argument("--write-zt-bams", action="store_true")
+    ap.add_argument("--write-zt-tagged-sample-bams", action="store_true")
     ap.add_argument("--emit-modkit-manifest", action="store_true")
     ap.add_argument("--min-reads-per-sample-for-mod", type=int, default=5)
     ap.add_argument("--min-total-reads-for-mod", type=int, default=20)
     ap.add_argument("--out-gtf", default="readbacked_annot.gtf")
-    ap.add_argument("--out-prefix", default=None,
-                    help="Prefix for extra outputs (counts/PCA/stats). If omitted, uses out-gtf without .gtf")
-    
-    # Performance options
-    ap.add_argument("--streaming", action="store_true", default=True,
-                    help="Use streaming cluster mode (lower memory, default: True)")
-    ap.add_argument("--no-streaming", dest="streaming", action="store_false",
-                    help="Disable streaming mode (load all reads into memory)")
-    ap.add_argument("--progress-interval", type=int, default=100000,
-                    help="Print progress every N reads (default: 100000, 0 to disable)")
-    ap.add_argument("--chunk-bases", type=int, default=0,
-                    help="If >0 and threads>1, process in parallel genomic chunks of this size (bp) with overlap.")
-    ap.add_argument("--chunk-overlap-bases", type=int, default=None,
-                    help="Optional explicit chunk overlap in bp (default: 3*apa_window).")
+    ap.add_argument("--out-prefix", default=None)
+
+    # Regionization (new)
+    ap.add_argument("--cov-bin-bp", type=int, default=500, help="Coarse bin size for gap finding")
+    ap.add_argument("--min-gap-bins", type=int, default=2, help="Min consecutive all-zero bins to call a gap")
+    ap.add_argument("--pad-fetch-bp", type=int, default=2000, help="Padding when fetching per-core reads")
+    ap.add_argument("--max-breakpoints-per-chrom", type=int, default=50,
+                    help="Deterministic random breaks inside all-zero gaps")
+    ap.add_argument("--rand-seed", type=int, default=1337)
+    ap.add_argument("--status-every", type=int, default=0,
+                    help="Print regionization read-count status every N reads per BAM (0=off)")
 
     args = ap.parse_args()
 
@@ -540,155 +552,123 @@ def main():
     if not bams:
         sys.exit("No BAMs found")
 
-    # Load GTF + indices
+    # Load GTF (+ index)
     gtf_txs = load_gtf(args.gtf) if args.gtf else []
     if args.gtf:
-        gtf_by_cs, gtf_tes_sorted = build_gtf_index(gtf_txs)
         print(f"[INFO] Loaded {len(gtf_txs)} transcripts from {args.gtf}", file=sys.stderr)
+        gtf_by_cs, gtf_tes_sorted = build_gtf_index(gtf_txs)
     else:
-        gtf_by_cs, gtf_tes_sorted = {}, {}
         print("[INFO] No GTF supplied", file=sys.stderr)
+        gtf_by_cs, gtf_tes_sorted = {}, {}
 
-    # Effective window for clustering
-    apa_window = args.apa_window if args.apa_window is not None else (args.tes_window if args.tes_window else 20)
+    # Parse optional region limit
+    only_chrom = None; only_start0=None; only_end0=None
+    if args.region:
+        s = args.region
+        if ":" in s:
+            chrom, rest = s.split(":",1)
+            only_chrom = chrom
+            if "-" in rest:
+                a,b = rest.split("-",1)
+                try:
+                    only_start0 = int(a.replace(",",""))
+                    only_end0 = int(b.replace(",",""))
+                except Exception:
+                    only_start0 = None; only_end0 = None
+        else:
+            only_chrom = s
 
-    # Decide execution mode: single-process streaming vs chunked parallel
-    use_parallel_chunks = bool(args.streaming and args.chunk_bases and args.chunk_bases > 0 and args.threads and args.threads > 1)
+    # Chrom sizes from first BAM
+    chrom_sizes = []
+    with pysam.AlignmentFile(bams[0], "rb") as fh0:
+        sq = fh0.header.get("SQ", [])
+        for ent in sq:
+            chrom = ent.get("SN")
+            ln = int(ent.get("LN", 0))
+            if chrom and ln>0:
+                chrom_sizes.append((chrom, ln))
 
-    if use_parallel_chunks:
-        # Build regions with overlap
-        overlap_bases = args.chunk_overlap_bases if args.chunk_overlap_bases is not None else (3 * apa_window)
-        # Regions derived from the first BAM header; applied to all BAMs
-        regions = _make_regions_from_header(bams[0], args.chunk_bases, overlap_bases, only_region=args.region)
-        print(f"[INFO] Parallel chunk mode: {len(regions)} regions, chunk={args.chunk_bases}bp, overlap={overlap_bases}bp, threads={args.threads}", file=sys.stderr)
-        # Prepare filters bundle for worker
-        filters = dict(primary_only=bool(args.primary_only), min_mapq=int(args.min_mapq),
-                       require_softclip3p=int(args.require_softclip3p), min_introns_read=int(args.min_introns_read))
-        cluster_lists = []
-        with ProcessPoolExecutor(max_workers=args.threads) as ex:
-            futs = []
-            for reg in regions:
-                futs.append(ex.submit(_process_region_worker, (reg, bams, filters, apa_window)))
-            for i, fut in enumerate(as_completed(futs), 1):
-                cl = fut.result()
-                cluster_lists.append(cl)
-                if i % max(1, len(regions)//10) == 0:
-                    print(f"[INFO] Completed {i}/{len(regions)} regions", file=sys.stderr)
-        # Merge clusters from regions
-        groups = _merge_region_clusters(cluster_lists, apa_window)
-        total_reads_processed = sum(len(c["members"]) for cl in cluster_lists for c in cl)
-        if total_reads_processed == 0:
-            sys.exit("No usable reads found after filters")
-    else:
-        # Single-process streaming over whole BAM set
-        from pysam import AlignmentFile
-        cluster_manager = StreamingClusterManager(apa_window)
-        total_reads_processed = 0
-        print(f"[INFO] Processing reads in streaming mode (window={apa_window})", file=sys.stderr)
-        for bam in bams:
-            if not os.path.exists(bam):
-                print(f"[WARN] Missing BAM: {bam}", file=sys.stderr); continue
-            sample = os.path.basename(bam).replace(".bam","")
-            with AlignmentFile(bam, "rb") as fh:
-                it = fh.fetch(region=args.region) if args.region else fh.fetch()
-                for aln in it:
-                    if aln.is_unmapped: continue
-                    if args.primary_only and (aln.is_secondary or aln.is_supplementary): continue
-                    if aln.mapping_quality < args.min_mapq: continue
-                    tx = get_tx_strand(aln)
-                    sclen, tail = softclip3p_len_and_seq(aln, tx)
-                    if args.require_softclip3p > 0 and sclen < args.require_softclip3p: continue
-                    purity = polya_purity(tail, tx) if sclen > 0 else 0.0
-                    chain = intron_chain_1based(aln)
-                    if len(chain) < args.min_introns_read: continue
-                    chain_tx = chain_tx_order(chain, tx)
-                    chrom = fh.get_reference_name(aln.reference_id)
-                    read_dict = dict(
-                        chrom=chrom, strand=tx, tes=tes_pos1(aln, tx),
-                        chain=chain, chain_tx=chain_tx, n_introns=len(chain),
-                        exons=exon_blocks_from_aln(aln),
-                        bam=os.path.basename(bam), sample=sample, qname=aln.query_name,
-                        mapq=aln.mapping_quality, sclen=sclen, purity=purity
-                    )
-                    cluster_manager.add_read(read_dict)
-                    total_reads_processed += 1
-                    if args.progress_interval > 0 and total_reads_processed % args.progress_interval == 0:
-                        n_active = sum(len(clusters) for clusters in cluster_manager.active_clusters.values())
-                        n_finalized = len(cluster_manager.finalized_clusters)
-                        print(f"[INFO] Processed {total_reads_processed:,} reads (active clusters: {n_active}, finalized: {n_finalized})", file=sys.stderr)
-        cluster_manager.flush_all()
-        print(f"[INFO] Finalized {len(cluster_manager.finalized_clusters)} total clusters from {total_reads_processed:,} reads", file=sys.stderr)
-        if total_reads_processed == 0:
-            sys.exit("No usable reads found after filters")
-        groups = cluster_manager.get_finalized_clusters()
-
-    # Collapse & assign 5' truncations with priority to strongest isoform
-    isoforms = []
-    for (chrom, strand), cluster_list in groups.items():
-        for cl in cluster_list:
-            mem = cl["members"]
-            if not mem: continue
-
-            # Count exact-chain (full-length) support per canon
-            exact_counts = Counter(tuple(m["chain_tx"]) for m in mem)
-            # Also track total presence of each chain (including truncations) for tiebreaks
-            total_chain_counts = exact_counts.copy()
-
-            # Candidate canon chains are unique exact chains seen
-            canons = list(exact_counts.keys())
-
-            # Rank canons: (full-length support desc, total support desc, chain length desc)
-            canon_rank = sorted(
-                canons,
-                key=lambda ch: (exact_counts[ch], total_chain_counts[ch], len(ch)),
-                reverse=True,
+    # Regionize
+    bam_handles = [pysam.AlignmentFile(bp, "rb") for bp in bams]
+    try:
+        print("[INFO] Regionizing via all-sample zero-coverage gaps ...", file=sys.stderr)
+        cores_all = []
+        for chrom, clen in chrom_sizes:
+            if only_chrom and chrom != only_chrom:
+                continue
+            bins, all_zero = _presence_bins_for_chrom(
+                bam_handles, chrom, clen, args.cov_bin_bp, status_every_reads=args.status_every
             )
+            gaps = _zero_runs_to_gaps(bins, all_zero, args.min_gap_bins)
+            injected = _inject_random_breaks(
+                clen, gaps, args.cov_bin_bp, args.max_breakpoints_per_chrom, seed=args.rand_seed
+            )
+            gaps_all = gaps + injected
+            cores = _cores_from_gaps(clen, gaps_all)
 
-            # Map reads to best-ranked canon where read chain is suffix of the canon chain
-            assigned = set()
-            chain_to_idxs = defaultdict(list)
-            for i, m in enumerate(mem):
-                chain_to_idxs[tuple(m["chain_tx"])].append(i)
+            # restrict to requested subregion
+            c0 = only_start0 if (only_chrom==chrom and only_start0 is not None) else 0
+            c1 = only_end0 if (only_chrom==chrom and only_end0 is not None) else clen
+            kept = 0
+            for (s,e) in cores:
+                if e <= c0 or s >= c1: continue
+                ss = max(s, c0); ee = min(e, c1)
+                if ee > ss:
+                    cores_all.append((chrom, ss, ee))
+                    kept += 1
+            print(f"[INFO] {chrom}: cores_total={len(cores)} kept_in_region={kept}", file=sys.stderr)
+    finally:
+        for fh in bam_handles:
+            try: fh.close()
+            except Exception: pass
 
-            for canon in canon_rank:
-                idxs = []
-                for ch, idxlist in chain_to_idxs.items():
-                    if is_suffix(canon, ch):
-                        for i in idxlist:
-                            if i not in assigned:
-                                idxs.append(i)
-                if not idxs:
-                    continue
-                for i in idxs: assigned.add(i)
+    if not cores_all:
+        sys.exit("No cores to process (after regionization)")
 
-                members = [mem[i] for i in idxs]
-                full_len_members = [m for m in members if tuple(m["chain_tx"]) == canon]
-                rep = max(full_len_members or members,
-                          key=lambda m: (m["exons"][-1][1]-m["exons"][0][0]))
-                rep_exons = list(rep["exons"])
-                tes = cl["tes"]
-                if strand == "+":
-                    if rep_exons[-1][1] != tes:
-                        rep_exons[-1] = (rep_exons[-1][0], tes)
-                else:
-                    if rep_exons[0][0] != tes:
-                        rep_exons[0] = (tes, rep_exons[0][1])
+    # Prepare args for workers
+    filters = dict(
+        primary_only=bool(args.primary_only),
+        min_mapq=int(args.min_mapq),
+        require_softclip3p=int(args.require_softclip3p),
+        min_introns_read=int(args.min_introns_read),
+    )
+    iso_params = dict(
+        apa_window=int(args.apa_window),
+        min_polya_length=int(args.min_polya_length),
+        min_polya_purity=float(args.min_polya_purity),
+    )
+    worker_args = [
+        (chrom, s, e, int(args.pad_fetch_bp), bams, filters, iso_params)
+        for (chrom, s, e) in cores_all
+    ]
 
-                polya_ok = sum(1 for m in members if m["sclen"] >= args.min_polya_length and m["purity"] >= args.min_polya_purity)
-                polya_frac = polya_ok/len(members) if members else 0.0
+    # Process cores (parallel or serial)
+    kept_isoforms = []
+    n_threads = max(1, int(args.threads or 0))
+    print(f"[INFO] Processing {len(worker_args)} cores with threads={n_threads}", file=sys.stderr)
+    if n_threads > 1:
+        with ProcessPoolExecutor(max_workers=n_threads) as ex:
+            futs = [ex.submit(_process_core, wa) for wa in worker_args]
+            for i, fut in enumerate(as_completed(futs), 1):
+                out = fut.result()
+                kept_isoforms.extend(out)
+                if i % max(1, len(worker_args)//20) == 0:
+                    print(f"[INFO] cores done: {i}/{len(worker_args)}", file=sys.stderr)
+    else:
+        for i, wa in enumerate(worker_args, 1):
+            out = _process_core(wa)
+            kept_isoforms.extend(out)
+            if i % max(1, len(worker_args)//20) == 0:
+                print(f"[INFO] cores done: {i}/{len(worker_args)}", file=sys.stderr)
 
-                isoforms.append(dict(
-                    chrom=chrom, strand=strand, tes=tes,
-                    chain_tx=canon, n_introns=len(canon),
-                    members=members, rep_exons=rep_exons,
-                    polya_frac=polya_frac,
-                ))
+    if not kept_isoforms:
+        sys.exit("No candidate isoforms found")
 
-    # Global counts & filtering
-    total_reads_used = sum(len(iso["members"]) for iso in isoforms)
-    kept = []
+    # Global filtering + metrics (same as single-pass)
+    total_reads_used = sum(len(iso["members"]) for iso in kept_isoforms)
+    final_kept = []
     metrics_rows = []
-    for iso in isoforms:
+    for iso in kept_isoforms:
         chrom = iso["chrom"]; strand = iso["strand"]; tes = iso["tes"]
         chain_tx = iso["chain_tx"]; n_introns = iso["n_introns"]
         members = iso["members"]; rep_exons = iso["rep_exons"]; polya_frac = iso["polya_frac"]
@@ -719,7 +699,7 @@ def main():
         ])
 
         if keep:
-            kept.append(dict(
+            final_kept.append(dict(
                 chrom=chrom, strand=strand, tes=tes, chain_tx=chain_tx,
                 n_introns=n_introns, members=members, rep_exons=rep_exons,
                 count=count, frac_global=frac_global, polya_frac=polya_frac,
@@ -727,7 +707,6 @@ def main():
                 sample_ct=sample_ct, chain_counts=chain_counts
             ))
 
-    # Resolve prefix & write metrics
     prefix = args.out_prefix if args.out_prefix else args.out_gtf.replace(".gtf","")
     os.makedirs(os.path.dirname(args.out_gtf) or ".", exist_ok=True)
 
@@ -737,20 +716,20 @@ def main():
         for row in metrics_rows:
             m.write("\t".join(map(str,row))+"\n")
 
-    if not kept:
+    if not final_kept:
         sys.exit(f"No isoforms passed filters. See metrics: {metrics_path}")
 
-    # Annotate and bucket by gene
+    # Annotate & bucket
     def annotate_isoform_safe(iso):
         return annotate_isoform(iso, gtf_by_cs, gtf_tes_sorted, args.tes_match_tol, args.exact_tes_tol) if gtf_txs else dict(
             classification="NOVEL_LOCUS", gene_id="NA", gene_name="NA", matched_tid="NA",
             gtf_tes="NA", gtf_chain_tx=tuple(), tes_delta_bp="NA", exon_overlap_bp=0, match_source="NONE")
 
-    for iso in kept:
+    for iso in final_kept:
         iso["annotation"] = annotate_isoform_safe(iso)
 
     buckets = defaultdict(list)
-    for iso in kept:
+    for iso in final_kept:
         ann = iso["annotation"]
         if ann["gene_name"] != "NA" and ann["gene_id"] != "NA":
             gkey = (ann["gene_name"], ann["gene_id"])
@@ -763,19 +742,18 @@ def main():
 
     for gk in gene_keys_sorted:
         iso_list = buckets[gk]
-        # order by support desc then TES position
         iso_list_sorted = sorted(iso_list, key=lambda x: (-x["count"], x["tes"]))
         for tidx, iso in enumerate(iso_list_sorted, 1):
             gn, gid = gk
             gidx = gene_index[gk]
             iso["gene_name_label"], iso["gene_id_label"] = gn, gid
-            iso["gene_index"] = gidx        # ZG
-            iso["tx_index"] = tidx          # ZN (per gene)
+            iso["gene_index"] = gidx
+            iso["tx_index"] = tidx
             iso["zt_label"] = f"{gn}.{gid}.G{gidx}.T{tidx}"
 
     # Write GTF
     with open(args.out_gtf, "w") as out:
-        for iso in sorted(kept, key=lambda x: (x["gene_index"], x["tx_index"])):
+        for iso in sorted(final_kept, key=lambda x: (x["gene_index"], x["tx_index"])):
             chrom=iso["chrom"]; strand=iso["strand"]; tes=iso["tes"]
             rep_exons=iso["rep_exons"]; chain_tx=iso["chain_tx"]
             t_start, t_end = rep_exons[0][0], rep_exons[-1][1]
@@ -798,7 +776,7 @@ def main():
     summary_path = f"{prefix}_classification_summary.tsv"
     with open(summary_path, "w") as s:
         s.write("#code\tzt_label\tgene_index\ttranscript_index\tchrom\tstrand\tiso_tes\tiso_chain_tx\tgtf_gene_id\tgtf_gene_name\tgtf_transcript_id\tgtf_tes\tgtf_chain_tx\ttes_delta_bp\texon_overlap_bp\tmatch_source\tclassification\tread_support\tfrac_global\tpolya_support_frac\tsample_counts\n")
-        for iso in sorted(kept, key=lambda x: (x["gene_index"], x["tx_index"])):
+        for iso in sorted(final_kept, key=lambda x: (x["gene_index"], x["tx_index"])):
             ann = iso["annotation"]
             s.write("\t".join(map(str,[
                 iso["zt_label"], iso["zt_label"], iso["gene_index"], iso["tx_index"], iso["chrom"], iso["strand"], iso["tes"],
@@ -809,37 +787,31 @@ def main():
                 "|".join(f"{k}:{v}" for k,v in sorted(iso["sample_ct"].items()))
             ]))+"\n")
 
-    # === Extra outputs: transcript counts, PCA (samples), per-sample stats ===
+    # === Extra outputs: counts, PCA, per-sample stats ===
     import pandas as pd
     import numpy as np
     import matplotlib
     matplotlib.use("Agg")
     import matplotlib.pyplot as plt
 
-    # collect samples and transcript IDs
-    all_samples = sorted({s for iso in kept for s in iso["sample_ct"].keys()})
-    tx_ids = [iso["zt_label"] for iso in kept]
-
-    # counts matrix (KEPT transcripts)
+    all_samples = sorted({s for iso in final_kept for s in iso["sample_ct"].keys()})
+    tx_ids = [iso["zt_label"] for iso in final_kept]
     data = []
-    for iso in kept:
-        row = [iso["sample_ct"].get(s, 0) for s in all_samples]
-        data.append(row)
+    for iso in final_kept:
+        data.append([iso["sample_ct"].get(s, 0) for s in all_samples])
     counts_df = pd.DataFrame(data, index=tx_ids, columns=all_samples)
     counts_path = f"{prefix}_tx_counts.tsv"
     counts_df.to_csv(counts_path, sep="\t")
 
-    # PCA on samples (features = transcripts), using log1p counts
-    X = np.log1p(counts_df.values.T)  # shape: (n_samples, n_transcripts)
+    X = np.log1p(counts_df.values.T)
+    pca_png = f"{prefix}_tx_counts.pca.png"
     if X.size and X.shape[0] >= 1 and X.shape[1] >= 1:
         Xc = X - X.mean(axis=0, keepdims=True)
-        # SVD
         U, S, Vt = np.linalg.svd(Xc, full_matrices=False)
         pcs = min(2, S.size)
         PC = U[:, :pcs] * S[:pcs] if pcs else np.zeros((X.shape[0], 0))
         var_expl = (S**2) / (S**2).sum() if S.size else np.zeros_like(S)
 
-        pca_png = f"{prefix}_tx_counts.pca.png"
         plt.figure(figsize=(6,5))
         if pcs >= 2:
             plt.scatter(PC[:,0], PC[:,1])
@@ -848,7 +820,6 @@ def main():
             plt.xlabel(f"PC1 ({var_expl[0]*100:.1f}% var)")
             plt.ylabel(f"PC2 ({var_expl[1]*100:.1f}% var)")
         else:
-            # fall back: 1D PC or all zeros
             x = PC[:,0] if pcs >= 1 else np.zeros(X.shape[0])
             plt.scatter(x, np.zeros_like(x))
             for i, name in enumerate(all_samples):
@@ -860,52 +831,43 @@ def main():
         plt.savefig(pca_png, dpi=150)
         plt.close()
     else:
-        pca_png = f"{prefix}_tx_counts.pca.png"
-        # write an empty placeholder figure
-        plt.figure(figsize=(6,5))
-        plt.title("Sample PCA (no data)")
-        plt.savefig(pca_png, dpi=150)
-        plt.close()
+        plt.figure(figsize=(6,5)); plt.title("Sample PCA (no data)"); plt.savefig(pca_png, dpi=150); plt.close()
 
-    # per-sample stats
     rows = []
-    for s in all_samples:
-        col = counts_df[s]
+    for sname in all_samples:
+        col = counts_df[sname]
         detected = (col > 0)
         total_reads = int(col.sum())
         n_tx = int(detected.sum())
         med_reads = float(col[detected].median()) if n_tx > 0 else 0.0
-        rows.append(dict(sample=s, total_reads=total_reads, n_transcripts=n_tx, median_reads_per_tx=med_reads))
+        rows.append(dict(sample=sname, total_reads=total_reads, n_transcripts=n_tx, median_reads_per_tx=med_reads))
     stats_df = pd.DataFrame(rows).sort_values("sample")
     stats_path = f"{prefix}_per_sample_stats.tsv"
     stats_df.to_csv(stats_path, sep="\t", index=False)
 
-    # Build read -> (ZT, ZG, ZN) map only if needed by downstream tagging/exports
+    # Optional ZT outputs
     need_assign = bool(args.write_zt_bams or args.emit_modkit_manifest or args.write_zt_tagged_sample_bams)
     assign = None
     if need_assign:
         assign = defaultdict(dict)
-        for iso in kept:
+        for iso in final_kept:
             for m in iso["members"]:
-                assign[m["sample"]][m["qname"]] = (iso["zt_label"], iso["gene_index"], iso["tx_index"])  # ZT, ZG, ZN
+                assign[m["sample"]][m["qname"]] = (iso["zt_label"], iso["gene_index"], iso["tx_index"])
 
-    # Optional: per-transcript subset BAMs
     if args.write_zt_bams or args.emit_modkit_manifest:
         out_dir = os.path.join(os.path.dirname(args.out_gtf) or ".", "zt_bams")
         os.makedirs(out_dir, exist_ok=True)
         manifest_rows = []
-
-        for iso in kept:
+        for iso in final_kept:
             if sum(iso["sample_ct"].values()) < args.min_total_reads_for_mod:
                 continue
             for sample, n in iso["sample_ct"].items():
                 if n < args.min_reads_per_sample_for_mod:
                     continue
                 iso.setdefault("eligible_samples", set()).add(sample)
-
         for bam in bams:
             sample = os.path.basename(bam).replace(".bam","")
-            elig_codes = {iso["zt_label"] for iso in kept if "eligible_samples" in iso and sample in iso["eligible_samples"]}
+            elig_codes = {iso["zt_label"] for iso in final_kept if "eligible_samples" in iso and sample in iso["eligible_samples"]}
             if not elig_codes:
                 continue
             with pysam.AlignmentFile(bam, "rb") as inp:
@@ -914,18 +876,14 @@ def main():
                     for code in sorted(elig_codes):
                         out_bam = os.path.join(out_dir, f"{sample}.{code}.bam")
                         writers[code] = pysam.AlignmentFile(out_bam, "wb", header=inp.header)
-                    for aln in (inp.fetch(region=args.region) if args.region else inp.fetch()):
+                    for aln in (inp.fetch()):
                         if aln.is_unmapped: continue
                         if args.primary_only and (aln.is_secondary or aln.is_supplementary): continue
-                        if not assign: continue
                         qn = aln.query_name
-                        tup = assign.get(sample, {}).get(qn)
-                        if not tup:
-                            continue
+                        tup = assign.get(sample, {}).get(qn) if assign else None
+                        if not tup: continue
                         zt, zg, zn = tup
-                        if zt not in writers:
-                            # Guard: this transcript not eligible for this sample
-                            continue
+                        if zt not in writers: continue
                         try:
                             aln.set_tag("ZT", zt, value_type="Z", replace=True)
                         except TypeError:
@@ -942,12 +900,8 @@ def main():
                 for code in sorted(elig_codes):
                     out_bam = os.path.join(out_dir, f"{sample}.{code}.bam")
                     if os.path.exists(out_bam) and os.path.getsize(out_bam) > 0:
-                        # Indexing can be expensive; keep default behavior but allow opting out via CLI
-                        if getattr(args, "index_output_bams", True):
-                            try:
-                                pysam.index(out_bam)
-                            except Exception:
-                                pass
+                        try: pysam.index(out_bam)
+                        except Exception: pass
                         manifest_rows.append([sample, code, out_bam])
         if args.emit_modkit_manifest:
             mani = os.path.join(out_dir, "modkit_manifest.tsv")
@@ -957,7 +911,6 @@ def main():
                     f.write("\t".join(row)+"\n")
             print(f"[OK] Wrote modkit manifest: {mani}", file=sys.stderr)
 
-    # ZT/ZN-tagged copies of each input BAM (ALL reads) — same count as inputs
     if args.write_zt_tagged_sample_bams:
         out_dir2 = os.path.join(os.path.dirname(args.out_gtf) or ".", "zt_tagged")
         os.makedirs(out_dir2, exist_ok=True)
@@ -967,7 +920,7 @@ def main():
             out_path = os.path.join(out_dir2, f"{sample}.zt_tagged.bam")
             with pysam.AlignmentFile(in_path, "rb") as inp, \
                  pysam.AlignmentFile(out_path, "wb", header=inp.header) as outw:
-                for aln in (inp.fetch(region=args.region) if args.region else inp.fetch()):
+                for aln in (inp.fetch()):
                     if aln.is_unmapped:
                         outw.write(aln); continue
                     if args.primary_only and (aln.is_secondary or aln.is_supplementary):
@@ -986,11 +939,8 @@ def main():
                             except TypeError:
                                 aln.set_tag(tag, val)
                     outw.write(aln)
-            if getattr(args, "index_output_bams", True):
-                try:
-                    pysam.index(out_path)
-                except Exception:
-                    pass
+            try: pysam.index(out_path)
+            except Exception: pass
             print(f"[OK] Wrote ZT/ZN-tagged sample BAM: {out_path}", file=sys.stderr)
 
     print(f"[OK] Wrote GTF: {args.out_gtf}", file=sys.stderr)
