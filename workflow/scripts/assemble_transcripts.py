@@ -59,12 +59,7 @@ def median(vals):
         return v[n//2] if n%2 else 0.5*(v[n//2-1]+v[n//2])
 
 def get_tx_strand(aln):
-    if aln.has_tag("ts"):
-        v = aln.get_tag("ts")
-        if v in ("+","-"): return v
-    if aln.has_tag("XS"):
-        v = aln.get_tag("XS")
-        if v in ("+","-"): return v
+    # Genomic strand ONLY from FLAG (0x10).
     return "-" if aln.is_reverse else "+"
 
 def tes_pos1(aln, tx):
@@ -116,13 +111,11 @@ def softclip3p_len_and_seq(aln, tx):
         return 0, ""
 
 def polya_purity(seq, tx):
+    # + expects polyA; - expects polyT
     if not seq: return 0.0
     s = seq.upper()
-    base = "A" if tx=="+" else "T"
-    p1 = s.count(base)/len(s)
-    comp = "T" if base=="A" else "A"
-    p2 = s.count(comp)/len(s)
-    return max(p1, p2)
+    base = "A" if tx == "+" else "T"
+    return s.count(base) / len(s)
 
 def cluster_positions(sorted_positions, window):
     clusters = []
