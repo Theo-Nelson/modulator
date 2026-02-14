@@ -377,109 +377,178 @@ def _process_core(core_args):
     Only keep isoforms whose TES is within [s,e] (core span) to avoid duplicates.
     Return list of isoform dicts (without annotation yet).
     """
+
     (chrom, s, e, pad_bp, bam_paths, filters, iso_params) = core_args
     apa_window = iso_params["apa_window"]
-    # collect reads across all BAMs
+
+    # -----------------------------
+    # Collect reads
+    # -----------------------------
     mem = []
     for bam in bam_paths:
         sample = os.path.basename(bam).replace(".bam","")
-        if not os.path.exists(bam): continue
+        if not os.path.exists(bam):
+            continue
+
         with pysam.AlignmentFile(bam, "rb") as fh:
             s_fetch = max(0, s - pad_bp)
             e_fetch = e + pad_bp
+
             try:
                 it = fh.fetch(contig=chrom, start=s_fetch, end=e_fetch)
             except ValueError:
                 continue
+
             for aln in it:
-                if aln.is_unmapped: continue
-                if filters["primary_only"] and (aln.is_secondary or aln.is_supplementary): continue
-                if aln.mapping_quality < filters["min_mapq"]: continue
-                tx = get_tx_strand(aln)
-                sclen, tail = softclip3p_len_and_seq(aln, tx)
-                if filters["require_softclip3p"] > 0 and sclen < filters["require_softclip3p"]: continue
-                purity = polya_purity(tail, tx) if sclen > 0 else 0.0
-                chain = intron_chain_1based(aln)
-                if len(chain) < filters["min_introns_read"]: continue
-                chain_tx = chain_tx_order(chain, tx)
-                rd_chrom = fh.get_reference_name(aln.reference_id)
-                if rd_chrom != chrom:  # safety
+                if aln.is_unmapped:
                     continue
-                rd = dict(
-                    chrom=chrom, strand=tx, tes=tes_pos1(aln, tx),
-                    chain=chain, chain_tx=chain_tx, n_introns=len(chain),
+                if filters["primary_only"] and (aln.is_secondary or aln.is_supplementary):
+                    continue
+                if aln.mapping_quality < filters["min_mapq"]:
+                    continue
+
+                tx = get_tx_strand(aln)
+
+                sclen, tail = softclip3p_len_and_seq(aln, tx)
+                if filters["require_softclip3p"] > 0 and sclen < filters["require_softclip3p"]:
+                    continue
+
+                purity = polya_purity(tail, tx) if sclen > 0 else 0.0
+
+                chain = intron_chain_1based(aln)
+                if len(chain) < filters["min_introns_read"]:
+                    continue
+
+                chain_tx = chain_tx_order(chain, tx)
+
+                rd_chrom = fh.get_reference_name(aln.reference_id)
+                if rd_chrom != chrom:
+                    continue
+
+                mem.append(dict(
+                    chrom=chrom,
+                    strand=tx,
+                    tes=tes_pos1(aln, tx),
+                    chain=chain,
+                    chain_tx=chain_tx,
+                    n_introns=len(chain),
                     exons=exon_blocks_from_aln(aln),
-                    bam=os.path.basename(bam), sample=sample, qname=aln.query_name,
-                    mapq=aln.mapping_quality, sclen=sclen, purity=purity
-                )
-                mem.append(rd)
+                    bam=os.path.basename(bam),
+                    sample=sample,
+                    qname=aln.query_name,
+                    mapq=aln.mapping_quality,
+                    sclen=sclen,
+                    purity=purity
+                ))
 
     if not mem:
         return []
 
-    # cluster TES within this core (TES can be near edges due to pad; we keep only TES in [s,e])
+    # -----------------------------
+    # Group by chrom + strand
+    # -----------------------------
     by_cs = defaultdict(list)
     for r in mem:
         by_cs[(r["chrom"], r["strand"])].append(r)
 
     isoforms = []
-    for (c,strand), rlist in by_cs.items():
+
+    # -----------------------------
+    # Process each strand separately
+    # -----------------------------
+    for (c, strand), rlist in by_cs.items():
+
         positions = sorted(r["tes"] for r in rlist)
-        if not positions: continue
+        if not positions:
+            continue
+
         clusters = cluster_positions(positions, apa_window)
+
         for cl in clusters:
+
             rep_pos = cl["rep"]
-            # only consider isoforms whose TES (rep_pos) falls inside the core span
+
+            # only keep TES inside this core
             if not (s <= rep_pos <= e):
                 continue
+
             members = [r for r in rlist if abs(r["tes"] - rep_pos) <= apa_window]
-            if not members: continue
+            if not members:
+                continue
 
-            # determine canon chains (full-length) and assign truncations deterministically
-            exact_counts = Counter(tuple(m["chain_tx"]) for m in members)
-            canons = list(exact_counts.keys())
-            canon_rank = sorted(
-                canons, key=lambda ch: (exact_counts[ch], exact_counts[ch], len(ch)), reverse=True
-            )
-            assigned = set()
-            chain_to_idxs = defaultdict(list)
-            for i, m in enumerate(members):
-                chain_to_idxs[tuple(m["chain_tx"])].append(i)
+            # --------------------------------------------------------
+            # NEW COLLAPSE LOGIC:
+            # Collapse based on shared 3′ intron structure
+            # Remove only the 5′-most intron in transcript space
+            # --------------------------------------------------------
 
-            for canon in canon_rank:
-                idxs = []
-                for ch, idxlist in chain_to_idxs.items():
-                    if is_suffix(canon, ch):
-                        for i in idxlist:
-                            if i not in assigned:
-                                idxs.append(i)
-                if not idxs:
-                    continue
-                for i in idxs: assigned.add(i)
+            collapse_groups = defaultdict(list)
 
-                grp = [members[i] for i in idxs]
-                full_len_members = [m for m in grp if tuple(m["chain_tx"]) == canon]
-                rep = max(full_len_members or grp,
-                          key=lambda m: (m["exons"][-1][1]-m["exons"][0][0]))
+            for m in members:
+                ch = tuple(m["chain_tx"])
+
+                if len(ch) > 0:
+                    collapse_key = ch[1:]  # remove 5′-most intron
+                else:
+                    collapse_key = tuple()
+
+                collapse_groups[collapse_key].append(m)
+
+            # --------------------------------------------------------
+            # Build isoform per collapse group
+            # --------------------------------------------------------
+
+            for collapse_key, grp in collapse_groups.items():
+
+                # pick longest chain (then most supported) as canonical
+                chain_counts = Counter(tuple(m["chain_tx"]) for m in grp)
+
+                canon = max(
+                    chain_counts.keys(),
+                    key=lambda ch: (len(ch), chain_counts[ch])
+                )
+
+                full_len_members = [
+                    m for m in grp if tuple(m["chain_tx"]) == canon
+                ]
+
+                rep = max(
+                    full_len_members or grp,
+                    key=lambda m: (m["exons"][-1][1] - m["exons"][0][0])
+                )
+
                 rep_exons = list(rep["exons"])
                 tes = rep_pos
+
+                # enforce TES boundary
                 if strand == "+":
                     if rep_exons[-1][1] != tes:
                         rep_exons[-1] = (rep_exons[-1][0], tes)
                 else:
                     if rep_exons[0][0] != tes:
                         rep_exons[0] = (tes, rep_exons[0][1])
-                polya_ok = sum(1 for m in grp if m["sclen"] >= iso_params["min_polya_length"]
-                               and m["purity"] >= iso_params["min_polya_purity"])
-                polya_frac = polya_ok/len(grp) if grp else 0.0
+
+                polya_ok = sum(
+                    1 for m in grp
+                    if m["sclen"] >= iso_params["min_polya_length"]
+                    and m["purity"] >= iso_params["min_polya_purity"]
+                )
+
+                polya_frac = polya_ok / len(grp) if grp else 0.0
+
                 isoforms.append(dict(
-                    chrom=chrom, strand=strand, tes=tes,
-                    chain_tx=canon, n_introns=len(canon),
-                    members=grp, rep_exons=rep_exons,
+                    chrom=chrom,
+                    strand=strand,
+                    tes=tes,
+                    chain_tx=canon,
+                    n_introns=len(canon),
+                    members=grp,
+                    rep_exons=rep_exons,
                     polya_frac=polya_frac,
                 ))
-    return isoforms
 
+    return isoforms
+  
 # --------------------------- main ---------------------------
 
 def main():
