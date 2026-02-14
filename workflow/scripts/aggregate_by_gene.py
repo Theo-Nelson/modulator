@@ -211,10 +211,22 @@ def write_per_sample_mod_stats(sub: pd.DataFrame, base: str, tag: str, verbose: 
 
     d = sub.copy()
 
+    # Ensure numeric types (defensive)
+    for c in ["start0","end0","ZN_transcript_index","Nvalid_cov","Nmod"]:
+        d[c] = pd.to_numeric(d[c], errors="coerce")
+    d = d.dropna(subset=["start0","end0","ZN_transcript_index","Nvalid_cov","Nmod"]).copy()
+    d["start0"] = d["start0"].astype(int)
+    d["end0"] = d["end0"].astype(int)
+    d["ZN_transcript_index"] = d["ZN_transcript_index"].astype(int)
+    d["Nvalid_cov"] = d["Nvalid_cov"].astype(int)
+    d["Nmod"] = d["Nmod"].astype(int)
+
     # ---- Site-level collapse across transcripts within each sample ----
-    site_cols = ["chrom","start0","end0","strand","mod_code"]
+    # site definition is (chrom, start0, end0, strand, mod_code)
+    site_cols_no_mod = ["chrom", "start0", "end0", "strand"]
+
     site_sample = (
-        d.groupby(["sample"] + site_cols, as_index=False)[["Nmod","Nvalid_cov"]]
+        d.groupby(["sample", "mod_code"] + site_cols_no_mod, as_index=False)[["Nmod", "Nvalid_cov"]]
          .sum()
     )
 
@@ -222,12 +234,12 @@ def write_per_sample_mod_stats(sub: pd.DataFrame, base: str, tag: str, verbose: 
     site_sample["detected_site"] = (site_sample["Nmod"] > 0).astype(int)
 
     per_sample_site = (
-        site_sample.groupby(["sample","mod_code"], as_index=False)
+        site_sample.groupby(["sample", "mod_code"], as_index=False)
                    .agg(
-                       n_sites_total=("detected_site","size"),
-                       n_sites_detected=("detected_site","sum"),
-                       total_Nmod=("Nmod","sum"),
-                       total_cov=("Nvalid_cov","sum"),
+                       n_sites_total=("detected_site", "size"),
+                       n_sites_detected=("detected_site", "sum"),
+                       total_Nmod=("Nmod", "sum"),
+                       total_cov=("Nvalid_cov", "sum"),
                    )
     )
     per_sample_site["overall_stoich"] = (
@@ -235,44 +247,44 @@ def write_per_sample_mod_stats(sub: pd.DataFrame, base: str, tag: str, verbose: 
     ).fillna(0.0)
 
     site_level_summ = (
-        site_sample.groupby(["sample","mod_code"], as_index=False)
+        site_sample.groupby(["sample", "mod_code"], as_index=False)
                    .agg(
-                       mean_site_cov=("Nvalid_cov","mean"),
-                       median_site_cov=("Nvalid_cov","median"),
-                       mean_site_Nmod=("Nmod","mean"),
-                       median_site_Nmod=("Nmod","median"),
+                       mean_site_cov=("Nvalid_cov", "mean"),
+                       median_site_cov=("Nvalid_cov", "median"),
+                       mean_site_Nmod=("Nmod", "mean"),
+                       median_site_Nmod=("Nmod", "median"),
                    )
     )
-    per_sample_site = per_sample_site.merge(site_level_summ, on=["sample","mod_code"], how="left")
+    per_sample_site = per_sample_site.merge(site_level_summ, on=["sample", "mod_code"], how="left")
 
     # ---- Transcript-level: unique sites per transcript (within sample) ----
     site_tx = (
-        d.groupby(["sample","mod_code","ZN_transcript_index"] + site_cols, as_index=False)[["Nmod","Nvalid_cov"]]
+        d.groupby(["sample", "mod_code", "ZN_transcript_index"] + site_cols_no_mod, as_index=False)[["Nmod", "Nvalid_cov"]]
          .sum()
     )
     site_tx["detected_site"] = (site_tx["Nmod"] > 0).astype(int)
 
     per_tx = (
-        site_tx.groupby(["sample","mod_code","ZN_transcript_index"], as_index=False)
+        site_tx.groupby(["sample", "mod_code", "ZN_transcript_index"], as_index=False)
                .agg(
-                   n_sites_total=("detected_site","size"),
-                   n_sites_detected=("detected_site","sum"),
-                   total_Nmod=("Nmod","sum"),
-                   total_cov=("Nvalid_cov","sum"),
+                   n_sites_total=("detected_site", "size"),
+                   n_sites_detected=("detected_site", "sum"),
+                   total_Nmod=("Nmod", "sum"),
+                   total_cov=("Nvalid_cov", "sum"),
                )
     )
     per_tx["tx_stoich"] = (per_tx["total_Nmod"] / per_tx["total_cov"].replace(0, pd.NA)).fillna(0.0)
 
     per_sample_tx = (
-        per_tx.groupby(["sample","mod_code"], as_index=False)
+        per_tx.groupby(["sample", "mod_code"], as_index=False)
               .agg(
-                  n_tx=("ZN_transcript_index","nunique"),
-                  mean_detected_sites_per_tx=("n_sites_detected","mean"),
-                  median_detected_sites_per_tx=("n_sites_detected","median"),
-                  mean_total_Nmod_per_tx=("total_Nmod","mean"),
-                  median_total_Nmod_per_tx=("total_Nmod","median"),
-                  mean_tx_stoich=("tx_stoich","mean"),
-                  median_tx_stoich=("tx_stoich","median"),
+                  n_tx=("ZN_transcript_index", "nunique"),
+                  mean_detected_sites_per_tx=("n_sites_detected", "mean"),
+                  median_detected_sites_per_tx=("n_sites_detected", "median"),
+                  mean_total_Nmod_per_tx=("total_Nmod", "mean"),
+                  median_total_Nmod_per_tx=("total_Nmod", "median"),
+                  mean_tx_stoich=("tx_stoich", "mean"),
+                  median_tx_stoich=("tx_stoich", "median"),
               )
     )
 
@@ -281,9 +293,9 @@ def write_per_sample_mod_stats(sub: pd.DataFrame, base: str, tag: str, verbose: 
     out3 = f"{base}_{tag}__per_tx_mod_stats.tsv"
 
     os.makedirs(os.path.dirname(out1) or ".", exist_ok=True)
-    per_sample_site.sort_values(["mod_code","sample"]).to_csv(out1, sep="\t", index=False)
-    per_sample_tx.sort_values(["mod_code","sample"]).to_csv(out2, sep="\t", index=False)
-    per_tx.sort_values(["mod_code","sample","ZN_transcript_index"]).to_csv(out3, sep="\t", index=False)
+    per_sample_site.sort_values(["mod_code", "sample"]).to_csv(out1, sep="\t", index=False)
+    per_sample_tx.sort_values(["mod_code", "sample"]).to_csv(out2, sep="\t", index=False)
+    per_tx.sort_values(["mod_code", "sample", "ZN_transcript_index"]).to_csv(out3, sep="\t", index=False)
 
     if verbose:
         print(f"[ok] wrote {out1}", file=sys.stderr)
