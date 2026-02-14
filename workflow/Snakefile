@@ -162,7 +162,7 @@ ENABLE_TEST_DIFFS = _as_bool(config.get("toggles", {}).get("enable_test_diffs", 
 # Include rules conditionally
 # ----------------------------
 include: "rules/assemble.smk"
-include: "rules/per_sample_stats.smk"
+include: "rules/per_sample_read_stats.smk"
 
 if ENABLE_ZN:
     include: "rules/modkit_zn.smk"
