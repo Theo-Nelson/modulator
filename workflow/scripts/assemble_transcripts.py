@@ -488,7 +488,11 @@ def _process_core(core_args):
                 ch = tuple(m["chain_tx"])
 
                 if len(ch) > 0:
-                    collapse_key = ch[1:]  # remove 5′-most intron
+                    if strand == "+":
+                      collapse_key = ch[1:]
+                    else:
+                      collapse_key = ch[:-1]
+                      
                 else:
                     collapse_key = tuple()
 
