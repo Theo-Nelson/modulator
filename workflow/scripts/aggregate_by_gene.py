@@ -20,6 +20,14 @@ Key features:
     1) <out_prefix>_<TAG>_sites_long.tsv
     2) Optional per-gene×mod tables with pivots under
        <out_prefix>_<TAG>__per_gene_mod/
+
+ADDED (no CLI changes):
+- Per-sample modification statistics using the SAME site definition as filtering:
+    site_key = (chrom, start0, end0, strand, mod_code)
+  For each of RAW / FILTERED (as enabled), writes:
+    3) <out_prefix>_<TAG>__per_sample_mod_site_stats.tsv
+    4) <out_prefix>_<TAG>__per_sample_mod_tx_stats.tsv
+    5) <out_prefix>_<TAG>__per_tx_mod_stats.tsv  (optional detail table; always written)
 """
 
 import os, sys, re, argparse, gzip
@@ -184,6 +192,106 @@ def site_key_from_row(r):
     # group per genomic site + mod type (independent of transcript or sample)
     return (r["chrom"], int(r["start0"]), int(r["end0"]), r["strand"], r["mod_code"])
 
+# -------------------- ADDED: per-sample / per-mod stats --------------------
+
+def write_per_sample_mod_stats(sub: pd.DataFrame, base: str, tag: str, verbose: bool = False):
+    """
+    Write per-sample modification summaries using the SAME site key definition:
+      site_key = (chrom, start0, end0, strand, mod_code)
+
+    Produces 3 TSVs for this tag:
+      1) {base}_{tag}__per_sample_mod_site_stats.tsv
+      2) {base}_{tag}__per_sample_mod_tx_stats.tsv
+      3) {base}_{tag}__per_tx_mod_stats.tsv  (detail per transcript)
+    """
+    required = {"sample","mod_code","chrom","start0","end0","strand","ZN_transcript_index","Nvalid_cov","Nmod"}
+    missing = required - set(sub.columns)
+    if missing:
+        raise ValueError(f"Cannot compute per-sample mod stats; missing columns: {sorted(missing)}")
+
+    d = sub.copy()
+
+    # ---- Site-level collapse across transcripts within each sample ----
+    site_cols = ["chrom","start0","end0","strand","mod_code"]
+    site_sample = (
+        d.groupby(["sample"] + site_cols, as_index=False)[["Nmod","Nvalid_cov"]]
+         .sum()
+    )
+
+    # site considered "detected" if any mod calls after summing over transcripts
+    site_sample["detected_site"] = (site_sample["Nmod"] > 0).astype(int)
+
+    per_sample_site = (
+        site_sample.groupby(["sample","mod_code"], as_index=False)
+                   .agg(
+                       n_sites_total=("detected_site","size"),
+                       n_sites_detected=("detected_site","sum"),
+                       total_Nmod=("Nmod","sum"),
+                       total_cov=("Nvalid_cov","sum"),
+                   )
+    )
+    per_sample_site["overall_stoich"] = (
+        per_sample_site["total_Nmod"] / per_sample_site["total_cov"].replace(0, pd.NA)
+    ).fillna(0.0)
+
+    site_level_summ = (
+        site_sample.groupby(["sample","mod_code"], as_index=False)
+                   .agg(
+                       mean_site_cov=("Nvalid_cov","mean"),
+                       median_site_cov=("Nvalid_cov","median"),
+                       mean_site_Nmod=("Nmod","mean"),
+                       median_site_Nmod=("Nmod","median"),
+                   )
+    )
+    per_sample_site = per_sample_site.merge(site_level_summ, on=["sample","mod_code"], how="left")
+
+    # ---- Transcript-level: unique sites per transcript (within sample) ----
+    site_tx = (
+        d.groupby(["sample","mod_code","ZN_transcript_index"] + site_cols, as_index=False)[["Nmod","Nvalid_cov"]]
+         .sum()
+    )
+    site_tx["detected_site"] = (site_tx["Nmod"] > 0).astype(int)
+
+    per_tx = (
+        site_tx.groupby(["sample","mod_code","ZN_transcript_index"], as_index=False)
+               .agg(
+                   n_sites_total=("detected_site","size"),
+                   n_sites_detected=("detected_site","sum"),
+                   total_Nmod=("Nmod","sum"),
+                   total_cov=("Nvalid_cov","sum"),
+               )
+    )
+    per_tx["tx_stoich"] = (per_tx["total_Nmod"] / per_tx["total_cov"].replace(0, pd.NA)).fillna(0.0)
+
+    per_sample_tx = (
+        per_tx.groupby(["sample","mod_code"], as_index=False)
+              .agg(
+                  n_tx=("ZN_transcript_index","nunique"),
+                  mean_detected_sites_per_tx=("n_sites_detected","mean"),
+                  median_detected_sites_per_tx=("n_sites_detected","median"),
+                  mean_total_Nmod_per_tx=("total_Nmod","mean"),
+                  median_total_Nmod_per_tx=("total_Nmod","median"),
+                  mean_tx_stoich=("tx_stoich","mean"),
+                  median_tx_stoich=("tx_stoich","median"),
+              )
+    )
+
+    out1 = f"{base}_{tag}__per_sample_mod_site_stats.tsv"
+    out2 = f"{base}_{tag}__per_sample_mod_tx_stats.tsv"
+    out3 = f"{base}_{tag}__per_tx_mod_stats.tsv"
+
+    os.makedirs(os.path.dirname(out1) or ".", exist_ok=True)
+    per_sample_site.sort_values(["mod_code","sample"]).to_csv(out1, sep="\t", index=False)
+    per_sample_tx.sort_values(["mod_code","sample"]).to_csv(out2, sep="\t", index=False)
+    per_tx.sort_values(["mod_code","sample","ZN_transcript_index"]).to_csv(out3, sep="\t", index=False)
+
+    if verbose:
+        print(f"[ok] wrote {out1}", file=sys.stderr)
+        print(f"[ok] wrote {out2}", file=sys.stderr)
+        print(f"[ok] wrote {out3}", file=sys.stderr)
+
+# ----------------------------- Main -----------------------------
+
 def main():
     args = parse_args()
     beds = iter_numbered_beds(args.modkit_dir)
@@ -261,6 +369,9 @@ def main():
             out_long = f"{base}_{tag}_sites_long.tsv"
             sub.drop(columns=["__site_key__"], errors="ignore").to_csv(out_long, sep="\t", index=False)
             if args.verbose: print(f"[ok] wrote {out_long}", file=sys.stderr)
+
+        # per-sample mod stats (ADDED; no CLI changes)
+        write_per_sample_mod_stats(sub.drop(columns=["__site_key__"], errors="ignore"), base=base, tag=tag, verbose=args.verbose)
 
         # per-gene × mod tables + pivots
         if write_per_gene or args.write_pivots:
