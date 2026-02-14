@@ -123,3 +123,37 @@ rule assemble_transcripts:
         # Ensure the directory() target always exists
         mkdir -p "{ZT_DIR}"
         """
+
+OUT_READ_STATS = f"{ASSEMBLE_DIR}/{PREFIX}_per_sample_read_stats.tsv"
+
+rule per_sample_read_stats:
+    input:
+        bams_dir = _BAMS_DIR,
+        zt_dir   = directory(ZT_DIR),
+        # ensure assembly completed (and zt_tagged bams exist if enabled)
+        assembled = ASSEMBLE_OUTPUTS
+    output:
+        OUT_READ_STATS
+    threads: 1
+    conda:
+        "../envs/modulator.yaml"
+    params:
+        bam_glob = _BAM_GLOB,
+        primary_only = config.get("assembler", {}).get("primary_only", True),
+        min_mapq = config.get("assembler", {}).get("min_mapq", 10),
+        min_introns_read = config.get("assembler", {}).get("min_introns_read", 1),
+        require_softclip3p = config.get("assembler", {}).get("require_softclip3p", 0)
+    shell:
+        r"""
+        set -euo pipefail
+        SCRIPT="{workflow.basedir}/scripts/per_sample_read_stats.py"
+        python "$SCRIPT" \
+          --bams-dir "{input.bams_dir}" \
+          --bam-glob "{params.bam_glob}" \
+          --zt-tagged-dir "{input.zt_dir}" \
+          --out "{output}" \
+          {("--primary-only" if params.primary_only else "")} \
+          --min-mapq "{params.min_mapq}" \
+          --min-introns-read "{params.min_introns_read}" \
+          --require-softclip3p "{params.require_softclip3p}"
+        """
