@@ -386,7 +386,7 @@ def _process_core(core_args):
     # -----------------------------
     mem = []
     for bam in bam_paths:
-        sample = os.path.basename(bam).replace(".bam","")
+        sample = os.path.basename(bam).replace(".bam", "")
         if not os.path.exists(bam):
             continue
 
@@ -468,7 +468,6 @@ def _process_core(core_args):
 
             rep_pos = cl["rep"]
 
-            # only keep TES inside this core
             if not (s <= rep_pos <= e):
                 continue
 
@@ -477,40 +476,43 @@ def _process_core(core_args):
                 continue
 
             # --------------------------------------------------------
-            # NEW COLLAPSE LOGIC:
-            # Collapse based on shared 3′ intron structure
-            # Remove only the 5′-most intron in transcript space
+            # TRUE 3′-ANCHORED SUFFIX COLLAPSE
             # --------------------------------------------------------
 
-            collapse_groups = defaultdict(list)
+            chain_to_idxs = defaultdict(list)
+            for i, m in enumerate(members):
+                chain_to_idxs[tuple(m["chain_tx"])].append(i)
 
-            for m in members:
-                ch = tuple(m["chain_tx"])
+            exact_counts = Counter(tuple(m["chain_tx"]) for m in members)
 
-                if len(ch) > 0:
-                    if strand == "+":
-                      collapse_key = ch[1:]
-                    else:
-                      collapse_key = ch[:-1]
-                      
-                else:
-                    collapse_key = tuple()
+            # Longest chains first
+            canons = sorted(
+                exact_counts.keys(),
+                key=lambda ch: (len(ch), exact_counts[ch]),
+                reverse=True
+            )
 
-                collapse_groups[collapse_key].append(m)
+            assigned = set()
 
-            # --------------------------------------------------------
-            # Build isoform per collapse group
-            # --------------------------------------------------------
+            for canon in canons:
 
-            for collapse_key, grp in collapse_groups.items():
+                idxs = []
 
-                # pick longest chain (then most supported) as canonical
-                chain_counts = Counter(tuple(m["chain_tx"]) for m in grp)
+                for ch, idxlist in chain_to_idxs.items():
 
-                canon = max(
-                    chain_counts.keys(),
-                    key=lambda ch: (len(ch), chain_counts[ch])
-                )
+                    # strict suffix collapse (true 3′ anchoring)
+                    if len(ch) <= len(canon) and canon[-len(ch):] == ch:
+                        for i in idxlist:
+                            if i not in assigned:
+                                idxs.append(i)
+
+                if not idxs:
+                    continue
+
+                for i in idxs:
+                    assigned.add(i)
+
+                grp = [members[i] for i in idxs]
 
                 full_len_members = [
                     m for m in grp if tuple(m["chain_tx"]) == canon
