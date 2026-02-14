@@ -33,7 +33,6 @@ ASSEMBLE_OUTPUTS = [
     OUT_TX,
     OUT_PCA,
     OUT_STATS,
-    OUT_READ_STATS,
     directory(ZT_DIR),   # always ensure the directory exists
 ] + ZT_TAGGED_BAMS
 
@@ -129,8 +128,10 @@ rule assemble_transcripts:
 rule per_sample_read_stats:
     input:
         # ensures assembly completed (and zt_tagged bams exist if enabled)
-        assembled = ASSEMBLE_OUTPUTS,
-        zt_dir    = directory(ZT_DIR),
+        gtf     = OUT_GTF,
+        stats   = OUT_STATS,
+        zt_dir  = directory(ZT_DIR),
+        zt_bams = ZT_TAGGED_BAMS
     output:
         OUT_READ_STATS
     threads: 1
