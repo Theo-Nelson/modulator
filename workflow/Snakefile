@@ -186,6 +186,7 @@ ALL_TARGETS = [
     f"results/assemble/{config['prefix']}_tx_counts.tsv",
     f"results/assemble/{config['prefix']}_tx_counts.pca.png",
     f"results/assemble/{config['prefix']}_per_sample_stats.tsv",
+    f"results/assemble/{config['prefix']}_per_sample_read_stats.tsv",
     # ZT/ZN-tagged sample BAMs emitted by assemble
     expand("results/assemble/zt_tagged/{sample}.zt_tagged.bam", sample=SAMPLES),
 ]
