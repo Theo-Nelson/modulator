@@ -11,7 +11,10 @@ rule aggregate_modkit_zn:
         min_cov    = config.get("min_cov", 5),
         enabled    = config.get("toggles", {}).get("enable_zn_aggregate", True),
 
-        # flags as you already had them …
+        # NEW: external-sort tuning (optional but recommended)
+        tmpdir = config.get("aggregation", {}).get("tmpdir", os.environ.get("TMPDIR", "/tmp")),
+        chunk_lines = config.get("aggregation", {}).get("chunk_lines", 2000000),
+
         emit_raw_flag = (
             "--emit-raw"
             if config.get("aggregation", {}).get("zn", {}).get(
@@ -60,7 +63,7 @@ rule aggregate_modkit_zn:
             )
             else "--no-write-filtered-per-gene"
         ),
-        # filtering knobs
+
         filt_enable = config.get("aggregation", {}).get("zn", {}).get(
             "filter_enable", config.get("filters", {}).get("enable_site_filter", True)
         ),
@@ -84,6 +87,8 @@ rule aggregate_modkit_zn:
             --gtf {input.gtf} \
             --out-prefix {params.out_prefix} \
             --min-cov {params.min_cov} \
+            --tmpdir {params.tmpdir} \
+            --chunk-lines {params.chunk_lines} \
             {params.filt_flag} \
             --count-diff-factor {params.count_diff_factor} \
             --mod-fail-margin {params.mod_fail_margin} \
@@ -95,10 +100,7 @@ rule aggregate_modkit_zn:
             {params.write_filtered_per_gene_flag} \
             --verbose
         else
-        # disabled: write a header-only FILTERED long file so downstream rules don’t break
-            echo -e "sample\tZN_transcript_index\tchrom\tstart0\tend0\tstrand\tmod_code\tNvalid_cov\tNmod\tfrac_modified\tgene_id\tgene_name" > {output.long_tsv}
-        # create the FILTERED per_gene_mod dir
+            echo -e "sample\tZN_transcript_index\tchrom\tstart0\tend0\tstrand\tmod_code\tNvalid_cov\tNmod\tfrac_modified\tgene_id\tgene_name\tNcanonical\tNother_mod\tNdelete\tNfail\tNdiff\tNnocall" > {output.long_tsv}
             : > {output.pivots}/.placeholder
         fi
         """
-
