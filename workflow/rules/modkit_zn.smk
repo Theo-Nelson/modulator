@@ -52,3 +52,39 @@ rule modkit_pileup_zn:
                 "--ref", shlex.quote(input.ref)] + flags)
         shell(" ".join(cmd))
 
+rule zn_bgzip_tabix_partitions:
+    input:
+        bed_dir = directory("results/modkit_zn/{sample}")
+    output:
+        done = "results/modkit_zn/{sample}/.TABIXED"
+    threads: 8
+    conda:
+        "../envs/modulator.yaml"
+    shell:
+        r"""
+        # bgzip/tabix all partition beds produced by modkit pileup
+        # - skip ungrouped + already gzipped
+        # - keep directory structure
+        shopt -s globstar nullglob
+
+        beds=()
+        for f in "{input.bed_dir}"/**/*.bed; do
+          bn=$(basename "$f")
+          if [[ "$bn" == "ungrouped.bed" ]]; then
+            continue
+          fi
+          beds+=("$f")
+        done
+
+        # bgzip each .bed -> .bed.gz (bgzip removes the original by default)
+        # tabix index the .bed.gz
+        for f in "${{beds[@]}}"; do
+          # bgzip -> creates f.gz
+          bgzip -f -@ {threads} "$f"
+          tabix -f -p bed "$f.gz"
+        done
+
+        # also handle any plain .bed files that modkit may place directly under bed_dir
+        # (already covered by globstar), sentinel output:
+        echo "OK" > "{output.done}"
+        """
