@@ -103,6 +103,9 @@ aggregate_outputs:
   write_raw_per_gene_tables: true
   write_filtered_per_gene_tables: true
 
+aggregation_tmpdir: null   # optional override; can set on CLI
+aggregation_chunk_lines: null
+
 filters:
   enable_site_filter: true
   count_diff_factor: 3
