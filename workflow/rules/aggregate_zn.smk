@@ -11,9 +11,18 @@ rule aggregate_modkit_zn:
         min_cov    = config.get("min_cov", 5),
         enabled    = config.get("toggles", {}).get("enable_zn_aggregate", True),
 
-        # NEW: external-sort tuning (optional but recommended)
-        tmpdir = config.get("aggregation", {}).get("tmpdir", os.environ.get("TMPDIR", "/tmp")),
-        chunk_lines = config.get("aggregation", {}).get("chunk_lines", 2000000),
+        # NEW: tmpdir + chunk-lines are CLI-overridable
+        tmpdir = (
+            config.get("aggregation_tmpdir")
+            or config.get("aggregation", {}).get("tmpdir")
+            or (resources.tmpdir if "tmpdir" in resources else None)
+            or os.environ.get("TMPDIR")
+            or "/scratch/group/p.bio240371.000/horner_lab_modulator/tmp"
+        ),
+        chunk_lines = (
+            config.get("aggregation_chunk_lines")
+            or config.get("aggregation", {}).get("chunk_lines", 2000000)
+        ),
 
         emit_raw_flag = (
             "--emit-raw"
