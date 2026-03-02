@@ -16,17 +16,10 @@ What it does (ZN aggregation):
     - FAIL if Nmod <= Nfail + mod_fail_margin
   FILTERED outputs are subset of RAW by site_key (chrom,start0,end0,strand,mod_code).
 
-Outputs (same naming convention as your skeleton):
-- <out_prefix>_RAW_sites_long.tsv                         (optional)
-- <out_prefix>_FILTERED_sites_long.tsv                    (optional; required by your Snakemake)
-- <out_prefix>_RAW__per_sample_mod_site_stats.tsv         (if emit_raw)
-- <out_prefix>_RAW__per_sample_mod_tx_stats.tsv           (if emit_raw)
-- <out_prefix>_RAW__per_tx_mod_stats.tsv                  (if emit_raw)
-- <out_prefix>_FILTERED__per_sample_mod_site_stats.tsv    (if emit_filtered)
-- <out_prefix>_FILTERED__per_sample_mod_tx_stats.tsv      (if emit_filtered)
-- <out_prefix>_FILTERED__per_tx_mod_stats.tsv             (if emit_filtered)
-- <out_prefix>_RAW__per_gene_mod/....                     (optional)
-- <out_prefix>_FILTERED__per_gene_mod/....                (optional)
+Stats output (MEANS ONLY; no medians; avoids huge metric sorts):
+- <out_prefix>_{RAW|FILTERED}__per_sample_mod_site_stats.tsv
+- <out_prefix>_{RAW|FILTERED}__per_sample_mod_tx_stats.tsv
+- <out_prefix>_{RAW|FILTERED}__per_tx_mod_stats.tsv
 
 No dependency on GNU sort. Uses:
 - chunked in-memory sorting (bounded by --chunk-lines)
@@ -89,19 +82,28 @@ def parse_args():
 
     # output toggles
     ap.add_argument("--emit-raw", dest="emit_raw", action="store_true")
-    ap.add_argument("--no-emit-raw", dest="emit_raw", action="store_false"); ap.set_defaults(emit_raw=True)
+    ap.add_argument("--no-emit-raw", dest="emit_raw", action="store_false")
+    ap.set_defaults(emit_raw=True)
+
     ap.add_argument("--emit-filtered", dest="emit_filt", action="store_true")
-    ap.add_argument("--no-emit-filtered", dest="emit_filt", action="store_false"); ap.set_defaults(emit_filt=True)
+    ap.add_argument("--no-emit-filtered", dest="emit_filt", action="store_false")
+    ap.set_defaults(emit_filt=True)
 
     ap.add_argument("--write-long", dest="write_long", action="store_true")
-    ap.add_argument("--no-write-long", dest="write_long", action="store_false"); ap.set_defaults(write_long=True)
+    ap.add_argument("--no-write-long", dest="write_long", action="store_false")
+    ap.set_defaults(write_long=True)
+
     ap.add_argument("--write-pivots", dest="write_pivots", action="store_true")
-    ap.add_argument("--no-write-pivots", dest="write_pivots", action="store_false"); ap.set_defaults(write_pivots=True)
+    ap.add_argument("--no-write-pivots", dest="write_pivots", action="store_false")
+    ap.set_defaults(write_pivots=True)
 
     ap.add_argument("--write-raw-per-gene", dest="write_raw_per_gene", action="store_true")
-    ap.add_argument("--no-write-raw-per-gene", dest="write_raw_per_gene", action="store_false"); ap.set_defaults(write_raw_per_gene=False)
+    ap.add_argument("--no-write-raw-per-gene", dest="write_raw_per_gene", action="store_false")
+    ap.set_defaults(write_raw_per_gene=False)
+
     ap.add_argument("--write-filtered-per-gene", dest="write_filtered_per_gene", action="store_true")
-    ap.add_argument("--no-write-filtered-per-gene", dest="write_filtered_per_gene", action="store_false"); ap.set_defaults(write_filtered_per_gene=True)
+    ap.add_argument("--no-write-filtered-per-gene", dest="write_filtered_per_gene", action="store_false")
+    ap.set_defaults(write_filtered_per_gene=True)
 
     ap.add_argument("--verbose", action="store_true")
 
@@ -446,6 +448,7 @@ def dedup_reduce_sorted(
 ) -> int:
     """
     Reduce sorted normalized TSV to deduplicated rows.
+
     Writes:
       - out_dedup_tsv (no header):
         sample zn chrom start0 end0 strand mod gid gname cov nmod ncan nother ndel nfail ndiff nnocall frac
@@ -633,69 +636,7 @@ def filter_dedup_by_passing_sites(
         print(f"[filter] kept {kept} rows -> {out_dedup_filtered}", file=sys.stderr)
     return kept
 
-# ----------------------------- Stats computation (exact medians via external sort) -----------------------------
-
-def _median_from_sorted_metric(metric_sorted: str, verbose: bool = False) -> Dict[Tuple[str, str], float]:
-    """
-    metric_sorted must be sorted by (sample, mod, value_numeric) with no header.
-    Each line: sample<TAB>mod<TAB>value
-    Returns dict (sample,mod)->median (exact).
-    """
-    # First pass: counts per group
-    counts = defaultdict(int)
-    with open(metric_sorted, "r") as f:
-        for ln in f:
-            p = ln.rstrip("\n").split("\t")
-            if len(p) < 3:
-                continue
-            counts[(p[0], p[1])] += 1
-
-    # Second pass: select median positions per group
-    out = {}
-    curr = None
-    idx = 0
-    need1 = need2 = None
-    v1 = v2 = None
-
-    with open(metric_sorted, "r") as f:
-        for ln in f:
-            p = ln.rstrip("\n").split("\t")
-            if len(p) < 3:
-                continue
-            key = (p[0], p[1])
-            val = float(p[2])
-
-            if curr is None or key != curr:
-                if curr is not None:
-                    if need2 is None:
-                        out[curr] = float(v1) if v1 is not None else 0.0
-                    else:
-                        out[curr] = ((float(v1) if v1 is not None else 0.0) + (float(v2) if v2 is not None else 0.0)) / 2.0
-
-                curr = key
-                n = counts[curr]
-                if n % 2 == 1:
-                    need1 = n // 2
-                    need2 = None
-                else:
-                    need1 = (n // 2) - 1
-                    need2 = (n // 2)
-                idx = 0
-                v1 = v2 = None
-
-            if idx == need1:
-                v1 = val
-            if need2 is not None and idx == need2:
-                v2 = val
-            idx += 1
-
-        if curr is not None:
-            if need2 is None:
-                out[curr] = float(v1) if v1 is not None else 0.0
-            else:
-                out[curr] = ((float(v1) if v1 is not None else 0.0) + (float(v2) if v2 is not None else 0.0)) / 2.0
-
-    return out
+# ----------------------------- Stats computation (MEANS ONLY; no medians; no metric sorts) -----------------------------
 
 def compute_per_sample_mod_stats_from_dedup(
     dedup_tsv: str,
@@ -710,6 +651,10 @@ def compute_per_sample_mod_stats_from_dedup(
       1) {out_prefix}_{tag}__per_sample_mod_site_stats.tsv
       2) {out_prefix}_{tag}__per_sample_mod_tx_stats.tsv
       3) {out_prefix}_{tag}__per_tx_mod_stats.tsv
+
+    Notes:
+    - Reports MEANS only (no medians).
+    - Avoids generating gigantic metric files and sorting them.
     """
     base = out_prefix
     out1 = f"{base}_{tag}__per_sample_mod_site_stats.tsv"
@@ -736,75 +681,67 @@ def compute_per_sample_mod_stats_from_dedup(
         return (p[0], p[1], p[2], int(p[3]), int(p[4]), p[5])
 
     site_sample_sorted = os.path.join(workdir, f"{tag}.site_sample.sorted.tsv")
-    external_sort_tsv(site_sample_uns, site_sample_sorted, key_site_sample, tmpdir=workdir, chunk_lines=chunk_lines, verbose=verbose)
+    external_sort_tsv(
+        site_sample_uns,
+        site_sample_sorted,
+        key_site_sample,
+        tmpdir=workdir,
+        chunk_lines=chunk_lines,
+        verbose=verbose,
+    )
 
-    # Reduce per-site and create metric files for medians
-    cov_metric = os.path.join(workdir, f"{tag}.site_cov.metric.tsv")
-    nmod_metric = os.path.join(workdir, f"{tag}.site_nmod.metric.tsv")
-
+    # Reduce per-site -> per (sample,mod) aggregates needed for means
     n_sites_total_by_sm = defaultdict(int)
     n_sites_detected_by_sm = defaultdict(int)
     total_nmod_by_sm = defaultdict(int)
     total_cov_by_sm = defaultdict(int)
 
-    with open(cov_metric, "w") as cov_mh, open(nmod_metric, "w") as nmod_mh:
-        curr = None
-        sum_nmod = 0
-        sum_cov = 0
+    curr = None
+    sum_nmod = 0
+    sum_cov = 0
 
-        def flush_site():
-            nonlocal curr, sum_nmod, sum_cov
+    def flush_site():
+        nonlocal curr, sum_nmod, sum_cov
+        if curr is None:
+            return
+        sample, mod, *_ = curr
+        detected = 1 if sum_nmod > 0 else 0
+        sm = (sample, mod)
+        n_sites_total_by_sm[sm] += 1
+        n_sites_detected_by_sm[sm] += detected
+        total_nmod_by_sm[sm] += sum_nmod
+        total_cov_by_sm[sm] += sum_cov
+
+    with open(site_sample_sorted, "r") as f:
+        for ln in f:
+            p = ln.rstrip("\n").split("\t")
+            if len(p) < 8:
+                continue
+            key = (p[0], p[1], p[2], p[3], p[4], p[5])  # sample,mod,chrom,start0,end0,strand
+            nmod = safe_int(p[6])
+            cov = safe_int(p[7])
+
             if curr is None:
-                return
-            sample, mod, *_ = curr
-            detected = 1 if sum_nmod > 0 else 0
-            sm = (sample, mod)
-            n_sites_total_by_sm[sm] += 1
-            n_sites_detected_by_sm[sm] += detected
-            total_nmod_by_sm[sm] += sum_nmod
-            total_cov_by_sm[sm] += sum_cov
-            cov_mh.write(f"{sample}\t{mod}\t{sum_cov}\n")
-            nmod_mh.write(f"{sample}\t{mod}\t{sum_nmod}\n")
+                curr = key
+                sum_nmod = nmod
+                sum_cov = cov
+            elif key == curr:
+                sum_nmod += nmod
+                sum_cov += cov
+            else:
+                flush_site()
+                curr = key
+                sum_nmod = nmod
+                sum_cov = cov
+    flush_site()
 
-        with open(site_sample_sorted, "r") as f:
-            for ln in f:
-                p = ln.rstrip("\n").split("\t")
-                if len(p) < 8:
-                    continue
-                key = (p[0], p[1], p[2], p[3], p[4], p[5])  # sample,mod,chrom,start0,end0,strand
-                nmod = safe_int(p[6]); cov = safe_int(p[7])
-                if curr is None:
-                    curr = key
-                    sum_nmod = nmod
-                    sum_cov = cov
-                elif key == curr:
-                    sum_nmod += nmod
-                    sum_cov += cov
-                else:
-                    flush_site()
-                    curr = key
-                    sum_nmod = nmod
-                    sum_cov = cov
-        flush_site()
-
-    # Sort metrics by (sample,mod,value) and compute medians
-    def key_metric(line: str):
-        p = line.rstrip("\n").split("\t")
-        return (p[0], p[1], float(p[2]))
-
-    cov_metric_sorted = os.path.join(workdir, f"{tag}.site_cov.metric.sorted.tsv")
-    nmod_metric_sorted = os.path.join(workdir, f"{tag}.site_nmod.metric.sorted.tsv")
-    external_sort_tsv(cov_metric, cov_metric_sorted, key_metric, tmpdir=workdir, chunk_lines=chunk_lines, verbose=verbose)
-    external_sort_tsv(nmod_metric, nmod_metric_sorted, key_metric, tmpdir=workdir, chunk_lines=chunk_lines, verbose=verbose)
-
-    med_site_cov = _median_from_sorted_metric(cov_metric_sorted)
-    med_site_nmod = _median_from_sorted_metric(nmod_metric_sorted)
-
-    # Write out1
+    # Write out1 (means only)
     with open(out1, "w") as f:
         hdr = [
-            "sample", "mod_code", "n_sites_total", "n_sites_detected", "total_Nmod", "total_cov", "overall_stoich",
-            "mean_site_cov", "median_site_cov", "mean_site_Nmod", "median_site_Nmod"
+            "sample", "mod_code",
+            "n_sites_total", "n_sites_detected",
+            "total_Nmod", "total_cov", "overall_stoich",
+            "mean_site_cov", "mean_site_Nmod",
         ]
         f.write("\t".join(hdr) + "\n")
 
@@ -816,14 +753,12 @@ def compute_per_sample_mod_stats_from_dedup(
             overall = (tn / tc) if tc > 0 else 0.0
             mean_cov = (tc / n_sites) if n_sites > 0 else 0.0
             mean_nm = (tn / n_sites) if n_sites > 0 else 0.0
-            med_cov = med_site_cov.get((sample, mod), 0.0)
-            med_nm = med_site_nmod.get((sample, mod), 0.0)
-            rows.append((mod, sample, n_sites, nd, tn, tc, overall, mean_cov, med_cov, mean_nm, med_nm))
+            rows.append((mod, sample, n_sites, nd, tn, tc, overall, mean_cov, mean_nm))
 
         rows.sort(key=lambda x: (x[0], x[1]))
-        for mod, sample, nst, nsd, tn, tc, ov, mc, medc, mnm, mednm in rows:
+        for mod, sample, nst, nsd, tn, tc, ov, mc, mnm in rows:
             f.write(
-                f"{sample}\t{mod}\t{nst}\t{nsd}\t{tn}\t{tc}\t{ov:.6f}\t{mc:.6f}\t{medc:.6f}\t{mnm:.6f}\t{mednm:.6f}\n"
+                f"{sample}\t{mod}\t{nst}\t{nsd}\t{tn}\t{tc}\t{ov:.6f}\t{mc:.6f}\t{mnm:.6f}\n"
             )
 
     # ---------- TX STATS ----------
@@ -835,7 +770,8 @@ def compute_per_sample_mod_stats_from_dedup(
                 p = ln.rstrip("\n").split("\t")
                 if len(p) < 18:
                     continue
-                sample = p[0]; zn = p[1]
+                sample = p[0]
+                zn = p[1]
                 chrom, start0, end0, strand, mod = p[2], p[3], p[4], p[5], p[6]
                 cov, nmod = p[9], p[10]
                 out.write("\t".join([sample, mod, zn, chrom, start0, end0, strand, nmod, cov]) + "\n")
@@ -845,132 +781,115 @@ def compute_per_sample_mod_stats_from_dedup(
         return (p[0], p[1], int(p[2]), p[3], int(p[4]), int(p[5]), p[6])
 
     site_tx_sorted = os.path.join(workdir, f"{tag}.site_tx.sorted.tsv")
-    external_sort_tsv(site_tx_uns, site_tx_sorted, key_site_tx, tmpdir=workdir, chunk_lines=chunk_lines, verbose=verbose)
+    external_sort_tsv(
+        site_tx_uns,
+        site_tx_sorted,
+        key_site_tx,
+        tmpdir=workdir,
+        chunk_lines=chunk_lines,
+        verbose=verbose,
+    )
 
-    # Reduce site_tx_sorted into per-tx stats (out3) + metrics for medians in out2
-    tx_det_metric = os.path.join(workdir, f"{tag}.tx_det.metric.tsv")
-    tx_nmod_metric = os.path.join(workdir, f"{tag}.tx_nmod.metric.tsv")
-    tx_sto_metric = os.path.join(workdir, f"{tag}.tx_sto.metric.tsv")
-
-    # per sample/mod accumulators
+    # Reduce site_tx_sorted into per-tx stats (out3)
+    # + per (sample,mod) accumulators for means in out2
     tx_set = defaultdict(set)
-    sum_det_sites = defaultdict(int)
-    sum_total_nmod_per_tx = defaultdict(int)
-    sum_tx_sto = defaultdict(float)
+    sum_det_sites = defaultdict(int)          # sum over tx of detected sites per tx
+    sum_total_nmod_per_tx = defaultdict(int)  # sum over tx of total_Nmod per tx
+    sum_tx_sto = defaultdict(float)           # sum over tx of tx_stoich per tx
 
-    with open(tx_det_metric, "w") as det_mh, open(tx_nmod_metric, "w") as nm_mh, open(tx_sto_metric, "w") as sto_mh:
-        with open(out3, "w") as out:
-            out.write("\t".join(["sample", "mod_code", "ZN_transcript_index", "n_sites_total", "n_sites_detected", "total_Nmod", "total_cov", "tx_stoich"]) + "\n")
+    with open(out3, "w") as out:
+        out.write("\t".join(["sample", "mod_code", "ZN_transcript_index", "n_sites_total", "n_sites_detected", "total_Nmod", "total_cov", "tx_stoich"]) + "\n")
 
-            curr_site = None
-            site_sum_nmod = 0
-            site_sum_cov = 0
+        curr_site = None
+        site_sum_nmod = 0
+        site_sum_cov = 0
 
-            curr_tx = None
+        curr_tx = None
+        tx_n_sites_total = 0
+        tx_n_sites_detected = 0
+        tx_total_nmod = 0
+        tx_total_cov = 0
+
+        def flush_site_into_tx():
+            nonlocal tx_n_sites_total, tx_n_sites_detected, tx_total_nmod, tx_total_cov
+            nonlocal site_sum_nmod, site_sum_cov, curr_site
+            if curr_site is None:
+                return
+            tx_n_sites_total += 1
+            if site_sum_nmod > 0:
+                tx_n_sites_detected += 1
+            tx_total_nmod += site_sum_nmod
+            tx_total_cov += site_sum_cov
+
+        def flush_tx():
+            nonlocal curr_tx, tx_n_sites_total, tx_n_sites_detected, tx_total_nmod, tx_total_cov
+            if curr_tx is None:
+                return
+            sample, mod, zn = curr_tx
+            sto = (tx_total_nmod / tx_total_cov) if tx_total_cov > 0 else 0.0
+            out.write(f"{sample}\t{mod}\t{zn}\t{tx_n_sites_total}\t{tx_n_sites_detected}\t{tx_total_nmod}\t{tx_total_cov}\t{sto:.6f}\n")
+
+            sm = (sample, mod)
+            tx_set[sm].add(int(zn))
+            sum_det_sites[sm] += tx_n_sites_detected
+            sum_total_nmod_per_tx[sm] += tx_total_nmod
+            sum_tx_sto[sm] += sto
+
             tx_n_sites_total = 0
             tx_n_sites_detected = 0
             tx_total_nmod = 0
             tx_total_cov = 0
 
-            def flush_site_into_tx():
-                nonlocal tx_n_sites_total, tx_n_sites_detected, tx_total_nmod, tx_total_cov
-                nonlocal site_sum_nmod, site_sum_cov, curr_site
+        with open(site_tx_sorted, "r") as f:
+            for ln in f:
+                p = ln.rstrip("\n").split("\t")
+                if len(p) < 9:
+                    continue
+                sample, mod, zn = p[0], p[1], p[2]
+                chrom, start0, end0, strand = p[3], p[4], p[5], p[6]
+                nmod = safe_int(p[7])
+                cov = safe_int(p[8])
+
+                site_key = (sample, mod, zn, chrom, start0, end0, strand)
+                tx_key = (sample, mod, zn)
+
                 if curr_site is None:
-                    return
-                tx_n_sites_total += 1
-                if site_sum_nmod > 0:
-                    tx_n_sites_detected += 1
-                tx_total_nmod += site_sum_nmod
-                tx_total_cov += site_sum_cov
+                    curr_site = site_key
+                    curr_tx = tx_key
+                    site_sum_nmod = nmod
+                    site_sum_cov = cov
+                    continue
 
-            def flush_tx():
-                nonlocal curr_tx, tx_n_sites_total, tx_n_sites_detected, tx_total_nmod, tx_total_cov
-                if curr_tx is None:
-                    return
-                sample, mod, zn = curr_tx
-                sto = (tx_total_nmod / tx_total_cov) if tx_total_cov > 0 else 0.0
-                out.write(f"{sample}\t{mod}\t{zn}\t{tx_n_sites_total}\t{tx_n_sites_detected}\t{tx_total_nmod}\t{tx_total_cov}\t{sto:.6f}\n")
+                if site_key == curr_site:
+                    site_sum_nmod += nmod
+                    site_sum_cov += cov
+                    continue
 
-                sm = (sample, mod)
-                tx_set[sm].add(int(zn))
-                sum_det_sites[sm] += tx_n_sites_detected
-                sum_total_nmod_per_tx[sm] += tx_total_nmod
-                sum_tx_sto[sm] += sto
+                # new site
+                if tx_key != curr_tx:
+                    flush_site_into_tx()
+                    flush_tx()
+                    curr_tx = tx_key
+                    curr_site = site_key
+                    site_sum_nmod = nmod
+                    site_sum_cov = cov
+                else:
+                    flush_site_into_tx()
+                    curr_site = site_key
+                    site_sum_nmod = nmod
+                    site_sum_cov = cov
 
-                det_mh.write(f"{sample}\t{mod}\t{tx_n_sites_detected}\n")
-                nm_mh.write(f"{sample}\t{mod}\t{tx_total_nmod}\n")
-                sto_mh.write(f"{sample}\t{mod}\t{sto:.6f}\n")
+        if curr_site is not None:
+            flush_site_into_tx()
+        flush_tx()
 
-                tx_n_sites_total = 0
-                tx_n_sites_detected = 0
-                tx_total_nmod = 0
-                tx_total_cov = 0
-
-            with open(site_tx_sorted, "r") as f:
-                for ln in f:
-                    p = ln.rstrip("\n").split("\t")
-                    if len(p) < 9:
-                        continue
-                    sample, mod, zn = p[0], p[1], p[2]
-                    chrom, start0, end0, strand = p[3], p[4], p[5], p[6]
-                    nmod = safe_int(p[7]); cov = safe_int(p[8])
-
-                    site_key = (sample, mod, zn, chrom, start0, end0, strand)
-                    tx_key = (sample, mod, zn)
-
-                    if curr_site is None:
-                        curr_site = site_key
-                        curr_tx = tx_key
-                        site_sum_nmod = nmod
-                        site_sum_cov = cov
-                        continue
-
-                    if site_key == curr_site:
-                        site_sum_nmod += nmod
-                        site_sum_cov += cov
-                        continue
-
-                    # new site
-                    if tx_key != curr_tx:
-                        flush_site_into_tx()
-                        flush_tx()
-                        curr_tx = tx_key
-                        curr_site = site_key
-                        site_sum_nmod = nmod
-                        site_sum_cov = cov
-                    else:
-                        flush_site_into_tx()
-                        curr_site = site_key
-                        site_sum_nmod = nmod
-                        site_sum_cov = cov
-
-            if curr_site is not None:
-                flush_site_into_tx()
-            flush_tx()
-
-    # Sort tx metrics + compute medians for out2
-    def key_metric3(line: str):
-        p = line.rstrip("\n").split("\t")
-        return (p[0], p[1], float(p[2]))
-
-    det_sorted = os.path.join(workdir, f"{tag}.tx_det.metric.sorted.tsv")
-    nm_sorted = os.path.join(workdir, f"{tag}.tx_nmod.metric.sorted.tsv")
-    sto_sorted = os.path.join(workdir, f"{tag}.tx_sto.metric.sorted.tsv")
-
-    external_sort_tsv(tx_det_metric, det_sorted, key_metric3, tmpdir=workdir, chunk_lines=chunk_lines, verbose=verbose)
-    external_sort_tsv(tx_nmod_metric, nm_sorted, key_metric3, tmpdir=workdir, chunk_lines=chunk_lines, verbose=verbose)
-    external_sort_tsv(tx_sto_metric, sto_sorted, key_metric3, tmpdir=workdir, chunk_lines=chunk_lines, verbose=verbose)
-
-    med_det = _median_from_sorted_metric(det_sorted)
-    med_nmod = _median_from_sorted_metric(nm_sorted)
-    med_sto = _median_from_sorted_metric(sto_sorted)
-
+    # Write out2 (means only)
     with open(out2, "w") as f:
         hdr = [
             "sample", "mod_code", "n_tx",
-            "mean_detected_sites_per_tx", "median_detected_sites_per_tx",
-            "mean_total_Nmod_per_tx", "median_total_Nmod_per_tx",
-            "mean_tx_stoich", "median_tx_stoich"
+            "mean_detected_sites_per_tx",
+            "mean_total_Nmod_per_tx",
+            "mean_tx_stoich",
         ]
         f.write("\t".join(hdr) + "\n")
 
@@ -982,18 +901,13 @@ def compute_per_sample_mod_stats_from_dedup(
             mean_det = sum_det_sites[(sample, mod)] / n_tx
             mean_nm = sum_total_nmod_per_tx[(sample, mod)] / n_tx
             mean_st = sum_tx_sto[(sample, mod)] / n_tx
-            rows.append((
-                mod, sample, n_tx,
-                mean_det, med_det.get((sample, mod), 0.0),
-                mean_nm, med_nmod.get((sample, mod), 0.0),
-                mean_st, med_sto.get((sample, mod), 0.0),
-            ))
+            rows.append((mod, sample, n_tx, mean_det, mean_nm, mean_st))
 
         rows.sort(key=lambda x: (x[0], x[1]))
-        for mod, sample, n_tx, md, med_d, mn, med_n, ms, med_s in rows:
+        for mod, sample, n_tx, md, mn, ms in rows:
             f.write(
                 f"{sample}\t{mod}\t{n_tx}\t"
-                f"{md:.6f}\t{med_d:.6f}\t{mn:.6f}\t{med_n:.6f}\t{ms:.6f}\t{med_s:.6f}\n"
+                f"{md:.6f}\t{mn:.6f}\t{ms:.6f}\n"
             )
 
     if verbose:
@@ -1073,7 +987,6 @@ def generate_per_gene_outputs_from_dedup(
 
         if row_fh is not None:
             row_fh.close()
-            row_fh = None
 
         if write_pivots:
             samples = sorted(samples_seen)
@@ -1334,4 +1247,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-
