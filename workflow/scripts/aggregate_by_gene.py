@@ -24,6 +24,12 @@ Stats output (MEANS ONLY; no medians; avoids huge metric sorts):
 No dependency on GNU sort. Uses:
 - chunked in-memory sorting (bounded by --chunk-lines)
 - k-way merge across sorted chunks (heapq)
+
+Important fixes included in this version:
+- Robust boolean parsing for CLI flags that may be passed as strings (Snakemake sometimes does this).
+- Explicit on/off flags supported: --emit-raw / --no-emit-raw, etc.
+- Avoids “truthy string” surprises (e.g., "false" treated as True).
+- Stats are MEANS ONLY (no median metric sorts).
 """
 
 import os
@@ -47,7 +53,6 @@ BED_COLS = [
 ]
 
 # Normalized (pre-dedup) TSV columns we emit (NO header):
-# sample, zn, chrom, start0, end0, strand, mod_code, gene_id, gene_name, plus numeric columns
 NORM_COLS = [
     "sample", "ZN_transcript_index", "chrom", "start0", "end0", "strand", "mod_code",
     "gene_id", "gene_name",
@@ -66,7 +71,95 @@ PER_GENE_COLS = [
     "Nother_mod", "Ndelete", "Nfail", "Ndiff", "Nnocall", "frac_modified"
 ]
 
+# ----------------------------- Utils -----------------------------
+
+
+def ensure_dir(path: str):
+    if path:
+        os.makedirs(path, exist_ok=True)
+
+
+def open_text(path: str):
+    return gzip.open(path, "rt") if path.endswith(".gz") else open(path, "r")
+
+
+def is_header(line: str) -> bool:
+    s = line.strip()
+    return (not s) or s.startswith("#") or s.startswith("track") or s.startswith("browser")
+
+
+def safe_int(x, default=0) -> int:
+    try:
+        return int(x)
+    except Exception:
+        try:
+            return int(float(x))
+        except Exception:
+            return default
+
+
+def safe_float(x, default=0.0) -> float:
+    try:
+        return float(x)
+    except Exception:
+        return default
+
+
+def sanitize_filename_token(s: str) -> str:
+    return re.sub(r"[^A-Za-z0-9._+-]", "_", s if s else "NA")
+
+
+def frac_modified(nmod: int, cov: int, min_cov: int) -> float:
+    if cov <= 0:
+        f = 0.0
+    else:
+        f = nmod / cov
+    if min_cov and cov < min_cov:
+        f = 0.0
+    return round(f, 6)
+
+
+def row_pass_filter(
+    cov: int,
+    nmod: int,
+    nfail: int,
+    ndiff: int,
+    count_diff_factor: float,
+    mod_fail_margin: int
+) -> bool:
+    if ndiff > (count_diff_factor * cov):
+        return False
+    if nmod <= (nfail + mod_fail_margin):
+        return False
+    return True
+
+
+def parse_bool(x, default: bool) -> bool:
+    """
+    Robust bool parsing:
+    - If x is already bool => return it
+    - If x is None => default
+    - If x is int/float => bool(x)
+    - If x is str => parse common true/false tokens
+    """
+    if isinstance(x, bool):
+        return x
+    if x is None:
+        return default
+    if isinstance(x, (int, float)):
+        return bool(x)
+    if isinstance(x, str):
+        s = x.strip().lower()
+        if s in ("1", "true", "t", "yes", "y", "on"):
+            return True
+        if s in ("0", "false", "f", "no", "n", "off", ""):
+            return False
+    # fallback: python truthiness
+    return bool(x)
+
+
 # ----------------------------- CLI -----------------------------
+
 
 def parse_args():
     ap = argparse.ArgumentParser(
@@ -80,7 +173,7 @@ def parse_args():
     ap.add_argument("--count-diff-factor", type=float, default=3.0, help="FAIL if Ndiff > factor * Nvalid_cov (default: 3)")
     ap.add_argument("--mod-fail-margin", type=int, default=1, help="FAIL if Nmod <= Nfail + margin (default: 1)")
 
-    # output toggles
+    # output toggles (explicit on/off)
     ap.add_argument("--emit-raw", dest="emit_raw", action="store_true")
     ap.add_argument("--no-emit-raw", dest="emit_raw", action="store_false")
     ap.set_defaults(emit_raw=True)
@@ -108,62 +201,36 @@ def parse_args():
     ap.add_argument("--verbose", action="store_true")
 
     # Pure-Python external sort tuning
-    ap.add_argument("--chunk-lines", type=int, default=2_000_000,
-                    help="Lines per in-memory chunk during external sort (default: 2,000,000)")
-    ap.add_argument("--tmpdir", type=str, default=os.environ.get("TMPDIR", "/tmp"),
-                    help="Temp directory for intermediates (default: $TMPDIR or /tmp)")
+    ap.add_argument(
+        "--chunk-lines",
+        type=int,
+        default=2_000_000,
+        help="Lines per in-memory chunk during external sort (default: 2,000,000)"
+    )
+    ap.add_argument(
+        "--tmpdir",
+        type=str,
+        default=os.environ.get("TMPDIR", "/tmp"),
+        help="Temp directory for intermediates (default: $TMPDIR or /tmp)"
+    )
     ap.add_argument("--keep-intermediates", action="store_true", help="Do not delete intermediates (debugging)")
 
-    return ap.parse_args()
+    args = ap.parse_args()
 
-# ----------------------------- Utils -----------------------------
+    # Defensive: in case something upstream passes string-ish values into args
+    # (argparse itself normally produces bools here, but this prevents surprises).
+    args.emit_raw = parse_bool(args.emit_raw, default=True)
+    args.emit_filt = parse_bool(args.emit_filt, default=True)
+    args.write_long = parse_bool(args.write_long, default=True)
+    args.write_pivots = parse_bool(args.write_pivots, default=True)
+    args.write_raw_per_gene = parse_bool(args.write_raw_per_gene, default=False)
+    args.write_filtered_per_gene = parse_bool(args.write_filtered_per_gene, default=True)
 
-def ensure_dir(path: str):
-    if path:
-        os.makedirs(path, exist_ok=True)
+    return args
 
-def open_text(path: str):
-    return gzip.open(path, "rt") if path.endswith(".gz") else open(path, "r")
-
-def is_header(line: str) -> bool:
-    s = line.strip()
-    return (not s) or s.startswith("#") or s.startswith("track") or s.startswith("browser")
-
-def safe_int(x, default=0) -> int:
-    try:
-        return int(x)
-    except Exception:
-        try:
-            return int(float(x))
-        except Exception:
-            return default
-
-def safe_float(x, default=0.0) -> float:
-    try:
-        return float(x)
-    except Exception:
-        return default
-
-def sanitize_filename_token(s: str) -> str:
-    return re.sub(r"[^A-Za-z0-9._+-]", "_", s if s else "NA")
-
-def frac_modified(nmod: int, cov: int, min_cov: int) -> float:
-    if cov <= 0:
-        f = 0.0
-    else:
-        f = nmod / cov
-    if min_cov and cov < min_cov:
-        f = 0.0
-    return round(f, 6)
-
-def row_pass_filter(cov: int, nmod: int, nfail: int, ndiff: int, count_diff_factor: float, mod_fail_margin: int) -> bool:
-    if ndiff > (count_diff_factor * cov):
-        return False
-    if nmod <= (nfail + mod_fail_margin):
-        return False
-    return True
 
 # ----------------------------- Pure-Python external sort -----------------------------
+
 
 def external_sort_tsv(
     in_path: str,
@@ -206,6 +273,12 @@ def external_sort_tsv(
     if verbose:
         print(f"[pysort] {os.path.basename(in_path)}: {n_in} lines -> {len(chunks)} chunks", file=sys.stderr)
 
+    if not chunks:
+        # empty input
+        with open(out_path, "w"):
+            pass
+        return
+
     # Single chunk: copy
     if len(chunks) == 1:
         shutil.copyfile(chunks[0], out_path)
@@ -241,6 +314,7 @@ def external_sort_tsv(
             except Exception:
                 pass
 
+
 def uniq_sorted_file(in_sorted: str, out_path: str, key_func):
     """
     Input must already be sorted by key_func.
@@ -255,9 +329,11 @@ def uniq_sorted_file(in_sorted: str, out_path: str, key_func):
                 out.write(ln)
                 prev = k
 
+
 # ----------------------------- GTF interval indexing -----------------------------
 
 Interval = namedtuple("Interval", ["start", "end", "gene_id", "gene_name", "strand"])
+
 
 def load_gene_intervals_from_gtf(gtf_path: str, verbose=False) -> Dict[Tuple[str, str], List[Interval]]:
     """
@@ -287,7 +363,8 @@ def load_gene_intervals_from_gtf(gtf_path: str, verbose=False) -> Dict[Tuple[str
             if not gene_id:
                 continue
 
-            s = int(start); e = int(end)
+            s = int(start)
+            e = int(end)
             key = (chrom, strand, gene_id)
             if key not in gene_bounds:
                 gene_bounds[key] = (s, e)
@@ -310,8 +387,14 @@ def load_gene_intervals_from_gtf(gtf_path: str, verbose=False) -> Dict[Tuple[str
 
     return by_cs
 
-def assign_gene(chrom: str, pos_start: int, pos_end: int, strand: str,
-                gene_index: Dict[Tuple[str, str], List[Interval]]) -> Tuple[str, str]:
+
+def assign_gene(
+    chrom: str,
+    pos_start: int,
+    pos_end: int,
+    strand: str,
+    gene_index: Dict[Tuple[str, str], List[Interval]]
+) -> Tuple[str, str]:
     """
     Return (gene_id, gene_name) by overlap on same strand; choose max-overlap.
     If none, try opposite strand first overlap.
@@ -342,7 +425,9 @@ def assign_gene(chrom: str, pos_start: int, pos_end: int, strand: str,
 
     return "", ""
 
+
 # ----------------------------- Bed discovery -----------------------------
+
 
 def iter_numbered_beds(modkit_dir: str) -> List[Tuple[str, str, str, int]]:
     """
@@ -372,7 +457,9 @@ def iter_numbered_beds(modkit_dir: str) -> List[Tuple[str, str, str, int]]:
             out.append((root, sample_name, os.path.join(root, fname), zn))
     return sorted(out)
 
+
 # ----------------------------- bedMethyl parsing -----------------------------
+
 
 def parse_bed_line(line: str) -> Optional[Dict[str, object]]:
     parts = line.rstrip("\n").split("\t")
@@ -389,9 +476,16 @@ def parse_bed_line(line: str) -> Optional[Dict[str, object]]:
     d["frac_modified"] = safe_float(d.get("frac_modified", 0.0), 0.0)
     return d
 
+
 # ----------------------------- Stage 1: normalize -----------------------------
 
-def normalize_to_tsv(beds: List[Tuple[str, str, str, int]], gene_index, out_tsv: str, verbose: bool = False) -> int:
+
+def normalize_to_tsv(
+    beds: List[Tuple[str, str, str, int]],
+    gene_index,
+    out_tsv: str,
+    verbose: bool = False
+) -> int:
     """
     Stream all numbered bed files and write normalized TSV (no header).
     Returns number of rows written.
@@ -433,7 +527,9 @@ def normalize_to_tsv(beds: List[Tuple[str, str, str, int]], gene_index, out_tsv:
         print(f"[norm] wrote {n} rows -> {out_tsv}", file=sys.stderr)
     return n
 
+
 # ----------------------------- Stage 2: dedup reduce -----------------------------
+
 
 def dedup_reduce_sorted(
     sorted_norm_tsv: str,
@@ -461,7 +557,6 @@ def dedup_reduce_sorted(
     if out_passing_sites_tsv and filter_enable:
         ensure_dir(os.path.dirname(out_passing_sites_tsv) or ".")
 
-    # truncate outputs
     with open(out_dedup_tsv, "w"):
         pass
     dedup_fh = open(out_dedup_tsv, "a")
@@ -490,7 +585,7 @@ def dedup_reduce_sorted(
                 sample, zn, chrom, start0, end0, strand, mod, gid, gname,
                 str(cov), str(nmod), str(ncan), str(nother), str(ndel),
                 str(nfail), str(ndiff), str(nnocall),
-                f"{frac:.6f}"
+                f"{frac:.6f}",
             ]) + "\n"
         )
 
@@ -516,9 +611,8 @@ def dedup_reduce_sorted(
             if not ln:
                 continue
             p = ln.split("\t")
-            # NORM:
-            # 0 sample,1 zn,2 chrom,3 start0,4 end0,5 strand,6 mod,7 gid,8 gname
-            # 9 cov,10 nmod,11 ncan,12 nother,13 ndel,14 nfail,15 ndiff,16 nnocall
+            if len(p) < 17:
+                continue
             key = (p[0], p[1], p[2], p[3], p[4], p[5], p[6], p[7], p[8])
             vals = [
                 safe_int(p[9]), safe_int(p[10]), safe_int(p[11]), safe_int(p[12]),
@@ -547,12 +641,13 @@ def dedup_reduce_sorted(
         pass_fh.close()
         if verbose:
             print(f"[dedup] wrote passing sites: {out_passing_sites_tsv}", file=sys.stderr)
-
     if verbose:
         print(f"[dedup] wrote {dedup_written} rows -> {out_dedup_tsv}", file=sys.stderr)
     return dedup_written
 
+
 # ----------------------------- Filtering join -----------------------------
+
 
 def filter_dedup_by_passing_sites(
     dedup_by_site_sorted: str,
@@ -565,9 +660,6 @@ def filter_dedup_by_passing_sites(
     Streaming merge-join:
     - dedup_by_site_sorted sorted by site_key then tie-breakers
     - passing_sites_sorted_unique sorted by site_key unique
-
-    Writes filtered dedup TSV (no header) + optional long TSV with header.
-    Returns number of filtered dedup rows.
     """
     ensure_dir(os.path.dirname(out_dedup_filtered) or ".")
     with open(out_dedup_filtered, "w"):
@@ -581,62 +673,72 @@ def filter_dedup_by_passing_sites(
         long_fh.write("\t".join(LONG_HEADER) + "\n")
 
     def site_of_dedup(parts: List[str]) -> Tuple[str, int, int, str, str]:
-        # dedup columns:
-        # 0 sample,1 zn,2 chrom,3 start0,4 end0,5 strand,6 mod,...
         return (parts[2], int(parts[3]), int(parts[4]), parts[5], parts[6])
 
     ps = open(passing_sites_sorted_unique, "r")
-    ps_line = ps.readline()
-    ps_key = None
-    if ps_line:
-        p = ps_line.rstrip("\n").split("\t")
-        ps_key = (p[0], int(p[1]), int(p[2]), p[3], p[4])
-
-    kept = 0
-    with open(dedup_by_site_sorted, "r") as d:
-        for ln in d:
-            ln = ln.rstrip("\n")
-            if not ln:
-                continue
-            parts = ln.split("\t")
-            dk = site_of_dedup(parts)
-
-            while ps_key is not None and ps_key < dk:
-                ps_line = ps.readline()
-                if not ps_line:
-                    ps_key = None
-                    break
-                p = ps_line.rstrip("\n").split("\t")
+    try:
+        ps_line = ps.readline()
+        ps_key = None
+        if ps_line:
+            p = ps_line.rstrip("\n").split("\t")
+            if len(p) >= 5:
                 ps_key = (p[0], int(p[1]), int(p[2]), p[3], p[4])
 
-            if ps_key is None:
-                break
+        kept = 0
+        with open(dedup_by_site_sorted, "r") as d:
+            for ln in d:
+                ln = ln.rstrip("\n")
+                if not ln:
+                    continue
+                parts = ln.split("\t")
+                if len(parts) < 18:
+                    continue
+                dk = site_of_dedup(parts)
 
-            if dk == ps_key:
-                out_fh.write("\t".join(parts) + "\n")
-                if long_fh is not None:
-                    # long expects: sample zn chrom start0 end0 strand mod cov nmod frac gid gname ...
-                    sample, zn, chrom, start0, end0, strand, mod, gid, gname = parts[0], parts[1], parts[2], parts[3], parts[4], parts[5], parts[6], parts[7], parts[8]
-                    cov, nmod = parts[9], parts[10]
-                    ncan, nother, ndel, nfail, ndiff, nnocall = parts[11], parts[12], parts[13], parts[14], parts[15], parts[16]
-                    frac = parts[17]
-                    long_fh.write(
-                        f"{sample}\t{zn}\t{chrom}\t{start0}\t{end0}\t{strand}\t{mod}\t"
-                        f"{cov}\t{nmod}\t{frac}\t{gid}\t{gname}\t"
-                        f"{ncan}\t{nother}\t{ndel}\t{nfail}\t{ndiff}\t{nnocall}\n"
-                    )
-                kept += 1
+                while ps_key is not None and ps_key < dk:
+                    ps_line = ps.readline()
+                    if not ps_line:
+                        ps_key = None
+                        break
+                    p = ps_line.rstrip("\n").split("\t")
+                    if len(p) < 5:
+                        continue
+                    ps_key = (p[0], int(p[1]), int(p[2]), p[3], p[4])
 
-    ps.close()
-    out_fh.close()
-    if long_fh:
-        long_fh.close()
+                if ps_key is None:
+                    break
+
+                if dk == ps_key:
+                    out_fh.write("\t".join(parts) + "\n")
+                    if long_fh is not None:
+                        sample, zn, chrom, start0, end0, strand, mod, gid, gname = (
+                            parts[0], parts[1], parts[2], parts[3], parts[4], parts[5], parts[6], parts[7], parts[8]
+                        )
+                        cov, nmod = parts[9], parts[10]
+                        ncan, nother, ndel, nfail, ndiff, nnocall = (
+                            parts[11], parts[12], parts[13], parts[14], parts[15], parts[16]
+                        )
+                        frac = parts[17]
+                        long_fh.write(
+                            f"{sample}\t{zn}\t{chrom}\t{start0}\t{end0}\t{strand}\t{mod}\t"
+                            f"{cov}\t{nmod}\t{frac}\t{gid}\t{gname}\t"
+                            f"{ncan}\t{nother}\t{ndel}\t{nfail}\t{ndiff}\t{nnocall}\n"
+                        )
+                    kept += 1
+
+    finally:
+        ps.close()
+        out_fh.close()
+        if long_fh:
+            long_fh.close()
 
     if verbose:
         print(f"[filter] kept {kept} rows -> {out_dedup_filtered}", file=sys.stderr)
     return kept
 
-# ----------------------------- Stats computation (MEANS ONLY; no medians; no metric sorts) -----------------------------
+
+# ----------------------------- Stats computation (MEANS ONLY) -----------------------------
+
 
 def compute_per_sample_mod_stats_from_dedup(
     dedup_tsv: str,
@@ -717,7 +819,7 @@ def compute_per_sample_mod_stats_from_dedup(
             p = ln.rstrip("\n").split("\t")
             if len(p) < 8:
                 continue
-            key = (p[0], p[1], p[2], p[3], p[4], p[5])  # sample,mod,chrom,start0,end0,strand
+            key = (p[0], p[1], p[2], p[3], p[4], p[5])
             nmod = safe_int(p[6])
             cov = safe_int(p[7])
 
@@ -790,15 +892,17 @@ def compute_per_sample_mod_stats_from_dedup(
         verbose=verbose,
     )
 
-    # Reduce site_tx_sorted into per-tx stats (out3)
-    # + per (sample,mod) accumulators for means in out2
     tx_set = defaultdict(set)
-    sum_det_sites = defaultdict(int)          # sum over tx of detected sites per tx
-    sum_total_nmod_per_tx = defaultdict(int)  # sum over tx of total_Nmod per tx
-    sum_tx_sto = defaultdict(float)           # sum over tx of tx_stoich per tx
+    sum_det_sites = defaultdict(int)
+    sum_total_nmod_per_tx = defaultdict(int)
+    sum_tx_sto = defaultdict(float)
 
     with open(out3, "w") as out:
-        out.write("\t".join(["sample", "mod_code", "ZN_transcript_index", "n_sites_total", "n_sites_detected", "total_Nmod", "total_cov", "tx_stoich"]) + "\n")
+        out.write("\t".join([
+            "sample", "mod_code", "ZN_transcript_index",
+            "n_sites_total", "n_sites_detected",
+            "total_Nmod", "total_cov", "tx_stoich"
+        ]) + "\n")
 
         curr_site = None
         site_sum_nmod = 0
@@ -827,7 +931,10 @@ def compute_per_sample_mod_stats_from_dedup(
                 return
             sample, mod, zn = curr_tx
             sto = (tx_total_nmod / tx_total_cov) if tx_total_cov > 0 else 0.0
-            out.write(f"{sample}\t{mod}\t{zn}\t{tx_n_sites_total}\t{tx_n_sites_detected}\t{tx_total_nmod}\t{tx_total_cov}\t{sto:.6f}\n")
+            out.write(
+                f"{sample}\t{mod}\t{zn}\t{tx_n_sites_total}\t{tx_n_sites_detected}\t"
+                f"{tx_total_nmod}\t{tx_total_cov}\t{sto:.6f}\n"
+            )
 
             sm = (sample, mod)
             tx_set[sm].add(int(zn))
@@ -865,7 +972,6 @@ def compute_per_sample_mod_stats_from_dedup(
                     site_sum_cov += cov
                     continue
 
-                # new site
                 if tx_key != curr_tx:
                     flush_site_into_tx()
                     flush_tx()
@@ -883,7 +989,6 @@ def compute_per_sample_mod_stats_from_dedup(
             flush_site_into_tx()
         flush_tx()
 
-    # Write out2 (means only)
     with open(out2, "w") as f:
         hdr = [
             "sample", "mod_code", "n_tx",
@@ -905,17 +1010,16 @@ def compute_per_sample_mod_stats_from_dedup(
 
         rows.sort(key=lambda x: (x[0], x[1]))
         for mod, sample, n_tx, md, mn, ms in rows:
-            f.write(
-                f"{sample}\t{mod}\t{n_tx}\t"
-                f"{md:.6f}\t{mn:.6f}\t{ms:.6f}\n"
-            )
+            f.write(f"{sample}\t{mod}\t{n_tx}\t{md:.6f}\t{mn:.6f}\t{ms:.6f}\n")
 
     if verbose:
         print(f"[stats {tag}] wrote {out1}", file=sys.stderr)
         print(f"[stats {tag}] wrote {out2}", file=sys.stderr)
         print(f"[stats {tag}] wrote {out3}", file=sys.stderr)
 
+
 # ----------------------------- Per-gene outputs + pivots -----------------------------
+
 
 def generate_per_gene_outputs_from_dedup(
     dedup_tsv: str,
@@ -934,6 +1038,8 @@ def generate_per_gene_outputs_from_dedup(
     - row TSV per gene/mod: <prefix_base>__<gene>__<mod>.tsv
     - pivots: *_cov_pivot.tsv, *_Nmod_pivot.tsv, *_frac_pivot.tsv
     """
+    write_per_gene = parse_bool(write_per_gene, default=False)
+    write_pivots = parse_bool(write_pivots, default=True)
     if not (write_per_gene or write_pivots):
         return
 
@@ -951,7 +1057,9 @@ def generate_per_gene_outputs_from_dedup(
                 sample, zn = p[0], p[1]
                 chrom, start0, end0, strand, mod = p[2], p[3], p[4], p[5], p[6]
                 gid, gname = p[7], p[8]
-                cov, nmod, ncan, nother, ndel, nfail, ndiff, nnocall, frac = p[9], p[10], p[11], p[12], p[13], p[14], p[15], p[16], p[17]
+                cov, nmod, ncan, nother, ndel, nfail, ndiff, nnocall, frac = (
+                    p[9], p[10], p[11], p[12], p[13], p[14], p[15], p[16], p[17]
+                )
                 out.write("\t".join([
                     gname, gid, mod, chrom, start0, end0, strand, zn, sample,
                     cov, nmod, ncan, nother, ndel, nfail, ndiff, nnocall, frac
@@ -959,7 +1067,6 @@ def generate_per_gene_outputs_from_dedup(
 
     def key_per_gene(line: str):
         p = line.rstrip("\n").split("\t")
-        # 0 gname,1 gid,2 mod,3 chrom,4 start0,5 end0,6 strand,7 zn,8 sample,...
         return (p[0], p[2], p[3], int(p[4]), int(p[5]), p[6], int(p[7]), p[8])
 
     per_gene_sorted = os.path.join(workdir, f"{tag}.per_gene.sorted.tsv")
@@ -970,7 +1077,7 @@ def generate_per_gene_outputs_from_dedup(
         safe_mod = sanitize_filename_token(str(mod))
         return os.path.join(out_dir, f"{prefix_base}__{safe_g}__{safe_mod}")
 
-    curr_gm = None  # (gene_name, gene_id, mod)
+    curr_gm = None
     row_fh = None
 
     piv_cov = defaultdict(dict)   # idx -> {sample: cov}
@@ -987,10 +1094,10 @@ def generate_per_gene_outputs_from_dedup(
 
         if row_fh is not None:
             row_fh.close()
+            row_fh = None
 
         if write_pivots:
             samples = sorted(samples_seen)
-            # idx: (chrom,start0,end0,strand,zn)
             idxs = sorted(piv_cov.keys(), key=lambda t: (t[0], t[1], t[2], t[3], t[4]))
 
             def write_pivot(path, m, is_float: bool):
@@ -1022,6 +1129,7 @@ def generate_per_gene_outputs_from_dedup(
             p = ln.rstrip("\n").split("\t")
             if len(p) < 18:
                 continue
+
             gname, gid, mod = p[0], p[1], p[2]
             chrom, start0, end0, strand, zn, sample = p[3], p[4], p[5], p[6], p[7], p[8]
             cov, nmod, frac = p[9], p[10], p[17]
@@ -1052,35 +1160,36 @@ def generate_per_gene_outputs_from_dedup(
             if write_pivots:
                 samples_seen.add(sample)
                 idx = (chrom, int(start0), int(end0), strand, int(zn))
-                # first-seen semantics per (idx,sample)
                 if sample not in piv_cov[idx]:
                     piv_cov[idx][sample] = int(cov)
                     piv_nmod[idx][sample] = int(nmod)
                     piv_frac[idx][sample] = float(frac)
 
     flush_group()
-
     if verbose:
         print(f"[per-gene {tag}] wrote outputs under {out_dir}", file=sys.stderr)
 
+
 # ----------------------------- Key functions for sorts -----------------------------
+
 
 def key_norm_for_dedup(line: str):
     p = line.rstrip("\n").split("\t")
-    # NORM: 0 sample,1 zn,2 chrom,3 start0,4 end0,5 strand,6 mod,7 gid,8 gname,...
-    # Dedup sort key: sample, mod, zn, chrom, start0, end0, strand, gid, gname
     return (p[0], p[6], int(p[1]), p[2], int(p[3]), int(p[4]), p[5], p[7], p[8])
+
 
 def key_passing_site(line: str):
     p = line.rstrip("\n").split("\t")
     return (p[0], int(p[1]), int(p[2]), p[3], p[4])
 
+
 def key_dedup_by_site(line: str):
     p = line.rstrip("\n").split("\t")
-    # dedup: 0 sample,1 zn,2 chrom,3 start0,4 end0,5 strand,6 mod,7 gid,8 gname,...
     return (p[2], int(p[3]), int(p[4]), p[5], p[6], p[0], int(p[1]), p[7], p[8])
 
+
 # ----------------------------- Main -----------------------------
+
 
 def main():
     args = parse_args()
@@ -1094,6 +1203,14 @@ def main():
     workdir = tempfile.mkdtemp(prefix=f"aggregate_by_gene_{os.getpid()}_", dir=args.tmpdir)
     if args.verbose:
         print(f"[tmp] workdir={workdir}", file=sys.stderr)
+        print(
+            "[cfg] "
+            f"emit_raw={args.emit_raw} emit_filtered={args.emit_filt} "
+            f"write_long={args.write_long} write_pivots={args.write_pivots} "
+            f"write_raw_per_gene={args.write_raw_per_gene} write_filtered_per_gene={args.write_filtered_per_gene} "
+            f"filter_enable={args.filter_enable}",
+            file=sys.stderr
+        )
 
     try:
         # Stage 1: normalize
@@ -1115,7 +1232,6 @@ def main():
         # Stage 3: dedup reduce (RAW) and collect passing sites (if filter enabled)
         dedup_raw = os.path.join(workdir, "dedup.RAW.tsv")
         passing_sites_uns = os.path.join(workdir, "passing_sites.unsorted.tsv") if args.filter_enable else None
-
         out_long_raw = f"{base}_RAW_sites_long.tsv" if (args.emit_raw and args.write_long) else None
 
         if args.emit_raw or args.filter_enable or args.emit_filt:
@@ -1131,7 +1247,7 @@ def main():
                 verbose=args.verbose
             )
 
-        # RAW stats + per-gene
+        # RAW stats + per-gene outputs
         if args.emit_raw:
             compute_per_sample_mod_stats_from_dedup(
                 dedup_tsv=dedup_raw,
@@ -1152,9 +1268,12 @@ def main():
                 verbose=args.verbose
             )
 
-        # Stage 4: FILTERED subset + stats + per-gene
+        # FILTERED subset + stats + per-gene
         if args.emit_filt:
             if args.filter_enable:
+                if passing_sites_uns is None:
+                    sys.exit("Internal error: filter_enable true but passing_sites_uns is None")
+
                 # Sort + unique passing sites by site key
                 passing_sorted_tmp = os.path.join(workdir, "passing_sites.sorted.tsv")
                 external_sort_tsv(
@@ -1192,12 +1311,12 @@ def main():
                 # no filtering requested => FILTERED == RAW semantics
                 dedup_filt = dedup_raw
                 out_long_filt = f"{base}_FILTERED_sites_long.tsv" if args.write_long else None
+
                 if out_long_filt is not None:
                     ensure_dir(os.path.dirname(out_long_filt) or ".")
                     if out_long_raw and os.path.exists(out_long_raw):
                         shutil.copyfile(out_long_raw, out_long_filt)
                     else:
-                        # write long directly from dedup
                         with open(out_long_filt, "w") as out:
                             out.write("\t".join(LONG_HEADER) + "\n")
                             with open(dedup_raw, "r") as f:
@@ -1205,9 +1324,13 @@ def main():
                                     p = ln.rstrip("\n").split("\t")
                                     if len(p) < 18:
                                         continue
-                                    sample, zn, chrom, start0, end0, strand, mod, gid, gname = p[0], p[1], p[2], p[3], p[4], p[5], p[6], p[7], p[8]
+                                    sample, zn, chrom, start0, end0, strand, mod, gid, gname = (
+                                        p[0], p[1], p[2], p[3], p[4], p[5], p[6], p[7], p[8]
+                                    )
                                     cov, nmod = p[9], p[10]
-                                    ncan, nother, ndel, nfail, ndiff, nnocall, frac = p[11], p[12], p[13], p[14], p[15], p[16], p[17]
+                                    ncan, nother, ndel, nfail, ndiff, nnocall, frac = (
+                                        p[11], p[12], p[13], p[14], p[15], p[16], p[17]
+                                    )
                                     out.write(
                                         f"{sample}\t{zn}\t{chrom}\t{start0}\t{end0}\t{strand}\t{mod}\t"
                                         f"{cov}\t{nmod}\t{frac}\t{gid}\t{gname}\t"
@@ -1244,6 +1367,7 @@ def main():
                 shutil.rmtree(workdir)
             except Exception:
                 pass
+
 
 if __name__ == "__main__":
     main()
