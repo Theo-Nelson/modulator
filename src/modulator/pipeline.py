@@ -580,6 +580,7 @@ class ModulatorPipeline:
         agg_cfg = self.config.get("aggregation", {}).get("zn", {})
         filters_cfg = self.config.get("filters", {})
         out_prefix = self.paths.aggregate_zn / self.prefix
+        out_prefix.parent.mkdir(parents=True, exist_ok=True)
         self._require_modkit_outputs("zn")
         self._require_existing_file(self.paths.out_gtf, "assembled GTF")
         tmpdir = (
@@ -619,6 +620,7 @@ class ModulatorPipeline:
         agg_cfg = self.config.get("aggregation", {}).get("zt", {})
         filters_cfg = self.config.get("filters", {})
         out_prefix = self.paths.aggregate_zt / self.prefix
+        out_prefix.parent.mkdir(parents=True, exist_ok=True)
         self._require_modkit_outputs("zt")
         self._require_existing_file(self.paths.classification_summary, "classification summary TSV")
         args = [
