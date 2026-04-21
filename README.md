@@ -1,8 +1,6 @@
 ![modulator](workflow/images/modulator_banner.png)
 
-
-
-A Snakemake pipeline for analyzing RNA modifications from aligned BAM files.
+A package-first RNA modification analysis pipeline for aligned BAM files. The primary entrypoint is now the `modulator` Python CLI, so the workflow can be launched as one command inside the `modulator` conda environment without fragile nested Snakemake config blobs. The legacy `workflow/` rules are still present for reference, but the supported interface is the package runner.
 
 ## What Changed In This Version
 
@@ -22,144 +20,71 @@ python workflow/scripts/genotype_regression_smoke_checks.py
 ## Installation
 
 1. Set up micromamba in your HPC environment: https://mamba.readthedocs.io/en/latest/installation/micromamba-installation.html
-2. Set up a custom micromamba environment for modulator: `micromamba create -y -n modulator -c conda-forge -c bioconda python=3.13.7 pandas=2.3.3 numpy=2.3.3 matplotlib=3.10.6 pysam=0.23.3 samtools=1.22.1 scipy snakemake ont-modkit=0.5.0`  
-3. Activate the environment: `micromamba activate modulator`
-4. Clone the repository: `git clone https://github.com/Theo-Nelson/modulator.git`
-5. Navigate to the `modulator` directory and run `snakemake` as shown in **Pipeline Parameters and Usage**.
+2. Clone the repository: `git clone https://github.com/Theo-Nelson/modulator.git`
+3. Create the environment from the bundled YAML:
+
+```bash
+micromamba env create -n modulator -f workflow/envs/modulator.yaml
+```
+
+4. Activate the environment:
+
+```bash
+micromamba activate modulator
+```
+
+5. Install the package in editable mode so the `modulator` command is available:
+
+```bash
+python -m pip install -e .
+```
 
 ## Input File Requirements
 
 ## Pipeline Parameters and Usage
 
-Minimal command to run on demo data:
+Package-native quick demo on the bundled MXD1 slice:
 
 ```bash
-snakemake -j 1 \
-  --configfile ../config/config.yaml \
-  --config \
-    reference_fa=/path/to/ref.fa \
-    reference_gtf=/path/to/ref.gtf \
-  --rerun-incomplete --printshellcmds
+modulator demo \
+  --reference-fa /path/to/ref.fa \
+  --reference-gtf /path/to/ref.gtf
 ```
 
-Expanded command to specify samples and references:
+Standard full run with explicit config overrides:
 
 ```bash
-snakemake -j 1 --cores 64 \
-  --configfile ../config/config.yaml \
-  --config \
+modulator run \
+  --config config/config.yaml \
+  --jobs 8 \
+  --set \
     reference_fa=/path/to/ref.fa \
     reference_gtf=/path/to/ref.gtf \
     bams_dir=/path/to/your/bams \
     bam_glob='*.bam' \
-    prefix=fivegenes_readbacked_annot \
-    mods='["17596","a","m","17802","69426","19228","19229","19227"]' \
-    ref_bases='["A","A","C","T","A","C","G","T"]' \
-    min_cov=0 \
-    min_cov_test=20 \
-    topk=10 \
-    assembler='{primary_only: true,
-                min_mapq: 10,
-                min_introns_read: 1,
-                require_softclip3p: 0,
-                apa_window: 20,
-                tes_window: null,
-                min_reads: 40,
-                min_frac: 0.00,
-                min_introns: 1,
-                min_polya_length: 12,
-                min_polya_purity: 0.5,
-                polya_support_frac: 0.5,
-                tes_match_tol: 25,
-                exact_tes_tol: 10,
-                assignment_mode: "support_first",
-                zn_mode: "metagene_colored",
-                min_distal_anchor_reads: 2,
-                min_distal_anchor_frac: 0.05,
-                min_exact_canonical_reads: 1,
-                write_zt_tagged_sample_bams: true,
-                min_reads_per_sample_for_mod: 5,
-                min_total_reads_for_mod: 20}' \
-    multigene_filter='{enable: true,
-                       mode: "resolve",
-                       zero_gene_action: "keep"}' \
-    modkit='{common: {
-                log_file_template: "results/{which}/{sample}.log",
-                region: null,
-                max_depth: 1000,
-                include_bed: null,
-                include_unmapped: false,
-                edge_filter: null,
-                invert_edge_filter: false,
-                interval_size: 100000,
-                queue_size: 1000,
-                chunk_size: null,
-                num_reads: 10042,
-                sampling_frac: null,
-                seed: null,
-                sample_region: null,
-                sampling_interval_size: 1000000,
-                no_filtering: false,
-                filter_thresholds: ["A:0.8","C:0.8","G:0.8","T:0.8"],
-                mod_thresholds: ["17596:0.99","a:0.99","m:0.99","17802:0.99","69426:0.99","19228:0.99","19229:0.99","19227:0.99"],
-                ignore: [],
-                force_allow_implicit: false,
-                motif: [],
-                cpg: false,
-                ref_mask: false,
-                combine_mods: false,
-                combine_strands: false,
-                mixed_delim: false,
-                only_tabs: false,
-                bedgraph: false,
-                header: false,
-                prefix: null,
-                suppress_progress: true
-             },
-             zn: { partition_tag: "ZN", per_mod_bed: true },
-             zt: { partition_tag: "ZT" }}' \
-    aggregation='{zn: { filter_enable: true,
-                        count_diff_factor: 3,
-                        mod_fail_margin: 1,
-                        emit_raw: true,
-                        emit_filtered: true,
-                        write_long: true,
-                        write_pivots: true,
-                        write_raw_per_gene: true,
-                        write_filtered_per_gene: true },
-                  zt: { filter_enable: true,
-                        count_diff_factor: 3,
-                        mod_fail_margin: 1,
-                        emit_raw: true,
-                        emit_filtered: true,
-                        write_long: true,
-                        write_pivots: true }}' \
-    test_diffs='{min_cov: 20,
-                 topk: 10,
-                 test: "auto",
-                 pseudocount: 0.5,
-                 alternative: "two-sided",
-                 gene_filter: null,
-                 mod_filter: null}' \
-    genotype='{enable: true,
-               min_alt_reads: 4,
-               min_total_cov: 8,
-               min_alt_frac: 0.10,
-               max_alt_frac: 0.90,
-               min_baseq: 20,
-               min_mapq: 10,
-               min_mod_site_cov: 1,
-               min_group_reads: 4,
-               min_haplotype_reads: 4,
-               max_haplotype_snps: 4,
-               test: "auto",
-               pseudocount: 0.5}' \
-    report='{enable: true,
-             max_diff_figs: 6,
-             top_transcripts: 20,
-             top_genes: 20}' \
-  --rerun-incomplete --printshellcmds
+    prefix=my_run
 ```
+
+If you prefer not to install the console script yet, the exact same interface is available through:
+
+```bash
+PYTHONPATH=src python -m modulator run --config config/config.yaml --set reference_fa=/path/to/ref.fa reference_gtf=/path/to/ref.gtf
+```
+
+Useful CLI helpers:
+
+```bash
+modulator validate-config --config config/config.yaml --set reference_fa=/path/to/ref.fa reference_gtf=/path/to/ref.gtf
+modulator run --config config/config.yaml --stages assemble,read_stats,multigene_filter
+modulator demo --reference-fa /path/to/ref.fa --reference-gtf /path/to/ref.gtf --dataset ALCAM_NHSL1_SERAC1_MXD1_RIOK3_reads --mode full
+```
+
+A few notes on the new interface:
+
+- `config/config.yaml` is now the normal place for nested settings like `assembler`, `modkit`, `aggregation`, `genotype`, and `report`.
+- CLI overrides are intentionally simple `key=value` or `nested.key=value` items passed with `--set`.
+- `modulator demo` defaults to a fast MXD1-only run and keeps genotype disabled unless you override it.
+- The package runner executes the existing workflow scripts directly, so the algorithms stay the same while the launch UX is much more robust on systems like ACES.
 
 ### Assembly Parameters
 
@@ -191,8 +116,7 @@ The following table explains the different parameter functions available for tra
 | `emit_modkit_manifest` | boolean | `false` | `true` / `false` | Also write a manifest (`zt_bams/modkit_manifest.tsv`) for modkit processing. |
 | `min_reads_per_sample_for_mod` | integer | `5` | `1–50` | Minimum per-sample read support for creating a per-transcript BAM. |
 | `min_total_reads_for_mod` | integer | `20` | `10–200` | Minimum total read support (across samples) for a transcript to be eligible for modkit BAM output. |
-| `streaming` | boolean | `true` | `true` / `false` | Use streaming mode for memory-efficient processing. Disable with `false` for legacy behavior. |
-| `progress_interval` | integer | `100000` | `0+` | Print progress every N reads (0 to disable). Useful for monitoring large datasets. |
+| `status_every` | integer | `0` | `0+` | Print assembly progress every N reads (`0` disables status logging). |
 
 A few notes on how these parameters cooperate:
 
@@ -225,7 +149,7 @@ The following table explains the different parameter functions available for mod
 | `include_unmapped` | bool | `false` | `true/false` | `--include-unmapped` |
 | `edge_filter` | str/int/null | `null` | `N` or `"N,M"` | `--edge-filter` |
 | `invert_edge_filter` | bool | `false` | `true/false` | `--invert-edge-filter` |
-| `threads` | int/str | `snakemake --cores value` | `1+` | `-t/--threads` |
+| `threads` | int | top-level `threads` config | `1+` | `-t/--threads` |
 | `interval_size` | int | `100000` | `1+` | `--interval-size` |
 | `queue_size` | int | `1000` | `1+` | `--queue-size` |
 | `chunk_size` | int/null | `null` | `1+` | `--chunk-size` |
