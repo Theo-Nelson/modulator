@@ -1,7 +1,9 @@
 #!/usr/bin/env python3
 
+from concurrent.futures import ProcessPoolExecutor, as_completed
 import math
 import os
+import sys
 from typing import Dict, Iterable, List, Optional, Tuple
 
 import numpy as np
@@ -174,3 +176,23 @@ def context_key_from_row(row) -> str:
 
 def normalize_string_series(series: pd.Series, fill_value: str = "") -> pd.Series:
     return series.fillna(fill_value).astype(str).replace({"nan": fill_value, "None": fill_value, "null": fill_value})
+
+
+def run_process_jobs(fn, task_args: List[tuple], jobs: int, *, verbose: bool = False, label: str = "parallel jobs"):
+    if not task_args:
+        return []
+    jobs = max(1, min(int(jobs), len(task_args)))
+    if jobs <= 1 or len(task_args) == 1:
+        return [fn(*args) for args in task_args]
+
+    try:
+        results = []
+        with ProcessPoolExecutor(max_workers=jobs) as executor:
+            future_map = {executor.submit(fn, *args): args for args in task_args}
+            for future in as_completed(future_map):
+                results.append(future.result())
+        return results
+    except Exception as exc:
+        if verbose:
+            print(f"[warn] Falling back to serial {label}: {exc}", file=sys.stderr, flush=True)
+        return [fn(*args) for args in task_args]

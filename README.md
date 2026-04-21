@@ -85,6 +85,7 @@ A few notes on the new interface:
 - CLI overrides are intentionally simple `key=value` or `nested.key=value` items passed with `--set`.
 - `modulator demo` defaults to a fast MXD1-only run and keeps genotype disabled unless you override it.
 - The package runner executes the existing workflow scripts directly, so the algorithms stay the same while the launch UX is much more robust on systems like ACES.
+- The genotype stage now has a separate `genotype.jobs` knob so BAM-heavy SNP/mod extraction can parallelize across samples without forcing the whole pipeline to use a large `--jobs` value.
 
 ### Assembly Parameters
 
@@ -205,6 +206,7 @@ This optional module uses the same cleaned tagged BAMs as the rest of the pipeli
 | Parameter | Type | Default | Description |
 |------------|------|----------|--------------|
 | `enable` | boolean | `false` | Turn on genotype-aware molecule tables and association tests. |
+| `jobs` | integer | `2` | Number of BAMs to process in parallel during genotype discovery/extraction steps. Increase on compute nodes; keep small on login nodes. |
 | `min_alt_reads` | integer | `4` | Minimum alternative-base read support for a candidate SNP. |
 | `min_total_cov` | integer | `8` | Minimum total depth for a candidate SNP position. |
 | `min_alt_frac` | float | `0.10` | Minimum alternative allele fraction for candidate SNP discovery. |

@@ -676,6 +676,7 @@ class ModulatorPipeline:
         if not as_bool(geno.get("enable", False), False):
             return
         self._require_reference_fa()
+        geno_jobs = max(1, min(len(self.samples), int(geno.get("jobs", 2))))
         sample_bams = [
             str(self._require_existing_file(self._modkit_input_bam(sample), f"genotype input BAM for sample {sample}"))
             for sample in self.samples
@@ -689,7 +690,9 @@ class ModulatorPipeline:
                 "--bams", *sample_bams,
                 "--summary-tsv", str(self.paths.classification_summary),
                 "--out-tsv", str(self.paths.geno_read_assignments),
+                "--jobs", str(geno_jobs),
                 "--primary-only",
+                "--verbose",
             ],
             label="build_read_assignment_table",
         )
@@ -706,7 +709,9 @@ class ModulatorPipeline:
                 "--max-alt-frac", str(float(geno.get("max_alt_frac", 0.90))),
                 "--min-baseq", str(int(geno.get("min_baseq", 20))),
                 "--min-mapq", str(int(geno.get("min_mapq", self.config.get("assembler", {}).get("min_mapq", 10)))),
+                "--jobs", str(geno_jobs),
                 "--primary-only",
+                "--verbose",
             ],
             label="discover_candidate_snps",
         )
@@ -718,7 +723,9 @@ class ModulatorPipeline:
                 "--out-tsv", str(self.paths.geno_molecule_snps),
                 "--min-baseq", str(int(geno.get("min_baseq", 20))),
                 "--min-mapq", str(int(geno.get("min_mapq", self.config.get("assembler", {}).get("min_mapq", 10)))),
+                "--jobs", str(geno_jobs),
                 "--primary-only",
+                "--verbose",
             ],
             label="build_molecule_snp_table",
         )
@@ -745,6 +752,8 @@ class ModulatorPipeline:
                 "--reference-fa", str(self.reference_fa),
                 "--out-tsv", str(self.paths.geno_molecule_mod_calls),
                 "--threads", str(max(1, min(8, self.top_threads))),
+                "--jobs", str(geno_jobs),
+                "--verbose",
             ],
             label="build_molecule_mod_table",
         )

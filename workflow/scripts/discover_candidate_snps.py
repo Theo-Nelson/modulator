@@ -4,14 +4,16 @@ import argparse
 from collections import defaultdict
 import os
 import re
+import sys
 
 import pandas as pd
 import pysam
 
-from genotype_utils import sample_name_from_bam
+from genotype_utils import run_process_jobs, sample_name_from_bam
 
 
 DNA_BASES = ("A", "C", "G", "T")
+BASE_INDEX = {base: idx for idx, base in enumerate(DNA_BASES)}
 
 
 def parse_args():
@@ -26,6 +28,7 @@ def parse_args():
     ap.add_argument("--max-alt-frac", type=float, default=0.90)
     ap.add_argument("--min-baseq", type=int, default=20)
     ap.add_argument("--min-mapq", type=int, default=10)
+    ap.add_argument("--jobs", type=int, default=1, help="Number of BAMs to scan in parallel")
     ap.add_argument("--primary-only", action="store_true")
     ap.add_argument("--verbose", action="store_true")
     return ap.parse_args()
@@ -109,59 +112,106 @@ def init_count_record():
     }
 
 
-def main():
-    args = parse_args()
-    exon_records, merged_intervals = load_gtf_exons(args.gtf)
-    fasta = pysam.FastaFile(args.reference_fa)
+def make_read_callback(primary_only: bool, min_mapq: int):
+    if (not primary_only) and int(min_mapq) <= 0:
+        return "all"
 
-    site_counts = {}
-    for bam in args.bams:
-        sample = sample_name_from_bam(bam)
-        if args.verbose:
-            print(f"[info] scanning {sample}", file=os.sys.stderr)
+    def callback(read):
+        if read.is_unmapped:
+            return False
+        if primary_only and (read.is_secondary or read.is_supplementary):
+            return False
+        if read.mapping_quality < int(min_mapq):
+            return False
+        return True
+
+    return callback
+
+
+def scan_bam_counts(
+    bam: str,
+    reference_fa: str,
+    merged_intervals,
+    min_baseq: int,
+    min_mapq: int,
+    primary_only: bool,
+    verbose: bool = False,
+):
+    sample = sample_name_from_bam(bam)
+    if verbose:
+        print(f"[info] SNP scan start: {sample}", file=sys.stderr, flush=True)
+
+    sample_counts = {}
+    fasta = pysam.FastaFile(reference_fa)
+    callback = make_read_callback(primary_only, min_mapq)
+    covered_positions = 0
+    try:
         with pysam.AlignmentFile(bam, "rb") as fh:
             for chrom, intervals in merged_intervals.items():
                 for start1, end1 in intervals:
                     ref_seq = fasta.fetch(chrom, start1 - 1, end1).upper()
-                    for col in fh.pileup(
+                    counts = fh.count_coverage(
                         chrom,
                         start1 - 1,
                         end1,
-                        truncate=True,
-                        stepper="samtools",
-                        min_base_quality=args.min_baseq,
-                        min_mapping_quality=args.min_mapq,
-                    ):
-                        pos1 = int(col.reference_pos) + 1
-                        ref_idx = pos1 - start1
-                        if ref_idx < 0 or ref_idx >= len(ref_seq):
+                        quality_threshold=int(min_baseq),
+                        read_callback=callback,
+                    )
+                    for offset, ref in enumerate(ref_seq):
+                        if ref not in BASE_INDEX:
                             continue
-                        ref = ref_seq[ref_idx]
-                        if ref not in DNA_BASES:
+                        base_counts = tuple(int(arr[offset]) for arr in counts)
+                        if not any(base_counts):
                             continue
-                        rec = site_counts.setdefault((chrom, pos1, ref), init_count_record())
-                        per_sample = rec["per_sample"][sample]
-                        for pr in col.pileups:
-                            aln = pr.alignment
-                            if pr.is_del or pr.is_refskip or pr.query_position is None:
-                                continue
-                            if args.primary_only and (aln.is_secondary or aln.is_supplementary):
-                                continue
-                            if aln.mapping_quality < args.min_mapq:
-                                continue
-                            qpos = pr.query_position
-                            if aln.query_qualities is not None and aln.query_qualities[qpos] < args.min_baseq:
-                                continue
-                            base = aln.query_sequence[qpos].upper()
-                            if base not in DNA_BASES:
-                                continue
-                            rec["counts"][base] += 1
-                            per_sample[base] += 1
+                        covered_positions += 1
+                        sample_counts[(chrom, start1 + offset, ref)] = base_counts
+    finally:
+        fasta.close()
+
+    if verbose:
+        print(
+            f"[info] SNP scan done: {sample} positions_with_coverage={covered_positions}",
+            file=sys.stderr,
+            flush=True,
+        )
+    return sample, sample_counts
+
+
+def main():
+    args = parse_args()
+    exon_records, merged_intervals = load_gtf_exons(args.gtf)
+    jobs = max(1, min(int(args.jobs), len(args.bams)))
+
+    results = []
+    worker_args = [
+        (bam, args.reference_fa, merged_intervals, args.min_baseq, args.min_mapq, args.primary_only, args.verbose)
+        for bam in args.bams
+    ]
+    if jobs == 1:
+        for item in worker_args:
+            results.append(scan_bam_counts(*item))
+    else:
+        results = run_process_jobs(
+            scan_bam_counts,
+            worker_args,
+            jobs,
+            verbose=args.verbose,
+            label="discover_candidate_snps",
+        )
+
+    site_counts = {}
+    for sample, sample_counts in results:
+        for key, sample_base_counts in sample_counts.items():
+            rec = site_counts.setdefault(key, {"counts": [0, 0, 0, 0], "per_sample": {}})
+            rec["per_sample"][sample] = sample_base_counts
+            for idx, value in enumerate(sample_base_counts):
+                rec["counts"][idx] += int(value)
 
     rows = []
     for (chrom, pos1, ref), rec in sorted(site_counts.items()):
-        counts = rec["counts"]
-        total_cov = sum(counts.values())
+        total_counts = rec["counts"]
+        counts = {base: int(total_counts[idx]) for idx, base in enumerate(DNA_BASES)}
+        total_cov = sum(total_counts)
         ref_count = counts.get(ref, 0)
         alts = sorted(((b, c) for b, c in counts.items() if b != ref), key=lambda x: (-x[1], x[0]))
         alt, alt_count = alts[0] if alts else ("", 0)
@@ -182,12 +232,13 @@ def main():
         ann = annotate_site(chrom, pos1, exon_records)
         sample_summaries = []
         samples_with_alt = 0
+        alt_idx = BASE_INDEX.get(alt, -1)
         for sample in sorted(rec["per_sample"]):
             sc = rec["per_sample"][sample]
-            if sc.get(alt, 0) > 0:
+            if alt_idx >= 0 and sc[alt_idx] > 0:
                 samples_with_alt += 1
             sample_summaries.append(
-                f"{sample}:A={sc['A']},C={sc['C']},G={sc['G']},T={sc['T']}"
+                f"{sample}:A={sc[0]},C={sc[1]},G={sc[2]},T={sc[3]}"
             )
         rows.append({
             "snp_id": f"{chrom}:{pos1}:{ref}>{alt}",

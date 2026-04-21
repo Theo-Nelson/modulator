@@ -9,7 +9,7 @@ import tempfile
 
 import pandas as pd
 
-from genotype_utils import load_read_assignments, sample_name_from_bam, safe_float, safe_int
+from genotype_utils import load_read_assignments, run_process_jobs, sample_name_from_bam, safe_float, safe_int
 
 
 def parse_args():
@@ -22,12 +22,110 @@ def parse_args():
     ap.add_argument("--out-tsv", required=True, help="Output TSV")
     ap.add_argument("--modkit-bin", default="modkit", help="modkit executable")
     ap.add_argument("--threads", type=int, default=2)
+    ap.add_argument("--jobs", type=int, default=1, help="Number of BAMs to process in parallel")
     ap.add_argument("--verbose", action="store_true")
     return ap.parse_args()
 
 
 def parse_bool_text(x) -> bool:
     return str(x).strip().lower() in {"1", "true", "t", "yes", "y"}
+
+
+def extract_rows_from_bam(
+    bam: str,
+    candidate_bed: str,
+    reference_fa: str,
+    modkit_bin: str,
+    threads_per_job: int,
+    lookup,
+    verbose: bool = False,
+):
+    sample = sample_name_from_bam(bam)
+    rows = []
+    with tempfile.NamedTemporaryFile(prefix=f"{sample}.extract_calls.", suffix=".tsv.bgz", delete=False) as tmp:
+        tmp_path = tmp.name
+
+    try:
+        cmd = [
+            modkit_bin, "extract", "calls", bam, tmp_path,
+            "--bgzf",
+            "--force",
+            "--include-bed", candidate_bed,
+            "--reference", reference_fa,
+            "--mapped-only",
+            "--threads", str(max(1, int(threads_per_job))),
+            "--out-threads", "1",
+            "--suppress-progress",
+        ]
+        if verbose:
+            print(f"[info] mod extract start: {sample} threads={max(1, int(threads_per_job))}", file=sys.stderr, flush=True)
+        proc = subprocess.run(cmd, capture_output=True, text=True)
+        if proc.returncode != 0:
+            raise SystemExit(f"modkit extract calls failed for {bam}:\n{proc.stderr}")
+
+        header = None
+        with gzip.open(tmp_path, "rt") as fh:
+            for line in fh:
+                line = line.rstrip("\n")
+                if not line:
+                    continue
+                if header is None:
+                    header = line.split("\t")
+                    continue
+                parts = line.split("\t")
+                if len(parts) != len(header):
+                    continue
+                rec = dict(zip(header, parts))
+                chrom = str(rec.get("chrom", ""))
+                start0 = safe_int(rec.get("ref_position", -1), default=-1)
+                qname = str(rec.get("read_id", ""))
+                call_code = str(rec.get("call_code", ""))
+                ref_strand = str(rec.get("ref_strand", ""))
+                key = (chrom, start0)
+                if key not in lookup:
+                    continue
+                for site in lookup[key]:
+                    site_strand = str(site.get("strand", ""))
+                    if site_strand and ref_strand and ref_strand not in {".", "?"} and site_strand != ref_strand:
+                        continue
+                    target_mod = str(site["mod_code"])
+                    if call_code == target_mod:
+                        state_detail = "modified"
+                        target_modified = 1
+                    elif call_code == "-":
+                        state_detail = "canonical"
+                        target_modified = 0
+                    else:
+                        state_detail = "other_mod"
+                        target_modified = 0
+                    rows.append({
+                        "sample": sample,
+                        "qname": qname,
+                        "mod_site_id": site["mod_site_id"],
+                        "chrom": chrom,
+                        "start0": start0,
+                        "end0": safe_int(site.get("end0", start0 + 1), default=start0 + 1),
+                        "strand": site_strand or ref_strand,
+                        "target_mod_code": target_mod,
+                        "call_code": call_code,
+                        "state_detail": state_detail,
+                        "target_modified": target_modified,
+                        "call_prob": safe_float(rec.get("call_prob", 0.0)),
+                        "canonical_base": str(rec.get("canonical_base", "")),
+                        "modified_primary_base": str(rec.get("modified_primary_base", "")),
+                        "fail": parse_bool_text(rec.get("fail", False)),
+                        "within_alignment": parse_bool_text(rec.get("within_alignment", True)),
+                        "gene_id": str(site.get("gene_id", "")),
+                        "gene_name": str(site.get("gene_name", "")),
+                        "metagene_index": str(site.get("metagene_index", "")),
+                    })
+    finally:
+        if os.path.exists(tmp_path):
+            os.unlink(tmp_path)
+
+    if verbose:
+        print(f"[info] mod extract done: {sample} rows={len(rows)}", file=sys.stderr, flush=True)
+    return rows
 
 
 def main():
@@ -56,88 +154,43 @@ def main():
     ] if c in assignments.columns]
     assignments = assignments[keep_assign_cols].drop_duplicates(["sample", "qname"])
 
+    jobs = max(1, min(int(args.jobs), len(args.bams)))
+    threads_per_job = max(1, int(args.threads) // jobs)
     rows = []
-    for bam in args.bams:
-        sample = sample_name_from_bam(bam)
-        with tempfile.NamedTemporaryFile(prefix=f"{sample}.extract_calls.", suffix=".tsv.bgz", delete=False) as tmp:
-            tmp_path = tmp.name
-        try:
-            cmd = [
-                args.modkit_bin, "extract", "calls", bam, tmp_path,
-                "--bgzf",
-                "--force",
-                "--include-bed", args.candidate_bed,
-                "--reference", args.reference_fa,
-                "--mapped-only",
-                "--threads", str(max(1, int(args.threads))),
-                "--out-threads", "1",
-                "--suppress-progress",
-            ]
-            if args.verbose:
-                print(f"[info] running {' '.join(cmd)}", file=sys.stderr)
-            proc = subprocess.run(cmd, capture_output=True, text=True)
-            if proc.returncode != 0:
-                raise SystemExit(f"modkit extract calls failed for {bam}:\n{proc.stderr}")
-
-            header = None
-            with gzip.open(tmp_path, "rt") as fh:
-                for line in fh:
-                    line = line.rstrip("\n")
-                    if not line:
-                        continue
-                    if header is None:
-                        header = line.split("\t")
-                        continue
-                    parts = line.split("\t")
-                    if len(parts) != len(header):
-                        continue
-                    rec = dict(zip(header, parts))
-                    chrom = str(rec.get("chrom", ""))
-                    start0 = safe_int(rec.get("ref_position", -1), default=-1)
-                    qname = str(rec.get("read_id", ""))
-                    call_code = str(rec.get("call_code", ""))
-                    ref_strand = str(rec.get("ref_strand", ""))
-                    key = (chrom, start0)
-                    if key not in lookup:
-                        continue
-                    for site in lookup[key]:
-                        site_strand = str(site.get("strand", ""))
-                        if site_strand and ref_strand and ref_strand not in {".", "?"} and site_strand != ref_strand:
-                            continue
-                        target_mod = str(site["mod_code"])
-                        if call_code == target_mod:
-                            state_detail = "modified"
-                            target_modified = 1
-                        elif call_code == "-":
-                            state_detail = "canonical"
-                            target_modified = 0
-                        else:
-                            state_detail = "other_mod"
-                            target_modified = 0
-                        rows.append({
-                            "sample": sample,
-                            "qname": qname,
-                            "mod_site_id": site["mod_site_id"],
-                            "chrom": chrom,
-                            "start0": start0,
-                            "end0": safe_int(site.get("end0", start0 + 1), default=start0 + 1),
-                            "strand": site_strand or ref_strand,
-                            "target_mod_code": target_mod,
-                            "call_code": call_code,
-                            "state_detail": state_detail,
-                            "target_modified": target_modified,
-                            "call_prob": safe_float(rec.get("call_prob", 0.0)),
-                            "canonical_base": str(rec.get("canonical_base", "")),
-                            "modified_primary_base": str(rec.get("modified_primary_base", "")),
-                            "fail": parse_bool_text(rec.get("fail", False)),
-                            "within_alignment": parse_bool_text(rec.get("within_alignment", True)),
-                            "gene_id": str(site.get("gene_id", "")),
-                            "gene_name": str(site.get("gene_name", "")),
-                            "metagene_index": str(site.get("metagene_index", "")),
-                        })
-        finally:
-            if os.path.exists(tmp_path):
-                os.unlink(tmp_path)
+    if jobs == 1:
+        for bam in args.bams:
+            rows.extend(
+                extract_rows_from_bam(
+                    bam,
+                    args.candidate_bed,
+                    args.reference_fa,
+                    args.modkit_bin,
+                    threads_per_job,
+                    lookup,
+                    args.verbose,
+                )
+            )
+    else:
+        task_args = [
+            (
+                bam,
+                args.candidate_bed,
+                args.reference_fa,
+                args.modkit_bin,
+                threads_per_job,
+                lookup,
+                args.verbose,
+            )
+            for bam in args.bams
+        ]
+        for result in run_process_jobs(
+            extract_rows_from_bam,
+            task_args,
+            jobs,
+            verbose=args.verbose,
+            label="build_molecule_mod_table",
+        ):
+            rows.extend(result)
 
     df = pd.DataFrame(rows)
     if df.empty:

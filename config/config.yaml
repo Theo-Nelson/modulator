@@ -152,6 +152,7 @@ report:
 
 genotype:
   enable: false
+  jobs: 2
   min_alt_reads: 4
   min_total_cov: 8
   min_alt_frac: 0.10
