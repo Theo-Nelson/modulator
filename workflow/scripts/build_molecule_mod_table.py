@@ -1,0 +1,159 @@
+#!/usr/bin/env python3
+
+import argparse
+import gzip
+import os
+import subprocess
+import sys
+import tempfile
+
+import pandas as pd
+
+from genotype_utils import load_read_assignments, sample_name_from_bam, safe_float, safe_int
+
+
+def parse_args():
+    ap = argparse.ArgumentParser(description="Build a per-read mod call table at candidate modulator sites.")
+    ap.add_argument("--bams", nargs="+", required=True, help="Input BAMs with MM/ML tags")
+    ap.add_argument("--candidate-sites-tsv", required=True, help="Candidate mod site TSV")
+    ap.add_argument("--candidate-bed", required=True, help="Candidate mod BED for modkit include-bed")
+    ap.add_argument("--read-assignments", required=True, help="Read assignment TSV")
+    ap.add_argument("--reference-fa", required=True, help="Reference FASTA")
+    ap.add_argument("--out-tsv", required=True, help="Output TSV")
+    ap.add_argument("--modkit-bin", default="modkit", help="modkit executable")
+    ap.add_argument("--threads", type=int, default=2)
+    ap.add_argument("--verbose", action="store_true")
+    return ap.parse_args()
+
+
+def parse_bool_text(x) -> bool:
+    return str(x).strip().lower() in {"1", "true", "t", "yes", "y"}
+
+
+def main():
+    args = parse_args()
+    cand = pd.read_csv(args.candidate_sites_tsv, sep="\t", low_memory=False)
+    if cand.empty:
+        out = pd.DataFrame(columns=[
+            "sample", "qname", "mod_site_id", "chrom", "start0", "end0", "strand",
+            "target_mod_code", "call_code", "state_detail", "target_modified",
+            "call_prob", "canonical_base", "modified_primary_base", "fail",
+            "within_alignment", "gene_id", "gene_name", "metagene_index"
+        ])
+        os.makedirs(os.path.dirname(args.out_tsv) or ".", exist_ok=True)
+        out.to_csv(args.out_tsv, sep="\t", index=False)
+        return
+
+    lookup = {}
+    for row in cand.to_dict("records"):
+        key = (str(row["chrom"]), int(row["start0"]))
+        lookup.setdefault(key, []).append(row)
+
+    assignments = load_read_assignments(args.read_assignments)
+    keep_assign_cols = [c for c in [
+        "sample", "qname", "ZT", "ZG", "ZN", "ZM", "assigned", "gene_id", "gene_name",
+        "gene_index", "transcript_index", "metagene_index", "classification"
+    ] if c in assignments.columns]
+    assignments = assignments[keep_assign_cols].drop_duplicates(["sample", "qname"])
+
+    rows = []
+    for bam in args.bams:
+        sample = sample_name_from_bam(bam)
+        with tempfile.NamedTemporaryFile(prefix=f"{sample}.extract_calls.", suffix=".tsv.bgz", delete=False) as tmp:
+            tmp_path = tmp.name
+        try:
+            cmd = [
+                args.modkit_bin, "extract", "calls", bam, tmp_path,
+                "--bgzf",
+                "--force",
+                "--include-bed", args.candidate_bed,
+                "--reference", args.reference_fa,
+                "--mapped-only",
+                "--threads", str(max(1, int(args.threads))),
+                "--out-threads", "1",
+                "--suppress-progress",
+            ]
+            if args.verbose:
+                print(f"[info] running {' '.join(cmd)}", file=sys.stderr)
+            proc = subprocess.run(cmd, capture_output=True, text=True)
+            if proc.returncode != 0:
+                raise SystemExit(f"modkit extract calls failed for {bam}:\n{proc.stderr}")
+
+            header = None
+            with gzip.open(tmp_path, "rt") as fh:
+                for line in fh:
+                    line = line.rstrip("\n")
+                    if not line:
+                        continue
+                    if header is None:
+                        header = line.split("\t")
+                        continue
+                    parts = line.split("\t")
+                    if len(parts) != len(header):
+                        continue
+                    rec = dict(zip(header, parts))
+                    chrom = str(rec.get("chrom", ""))
+                    start0 = safe_int(rec.get("ref_position", -1), default=-1)
+                    qname = str(rec.get("read_id", ""))
+                    call_code = str(rec.get("call_code", ""))
+                    ref_strand = str(rec.get("ref_strand", ""))
+                    key = (chrom, start0)
+                    if key not in lookup:
+                        continue
+                    for site in lookup[key]:
+                        site_strand = str(site.get("strand", ""))
+                        if site_strand and ref_strand and ref_strand not in {".", "?"} and site_strand != ref_strand:
+                            continue
+                        target_mod = str(site["mod_code"])
+                        if call_code == target_mod:
+                            state_detail = "modified"
+                            target_modified = 1
+                        elif call_code == "-":
+                            state_detail = "canonical"
+                            target_modified = 0
+                        else:
+                            state_detail = "other_mod"
+                            target_modified = 0
+                        rows.append({
+                            "sample": sample,
+                            "qname": qname,
+                            "mod_site_id": site["mod_site_id"],
+                            "chrom": chrom,
+                            "start0": start0,
+                            "end0": safe_int(site.get("end0", start0 + 1), default=start0 + 1),
+                            "strand": site_strand or ref_strand,
+                            "target_mod_code": target_mod,
+                            "call_code": call_code,
+                            "state_detail": state_detail,
+                            "target_modified": target_modified,
+                            "call_prob": safe_float(rec.get("call_prob", 0.0)),
+                            "canonical_base": str(rec.get("canonical_base", "")),
+                            "modified_primary_base": str(rec.get("modified_primary_base", "")),
+                            "fail": parse_bool_text(rec.get("fail", False)),
+                            "within_alignment": parse_bool_text(rec.get("within_alignment", True)),
+                            "gene_id": str(site.get("gene_id", "")),
+                            "gene_name": str(site.get("gene_name", "")),
+                            "metagene_index": str(site.get("metagene_index", "")),
+                        })
+        finally:
+            if os.path.exists(tmp_path):
+                os.unlink(tmp_path)
+
+    df = pd.DataFrame(rows)
+    if df.empty:
+        df = pd.DataFrame(columns=[
+            "sample", "qname", "mod_site_id", "chrom", "start0", "end0", "strand",
+            "target_mod_code", "call_code", "state_detail", "target_modified",
+            "call_prob", "canonical_base", "modified_primary_base", "fail",
+            "within_alignment", "gene_id", "gene_name", "metagene_index"
+        ])
+    else:
+        df = df.merge(assignments, on=["sample", "qname"], how="left")
+        df["usable"] = (~df["fail"].fillna(True)) & df["within_alignment"].fillna(False)
+
+    os.makedirs(os.path.dirname(args.out_tsv) or ".", exist_ok=True)
+    df.to_csv(args.out_tsv, sep="\t", index=False)
+
+
+if __name__ == "__main__":
+    main()

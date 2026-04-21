@@ -7,11 +7,9 @@ rule test_transcript_diffs:
     params:
         out_prefix = f"results/test_diffs/{config['prefix']}",
         script = "workflow/scripts/test_stoichiometry_diffs.py",
-        # existing knobs
-        min_cov = config.get("min_cov_test", 20),
-        topk = config.get("topk", 10),
-        # NEW: read test_diffs block safely
         test_diffs = config.get("test_diffs", {}),
+        min_cov = config.get("test_diffs", {}).get("min_cov", config.get("min_cov_test", 20)),
+        topk = config.get("test_diffs", {}).get("topk", config.get("topk", 10)),
         test_flag = (lambda td: f"--test {td['test']}" if isinstance(td.get("test"), str) and td["test"] else "")(config.get("test_diffs", {})),
         alt_flag  = (lambda td: f"--alternative {td['alternative']}" if isinstance(td.get("alternative"), str) and td["alternative"] else "")(config.get("test_diffs", {})),
         pc_flag   = (lambda td: f"--pseudocount {td['pseudocount']}" if td.get("pseudocount") is not None else "")(config.get("test_diffs", {})),
@@ -35,4 +33,3 @@ rule test_transcript_diffs:
             {params.mod_flags} \
             --verbose
         """
-

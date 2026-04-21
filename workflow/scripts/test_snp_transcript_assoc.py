@@ -1,0 +1,94 @@
+#!/usr/bin/env python3
+
+import argparse
+import json
+import os
+
+import pandas as pd
+
+from genotype_utils import benjamini_hochberg, max_abs_distribution_shift, run_contingency_test
+
+
+def parse_args():
+    ap = argparse.ArgumentParser(description="Test SNP allele to transcript assignment associations.")
+    ap.add_argument("--molecule-snps", required=True)
+    ap.add_argument("--out-tsv", required=True)
+    ap.add_argument("--min-allele-reads", type=int, default=4)
+    ap.add_argument("--min-transcript-reads", type=int, default=4)
+    ap.add_argument("--test", choices=["auto", "fisher", "chi2"], default="auto")
+    ap.add_argument("--pseudocount", type=float, default=0.5)
+    return ap.parse_args()
+
+
+def main():
+    args = parse_args()
+    df = pd.read_csv(args.molecule_snps, sep="\t", low_memory=False)
+    keep = df["allele_class"].isin(["ref", "alt"]) & df["ZT"].fillna("").astype(str).ne("")
+    df = df.loc[keep].copy()
+
+    rows = []
+    for snp_id, sub in df.groupby("snp_id", sort=False):
+        grp = sub.groupby(["allele_class", "ZT"], as_index=False).size()
+        tx_totals = grp.groupby("ZT")["size"].sum()
+        keep_tx = sorted(tx_totals[tx_totals >= int(args.min_transcript_reads)].index)
+        if len(keep_tx) < 2:
+            continue
+        grp = grp[grp["ZT"].isin(keep_tx)].copy()
+        table = (
+            grp.pivot_table(index="allele_class", columns="ZT", values="size", fill_value=0, aggfunc="sum")
+               .reindex(index=["ref", "alt"], fill_value=0)
+        )
+        allele_totals = table.sum(axis=1)
+        if allele_totals.get("ref", 0) < int(args.min_allele_reads):
+            continue
+        if allele_totals.get("alt", 0) < int(args.min_allele_reads):
+            continue
+        tt = table.to_numpy(dtype=float)
+        test_name, stat_name, stat_value, p_value = run_contingency_test(tt, test=args.test, pseudocount=args.pseudocount)
+        per_tx = []
+        for tx in table.columns:
+            per_tx.append({
+                "ZT": tx,
+                "ref_reads": int(table.loc["ref", tx]),
+                "alt_reads": int(table.loc["alt", tx]),
+            })
+        first = sub.iloc[0]
+        rows.append({
+            "snp_id": snp_id,
+            "chrom": first.get("chrom", ""),
+            "pos1": int(first.get("pos1", 0)),
+            "ref": first.get("ref", ""),
+            "alt": first.get("alt", ""),
+            "gene_names": first.get("gene_names", ""),
+            "gene_ids": first.get("gene_ids", ""),
+            "metagene_indices": first.get("metagene_indices", ""),
+            "n_reads": int(tt.sum()),
+            "n_ref_reads": int(allele_totals.get("ref", 0)),
+            "n_alt_reads": int(allele_totals.get("alt", 0)),
+            "n_transcripts_tested": int(tt.shape[1]),
+            "test_name": test_name,
+            "stat_name": stat_name,
+            "stat_value": stat_value,
+            "p_value": p_value,
+            "effect_max_abs_tx_frac_diff": max_abs_distribution_shift(tt),
+            "per_transcript_json": json.dumps(per_tx, separators=(",", ":")),
+        })
+
+    out = pd.DataFrame(rows)
+    if not out.empty:
+        out["p_adj_bh"] = benjamini_hochberg(out["p_value"].values)
+        out = out.sort_values(["p_adj_bh", "effect_max_abs_tx_frac_diff"], ascending=[True, False]).reset_index(drop=True)
+    else:
+        out = pd.DataFrame(columns=[
+            "snp_id", "chrom", "pos1", "ref", "alt", "gene_names", "gene_ids", "metagene_indices",
+            "n_reads", "n_ref_reads", "n_alt_reads", "n_transcripts_tested",
+            "test_name", "stat_name", "stat_value", "p_value", "effect_max_abs_tx_frac_diff",
+            "per_transcript_json", "p_adj_bh"
+        ])
+
+    os.makedirs(os.path.dirname(args.out_tsv) or ".", exist_ok=True)
+    out.to_csv(args.out_tsv, sep="\t", index=False)
+
+
+if __name__ == "__main__":
+    main()

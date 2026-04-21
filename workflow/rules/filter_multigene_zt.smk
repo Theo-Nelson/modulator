@@ -26,7 +26,8 @@ if ENABLE_MULTIGENE_FILTER:
             removed = f"{ZT_SCRAP_DIR}" + "/{sample}.multigene_removed_reads.tsv",
             scrap_tx_counts = f"{ZT_SCRAP_DIR}" + "/{sample}.multigene_scrap_tx_counts.tsv"
         params:
-            zero_gene_action = MULTIGENE_FILTER_CFG.get("zero_gene_action", "keep")
+            zero_gene_action = MULTIGENE_FILTER_CFG.get("zero_gene_action", "keep"),
+            mode = MULTIGENE_FILTER_CFG.get("mode", "resolve")
         conda:
             "../envs/modulator.yaml"
         shell:
@@ -54,6 +55,7 @@ if ENABLE_MULTIGENE_FILTER:
               --out-removed-tsv "{output.removed}" \
               --out-scrap-tx-counts-tsv "{output.scrap_tx_counts}" \
               --zero-gene-action "{params.zero_gene_action}" \
+              --mode "{params.mode}" \
               --same-strand-only
             """
 

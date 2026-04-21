@@ -22,6 +22,11 @@ assembler:
   polya_support_frac: 0.5
   tes_match_tol: 25
   exact_tes_tol: 10
+  assignment_mode: support_first
+  zn_mode: metagene_colored
+  min_distal_anchor_reads: 2
+  min_distal_anchor_frac: 0.05
+  min_exact_canonical_reads: 1
   write_zt_bams: false
   write_zt_tagged_sample_bams: true
   emit_modkit_manifest: false
@@ -30,6 +35,7 @@ assembler:
 
 multigene_filter:
   enable: true
+  mode: resolve
   zero_gene_action: keep
 
 modkit:
@@ -133,3 +139,25 @@ test_diffs:
   alternative: two-sided   # fisher alternative
   gene_filter: null     # e.g., ["ALCAM","RIOK3"]
   mod_filter: null      # e.g., ["a","m"]
+
+report:
+  enable: true
+  title: "modulator HTML report"
+  max_diff_figs: 6
+  top_transcripts: 20
+  top_genes: 20
+
+genotype:
+  enable: false
+  min_alt_reads: 4
+  min_total_cov: 8
+  min_alt_frac: 0.10
+  max_alt_frac: 0.90
+  min_baseq: 20
+  min_mapq: 10
+  min_mod_site_cov: 1
+  min_group_reads: 4
+  min_haplotype_reads: 4
+  max_haplotype_snps: 4
+  test: auto
+  pseudocount: 0.5

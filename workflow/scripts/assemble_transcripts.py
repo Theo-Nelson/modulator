@@ -148,6 +148,84 @@ def is_suffix(longer, shorter):
 def chain_to_str(chain):
     return "." if not chain else ";".join(f"{d}-{a}" for d,a in chain)
 
+def merge_intervals(intervals):
+    if not intervals:
+        return []
+    merged = [list(sorted(intervals)[0])]
+    for s, e in sorted(intervals)[1:]:
+        if s <= merged[-1][1] + 1:
+            merged[-1][1] = max(merged[-1][1], e)
+        else:
+            merged.append([s, e])
+    return [(s, e) for s, e in merged]
+
+def first_overlap_bp(exons_a, exons_b):
+    return exon_overlap_len(exons_a, exons_b)
+
+def smallest_unused_positive(used_vals):
+    x = 1
+    while x in used_vals:
+        x += 1
+    return x
+
+def compute_chain_features(exact_counts):
+    observed = list(exact_counts.keys())
+    features = {}
+    for chain in observed:
+        shorter_suffixes = [
+            other for other in observed
+            if other != chain and len(other) < len(chain) and is_suffix(chain, other)
+        ]
+        max_suffix_len = max((len(other) for other in shorter_suffixes), default=0)
+        unique_prefix = tuple(chain[: max(0, len(chain) - max_suffix_len)])
+        reachable_count = sum(
+            exact_counts[other] for other in observed
+            if is_suffix(chain, other)
+        )
+        exact_count = exact_counts[chain]
+        anchor_frac = (exact_count / reachable_count) if reachable_count else 0.0
+        features[chain] = dict(
+            exact_count=exact_count,
+            reachable_count=reachable_count,
+            has_shorter_suffix=bool(shorter_suffixes),
+            unique_prefix=unique_prefix,
+            unique_prefix_len=len(unique_prefix),
+            distal_unique_5p_junction=(unique_prefix[0] if unique_prefix else None),
+            anchor_reads=exact_count,
+            anchor_frac=anchor_frac,
+        )
+    return features
+
+def absorb_allowed_for_chain(feature, iso_params):
+    if feature["exact_count"] < iso_params["min_exact_canonical_reads"]:
+        return False
+    if not feature["has_shorter_suffix"]:
+        return True
+    if feature["anchor_reads"] < iso_params["min_distal_anchor_reads"]:
+        return False
+    if feature["anchor_frac"] < iso_params["min_distal_anchor_frac"]:
+        return False
+    return True
+
+def canonical_order(exact_counts, features, assignment_mode):
+    chains = list(exact_counts.keys())
+    if assignment_mode == "longest_first":
+        return sorted(
+            chains,
+            key=lambda ch: (len(ch), exact_counts[ch]),
+            reverse=True,
+        )
+    return sorted(
+        chains,
+        key=lambda ch: (
+            features[ch]["exact_count"],
+            features[ch]["anchor_frac"],
+            features[ch]["reachable_count"],
+            len(ch),
+        ),
+        reverse=True,
+    )
+
 # --------------------------- GTF parsing ---------------------------
 
 _attr_re = re.compile(r'(\S+)\s+"([^"]+)"')
@@ -492,24 +570,34 @@ def _process_core(core_args):
                 chain_to_idxs[tuple(m["chain_tx"])].append(i)
 
             exact_counts = Counter(tuple(m["chain_tx"]) for m in members)
-
-            # Longest chains first
-            canons = sorted(
-                exact_counts.keys(),
-                key=lambda ch: (len(ch), exact_counts[ch]),
-                reverse=True
+            chain_features = compute_chain_features(exact_counts)
+            for canon in chain_features:
+                chain_features[canon]["absorb_allowed"] = absorb_allowed_for_chain(
+                    chain_features[canon], iso_params
+                )
+            canons = canonical_order(
+                exact_counts,
+                chain_features,
+                iso_params["assignment_mode"],
             )
 
             assigned = set()
 
             for canon in canons:
 
+                feat = chain_features[canon]
+                allow_suffix_absorb = feat["absorb_allowed"]
                 idxs = []
 
                 for ch, idxlist in chain_to_idxs.items():
 
                     # strict suffix collapse (true 3′ anchoring)
-                    if len(ch) <= len(canon) and canon[-len(ch):] == ch:
+                    compatible = len(ch) <= len(canon) and canon[-len(ch):] == ch
+                    if not compatible:
+                        continue
+                    if ch != canon and not allow_suffix_absorb:
+                        continue
+                    if compatible:
                         for i in idxlist:
                             if i not in assigned:
                                 idxs.append(i)
@@ -559,9 +647,122 @@ def _process_core(core_args):
                     members=grp,
                     rep_exons=rep_exons,
                     polya_frac=polya_frac,
+                    exact_chain_reads=exact_counts[canon],
+                    trunc_assigned_reads=len(grp) - exact_counts[canon],
+                    family_reachable_reads=feat["reachable_count"],
+                    anchor_reads=feat["anchor_reads"],
+                    anchor_frac=feat["anchor_frac"],
+                    absorb_allowed=int(allow_suffix_absorb),
+                    distal_unique_prefix=feat["unique_prefix"],
+                    distal_unique_5p_junction=feat["distal_unique_5p_junction"],
+                    exact_sample_ct=Counter(m["sample"] for m in full_len_members),
+                    assignment_mode=iso_params["assignment_mode"],
                 ))
 
     return isoforms
+
+def assign_metagene_partitions(final_kept, zn_mode="metagene_colored"):
+    if zn_mode == "gene_local":
+        per_gene_max = defaultdict(int)
+        for iso in final_kept:
+            per_gene_max[iso["gene_index"]] = max(per_gene_max[iso["gene_index"]], iso["gene_tx_index"])
+        for iso in final_kept:
+            iso["metagene_index"] = iso["gene_index"]
+            iso["zn_index"] = iso["gene_tx_index"]
+            iso["metagene_gene_indexes"] = str(iso["gene_index"])
+            iso["metagene_partition_count"] = per_gene_max[iso["gene_index"]]
+        return final_kept
+
+    gene_records = {}
+    for iso in final_kept:
+        gidx = iso["gene_index"]
+        rec = gene_records.setdefault(gidx, dict(
+            gene_index=gidx,
+            chrom=iso["chrom"],
+            strand=iso["strand"],
+            gene_name=iso["gene_name_label"],
+            gene_id=iso["gene_id_label"],
+            exons=[],
+            isos=[],
+        ))
+        rec["exons"].extend(iso["rep_exons"])
+        rec["isos"].append(iso)
+
+    for rec in gene_records.values():
+        rec["exon_union"] = merge_intervals(rec["exons"])
+        rec["span_start"] = rec["exon_union"][0][0]
+        rec["span_end"] = rec["exon_union"][-1][1]
+
+    parent = {gidx: gidx for gidx in gene_records}
+
+    def find(x):
+        while parent[x] != x:
+            parent[x] = parent[parent[x]]
+            x = parent[x]
+        return x
+
+    def union(a, b):
+        ra, rb = find(a), find(b)
+        if ra != rb:
+            parent[rb] = ra
+
+    by_cs = defaultdict(list)
+    for rec in gene_records.values():
+        by_cs[(rec["chrom"], rec["strand"])].append(rec)
+
+    for key in by_cs:
+        lst = sorted(by_cs[key], key=lambda g: (g["span_start"], g["span_end"], g["gene_index"]))
+        for i, g1 in enumerate(lst):
+            j = i + 1
+            while j < len(lst) and lst[j]["span_start"] <= g1["span_end"]:
+                g2 = lst[j]
+                if first_overlap_bp(g1["exon_union"], g2["exon_union"]) > 0:
+                    union(g1["gene_index"], g2["gene_index"])
+                j += 1
+
+    components = defaultdict(list)
+    for rec in gene_records.values():
+        components[find(rec["gene_index"])].append(rec)
+
+    ordered_components = sorted(
+        components.values(),
+        key=lambda comp: (
+            comp[0]["chrom"],
+            comp[0]["strand"],
+            min(g["span_start"] for g in comp),
+            min(g["gene_index"] for g in comp),
+        ),
+    )
+
+    for midx, comp in enumerate(ordered_components, 1):
+        comp_isos = []
+        component_gene_indexes = sorted(g["gene_index"] for g in comp)
+        for grec in comp:
+            comp_isos.extend(grec["isos"])
+        comp_isos = sorted(
+            comp_isos,
+            key=lambda iso: (-iso["count"], iso["gene_index"], iso["gene_tx_index"], iso["tes"]),
+        )
+
+        colored = []
+        max_partition = 0
+        for iso in comp_isos:
+            used = {
+                other["zn_index"]
+                for other in colored
+                if first_overlap_bp(iso["rep_exons"], other["rep_exons"]) > 0
+            }
+            zn_index = smallest_unused_positive(used)
+            max_partition = max(max_partition, zn_index)
+            iso["metagene_index"] = midx
+            iso["zn_index"] = zn_index
+            iso["metagene_gene_indexes"] = "|".join(str(x) for x in component_gene_indexes)
+            colored.append(iso)
+
+        for iso in comp_isos:
+            iso["metagene_partition_count"] = max_partition
+
+    return final_kept
   
 # --------------------------- main ---------------------------
 
@@ -583,6 +784,7 @@ def main():
 
     # Isoform support thresholds
     ap.add_argument("--apa-window", type=int, default=20)
+    ap.add_argument("--tes-window", type=int, default=None)
     ap.add_argument("--min-reads", type=int, default=10)
     ap.add_argument("--min-frac", type=float, default=0.05)
     ap.add_argument("--min-introns", type=int, default=0)
@@ -595,6 +797,11 @@ def main():
     # Annotation behavior
     ap.add_argument("--tes-match-tol", type=int, default=25)
     ap.add_argument("--exact-tes-tol", type=int, default=10)
+    ap.add_argument("--assignment-mode", choices=["longest_first", "support_first"], default="support_first")
+    ap.add_argument("--zn-mode", choices=["gene_local", "metagene_colored"], default="metagene_colored")
+    ap.add_argument("--min-distal-anchor-reads", type=int, default=2)
+    ap.add_argument("--min-distal-anchor-frac", type=float, default=0.05)
+    ap.add_argument("--min-exact-canonical-reads", type=int, default=1)
 
     # Outputs
     ap.add_argument("--write-zt-bams", action="store_true")
@@ -709,9 +916,13 @@ def main():
         min_introns_read=int(args.min_introns_read),
     )
     iso_params = dict(
-        apa_window=int(args.apa_window),
+        apa_window=int(args.tes_window if args.tes_window is not None else args.apa_window),
         min_polya_length=int(args.min_polya_length),
         min_polya_purity=float(args.min_polya_purity),
+        assignment_mode=str(args.assignment_mode),
+        min_distal_anchor_reads=int(args.min_distal_anchor_reads),
+        min_distal_anchor_frac=float(args.min_distal_anchor_frac),
+        min_exact_canonical_reads=int(args.min_exact_canonical_reads),
     )
     worker_args = [
         (chrom, s, e, int(args.pad_fetch_bp), bams, filters, iso_params)
@@ -723,10 +934,18 @@ def main():
     n_threads = max(1, int(args.threads or 0))
     print(f"[INFO] Processing {len(worker_args)} cores with threads={n_threads}", file=sys.stderr)
     if n_threads > 1:
-        with ProcessPoolExecutor(max_workers=n_threads) as ex:
-            futs = [ex.submit(_process_core, wa) for wa in worker_args]
-            for i, fut in enumerate(as_completed(futs), 1):
-                out = fut.result()
+        try:
+            with ProcessPoolExecutor(max_workers=n_threads) as ex:
+                futs = [ex.submit(_process_core, wa) for wa in worker_args]
+                for i, fut in enumerate(as_completed(futs), 1):
+                    out = fut.result()
+                    kept_isoforms.extend(out)
+                    if i % max(1, len(worker_args)//20) == 0:
+                        print(f"[INFO] cores done: {i}/{len(worker_args)}", file=sys.stderr)
+        except PermissionError as exc:
+            print(f"[WARN] Falling back to serial core processing: {exc}", file=sys.stderr)
+            for i, wa in enumerate(worker_args, 1):
+                out = _process_core(wa)
                 kept_isoforms.extend(out)
                 if i % max(1, len(worker_args)//20) == 0:
                     print(f"[INFO] cores done: {i}/{len(worker_args)}", file=sys.stderr)
@@ -769,6 +988,13 @@ def main():
             count, f"{frac_global:.4f}", f"{polya_frac:.4f}",
             f"{med_mapq:.1f}", f"{med_sclen:.1f}", f"{med_purity:.3f}",
             len(chain_counts), n_full_len_reads, included_trunc,
+            iso["exact_chain_reads"], iso["trunc_assigned_reads"], iso["family_reachable_reads"],
+            iso["anchor_reads"], f"{iso['anchor_frac']:.4f}", iso["absorb_allowed"],
+            chain_to_str(iso["distal_unique_prefix"]),
+            (f"{iso['distal_unique_5p_junction'][0]}-{iso['distal_unique_5p_junction'][1]}"
+             if iso["distal_unique_5p_junction"] else "."),
+            "|".join(f"{k}:{v}" for k,v in sorted(iso["exact_sample_ct"].items())),
+            iso["assignment_mode"],
             "|".join(f"{k}:{v}" for k,v in sorted(sample_ct.items())),
             "|".join(f"{k}:{v}" for k,v in sorted(chain_counts.items())),
             int(keep)
@@ -780,7 +1006,17 @@ def main():
                 n_introns=n_introns, members=members, rep_exons=rep_exons,
                 count=count, frac_global=frac_global, polya_frac=polya_frac,
                 med_mapq=med_mapq, med_sclen=med_sclen, med_purity=med_purity,
-                sample_ct=sample_ct, chain_counts=chain_counts
+                sample_ct=sample_ct, chain_counts=chain_counts,
+                exact_chain_reads=iso["exact_chain_reads"],
+                trunc_assigned_reads=iso["trunc_assigned_reads"],
+                family_reachable_reads=iso["family_reachable_reads"],
+                anchor_reads=iso["anchor_reads"],
+                anchor_frac=iso["anchor_frac"],
+                absorb_allowed=iso["absorb_allowed"],
+                distal_unique_prefix=iso["distal_unique_prefix"],
+                distal_unique_5p_junction=iso["distal_unique_5p_junction"],
+                exact_sample_ct=iso["exact_sample_ct"],
+                assignment_mode=iso["assignment_mode"],
             ))
 
     prefix = args.out_prefix if args.out_prefix else args.out_gtf.replace(".gtf","")
@@ -788,7 +1024,7 @@ def main():
 
     metrics_path = f"{prefix}_metrics.tsv"
     with open(metrics_path, "w") as m:
-        m.write("#chrom\ttes_1based\tstrand\tintron_chain_tx_order\tn_introns\tread_support\tfrac_global\tpolya_support_frac\tmedian_mapq\tmedian_tail_len\tmedian_tail_purity\tn_unique_chains\tn_full_length_reads\tincluded_trunc\tsample_counts\tchain_counts\tkept\n")
+        m.write("#chrom\ttes_1based\tstrand\tintron_chain_tx_order\tn_introns\tread_support\tfrac_global\tpolya_support_frac\tmedian_mapq\tmedian_tail_len\tmedian_tail_purity\tn_unique_chains\tn_full_length_reads\tincluded_trunc\texact_chain_reads\ttrunc_assigned_reads\tfamily_reachable_reads\tanchor_reads\tanchor_frac\tabsorb_allowed\tdistal_unique_prefix_tx\tdistal_unique_5p_junction\texact_sample_counts\tassignment_mode\tsample_counts\tchain_counts\tkept\n")
         for row in metrics_rows:
             m.write("\t".join(map(str,row))+"\n")
 
@@ -824,22 +1060,25 @@ def main():
             gidx = gene_index[gk]
             iso["gene_name_label"], iso["gene_id_label"] = gn, gid
             iso["gene_index"] = gidx
-            iso["tx_index"] = tidx
+            iso["gene_tx_index"] = tidx
             iso["zt_label"] = f"{gn}.{gid}.G{gidx}.T{tidx}"
+
+    assign_metagene_partitions(final_kept, zn_mode=args.zn_mode)
 
     # Write GTF
     with open(args.out_gtf, "w") as out:
-        for iso in sorted(final_kept, key=lambda x: (x["gene_index"], x["tx_index"])):
+        for iso in sorted(final_kept, key=lambda x: (x["gene_index"], x["gene_tx_index"])):
             chrom=iso["chrom"]; strand=iso["strand"]; tes=iso["tes"]
             rep_exons=iso["rep_exons"]; chain_tx=iso["chain_tx"]
             t_start, t_end = rep_exons[0][0], rep_exons[-1][1]
             ann = iso["annotation"]
-            tid = f"{iso['gene_id_label']}.G{iso['gene_index']}.T{iso['tx_index']}"
+            tid = f"{iso['gene_id_label']}.G{iso['gene_index']}.T{iso['gene_tx_index']}"
             attrs = (
                 f'gene_id "{iso["gene_id_label"]}"; '
                 f'transcript_id "{tid}"; '
                 f'ref_gene_name "{iso["gene_name_label"]}"; '
-                f'zt_label "{iso["zt_label"]}"; gene_index "{iso["gene_index"]}"; transcript_index "{iso["tx_index"]}"; '
+                f'zt_label "{iso["zt_label"]}"; gene_index "{iso["gene_index"]}"; transcript_index "{iso["gene_tx_index"]}"; '
+                f'metagene_index "{iso["metagene_index"]}"; zn_index "{iso["zn_index"]}"; metagene_partition_count "{iso["metagene_partition_count"]}"; '
                 f'read_support "{iso["count"]}"; frac_support_global "{iso["frac_global"]:.4f}"; polya_support_frac "{iso["polya_frac"]:.4f}"; '
                 f'intron_chain "{chain_to_str(chain_tx)}"; tes "{tes}"; classification "{ann["classification"]}"; '
                 f'matched_tid "{ann["matched_tid"]}"; matched_gid "{ann["gene_id"]}"; match_source "{ann["match_source"]}";'
@@ -851,15 +1090,18 @@ def main():
     # Classification summary
     summary_path = f"{prefix}_classification_summary.tsv"
     with open(summary_path, "w") as s:
-        s.write("#code\tzt_label\tgene_index\ttranscript_index\tchrom\tstrand\tiso_tes\tiso_chain_tx\tgtf_gene_id\tgtf_gene_name\tgtf_transcript_id\tgtf_tes\tgtf_chain_tx\ttes_delta_bp\texon_overlap_bp\tmatch_source\tclassification\tread_support\tfrac_global\tpolya_support_frac\tsample_counts\n")
-        for iso in sorted(final_kept, key=lambda x: (x["gene_index"], x["tx_index"])):
+        s.write("#code\tzt_label\tgene_index\ttranscript_index\tmetagene_index\tzn_index\tmetagene_partition_count\tchrom\tstrand\tiso_tes\tiso_chain_tx\tgtf_gene_id\tgtf_gene_name\tgtf_transcript_id\tgtf_tes\tgtf_chain_tx\ttes_delta_bp\texon_overlap_bp\tmatch_source\tclassification\tread_support\texact_chain_reads\ttrunc_assigned_reads\tfamily_reachable_reads\tanchor_reads\tanchor_frac\tabsorb_allowed\tdistal_unique_prefix_tx\texact_sample_counts\tassignment_mode\tfrac_global\tpolya_support_frac\tsample_counts\n")
+        for iso in sorted(final_kept, key=lambda x: (x["gene_index"], x["gene_tx_index"])):
             ann = iso["annotation"]
             s.write("\t".join(map(str,[
-                iso["zt_label"], iso["zt_label"], iso["gene_index"], iso["tx_index"], iso["chrom"], iso["strand"], iso["tes"],
+                iso["zt_label"], iso["zt_label"], iso["gene_index"], iso["gene_tx_index"], iso["metagene_index"], iso["zn_index"], iso["metagene_partition_count"], iso["chrom"], iso["strand"], iso["tes"],
                 chain_to_str(iso["chain_tx"]),
                 ann["gene_id"], ann["gene_name"], ann["matched_tid"],
                 ann["gtf_tes"], chain_to_str(ann["gtf_chain_tx"]), ann["tes_delta_bp"], ann["exon_overlap_bp"], ann["match_source"],
-                ann["classification"], iso["count"], f"{iso['frac_global']:.3f}", f"{iso['polya_frac']:.4f}",
+                ann["classification"], iso["count"], iso["exact_chain_reads"], iso["trunc_assigned_reads"], iso["family_reachable_reads"],
+                iso["anchor_reads"], f"{iso['anchor_frac']:.4f}", iso["absorb_allowed"], chain_to_str(iso["distal_unique_prefix"]),
+                "|".join(f"{k}:{v}" for k,v in sorted(iso["exact_sample_ct"].items())), iso["assignment_mode"],
+                f"{iso['frac_global']:.3f}", f"{iso['polya_frac']:.4f}",
                 "|".join(f"{k}:{v}" for k,v in sorted(iso["sample_ct"].items()))
             ]))+"\n")
 
@@ -922,14 +1164,18 @@ def main():
     stats_df.to_csv(stats_path, sep="\t", index=False)
 
     tx_read_length_rows = []
-    for iso in sorted(final_kept, key=lambda x: (x["gene_index"], x["tx_index"])):
+    partition_rows = []
+    for iso in sorted(final_kept, key=lambda x: (x["gene_index"], x["gene_tx_index"])):
         read_lengths = [m["read_length"] for m in iso["members"] if m.get("read_length", 0) > 0]
         mean_len = (sum(read_lengths) / len(read_lengths)) if read_lengths else 0.0
         tx_read_length_rows.append(dict(
             code=iso["zt_label"],
             zt_label=iso["zt_label"],
             gene_index=iso["gene_index"],
-            transcript_index=iso["tx_index"],
+            transcript_index=iso["gene_tx_index"],
+            metagene_index=iso["metagene_index"],
+            zn_index=iso["zn_index"],
+            metagene_partition_count=iso["metagene_partition_count"],
             gene_id=iso["gene_id_label"],
             gene_name=iso["gene_name_label"],
             chrom=iso["chrom"],
@@ -940,9 +1186,30 @@ def main():
             min_read_length=min(read_lengths) if read_lengths else 0,
             max_read_length=max(read_lengths) if read_lengths else 0,
         ))
+        partition_rows.append(dict(
+            code=iso["zt_label"],
+            zt_label=iso["zt_label"],
+            gene_index=iso["gene_index"],
+            transcript_index=iso["gene_tx_index"],
+            metagene_index=iso["metagene_index"],
+            zn_index=iso["zn_index"],
+            metagene_partition_count=iso["metagene_partition_count"],
+            gene_id=iso["gene_id_label"],
+            gene_name=iso["gene_name_label"],
+            chrom=iso["chrom"],
+            strand=iso["strand"],
+            tes=iso["tes"],
+            read_support=iso["count"],
+            exact_chain_reads=iso["exact_chain_reads"],
+            trunc_assigned_reads=iso["trunc_assigned_reads"],
+            anchor_reads=iso["anchor_reads"],
+            anchor_frac=round(float(iso["anchor_frac"]), 4),
+        ))
     tx_read_length_df = pd.DataFrame(tx_read_length_rows)
     tx_read_lengths_path = f"{prefix}_tx_assigned_read_lengths.tsv"
     tx_read_length_df.to_csv(tx_read_lengths_path, sep="\t", index=False)
+    partition_map_path = f"{prefix}_partition_map.tsv"
+    pd.DataFrame(partition_rows).to_csv(partition_map_path, sep="\t", index=False)
 
     # Optional ZT outputs
     need_assign = bool(args.write_zt_bams or args.emit_modkit_manifest or args.write_zt_tagged_sample_bams)
@@ -951,7 +1218,12 @@ def main():
         assign = defaultdict(dict)
         for iso in final_kept:
             for m in iso["members"]:
-                assign[m["sample"]][m["qname"]] = (iso["zt_label"], iso["gene_index"], iso["tx_index"])
+                assign[m["sample"]][m["qname"]] = (
+                    iso["zt_label"],
+                    iso["gene_index"],
+                    iso["zn_index"],
+                    iso["metagene_index"],
+                )
 
     if args.write_zt_bams or args.emit_modkit_manifest:
         out_dir = os.path.join(os.path.dirname(args.out_gtf) or ".", "zt_bams")
@@ -981,13 +1253,13 @@ def main():
                         qn = aln.query_name
                         tup = assign.get(sample, {}).get(qn) if assign else None
                         if not tup: continue
-                        zt, zg, zn = tup
+                        zt, zg, zn, zm = tup
                         if zt not in writers: continue
                         try:
                             aln.set_tag("ZT", zt, value_type="Z", replace=True)
                         except TypeError:
                             aln.set_tag("ZT", zt)
-                        for tag, val in (("ZG", int(zg)), ("ZN", int(zn))):
+                        for tag, val in (("ZG", int(zg)), ("ZN", int(zn)), ("ZM", int(zm))):
                             try:
                                 aln.set_tag(tag, val, value_type="i", replace=True)
                             except TypeError:
@@ -1027,12 +1299,12 @@ def main():
                     qn = aln.query_name
                     tup = assign.get(sample, {}).get(qn) if assign else None
                     if tup:
-                        zt, zg, zn = tup
+                        zt, zg, zn, zm = tup
                         try:
                             aln.set_tag("ZT", zt, value_type="Z", replace=True)
                         except TypeError:
                             aln.set_tag("ZT", zt)
-                        for tag, val in (("ZG", int(zg)), ("ZN", int(zn))):
+                        for tag, val in (("ZG", int(zg)), ("ZN", int(zn)), ("ZM", int(zm))):
                             try:
                                 aln.set_tag(tag, val, value_type="i", replace=True)
                             except TypeError:
@@ -1049,6 +1321,7 @@ def main():
     print(f"[OK] PCA plot: {pca_png}", file=sys.stderr)
     print(f"[OK] Per-sample stats: {stats_path}", file=sys.stderr)
     print(f"[OK] Transcript assigned read lengths: {tx_read_lengths_path}", file=sys.stderr)
+    print(f"[OK] Partition map: {partition_map_path}", file=sys.stderr)
 
 if __name__ == "__main__":
     main()

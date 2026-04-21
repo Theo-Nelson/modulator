@@ -20,7 +20,7 @@ def _autoparse(value):
                     return value
     return value
 
-for k in ("assembler", "modkit", "aggregation", "toggles", "mods", "ref_bases", "test_diffs", "multigene_filter"):
+for k in ("assembler", "modkit", "aggregation", "toggles", "mods", "ref_bases", "test_diffs", "multigene_filter", "report", "genotype"):
     if k in config:
         config[k] = _autoparse(config[k])
 
@@ -158,6 +158,8 @@ ENABLE_AGG_ZN     = _as_bool(config.get("toggles", {}).get("enable_zn_aggregate"
 ENABLE_AGG_ZT     = _as_bool(config.get("toggles", {}).get("enable_zt_aggregate", True))
 ENABLE_TEST_DIFFS = _as_bool(config.get("toggles", {}).get("enable_test_diffs", True))
 ENABLE_MULTIGENE_FILTER = _as_bool(config.get("multigene_filter", {}).get("enable", True))
+ENABLE_HTML_REPORT = _as_bool(config.get("report", {}).get("enable", True))
+ENABLE_GENOTYPE = _as_bool(config.get("genotype", {}).get("enable", False))
 MODKIT_INPUT_BAM = (
     "results/assemble/zt_filtered/{sample}.zt_tagged.clean.bam"
     if ENABLE_MULTIGENE_FILTER
@@ -170,6 +172,7 @@ MODKIT_INPUT_BAM = (
 include: "rules/assemble.smk"
 include: "rules/per_sample_read_stats.smk"
 include: "rules/filter_multigene_zt.smk"
+include: "rules/report.smk"
 
 if ENABLE_ZN:
     include: "rules/modkit_zn.smk"
@@ -184,6 +187,9 @@ if ENABLE_ZT:
 # test_diffs rule file can be included unconditionally; targets will decide scheduling
 include: "rules/test_diffs.smk"
 
+if ENABLE_GENOTYPE:
+    include: "rules/genotype.smk"
+
 # ----------------------------
 # Final targets (build conditionally)
 # ----------------------------
@@ -191,11 +197,13 @@ ALL_TARGETS = [
     # Assemble outputs
     f"results/assemble/{config['prefix']}.gtf",
     f"results/assemble/{config['prefix']}_classification_summary.tsv",
+    f"results/assemble/{config['prefix']}_metrics.tsv",
     f"results/assemble/{config['prefix']}_tx_counts.tsv",
     f"results/assemble/{config['prefix']}_tx_counts.pca.png",
     f"results/assemble/{config['prefix']}_per_sample_stats.tsv",
     f"results/assemble/{config['prefix']}_per_sample_read_stats.tsv",
     f"results/assemble/{config['prefix']}_tx_assigned_read_lengths.tsv",
+    f"results/assemble/{config['prefix']}_partition_map.tsv",
     # ZT/ZN-tagged sample BAMs emitted by assemble
     expand("results/assemble/zt_tagged/{sample}.zt_tagged.bam", sample=SAMPLES),
 ]
@@ -233,6 +241,28 @@ if ENABLE_ZT:
             f"results/aggregate_zt/{config['prefix']}_FILTERED_cov_pivot.tsv",
             f"results/aggregate_zt/{config['prefix']}_FILTERED_Nmod_pivot.tsv",
         ]
+
+if ENABLE_HTML_REPORT:
+    ALL_TARGETS += [
+        f"results/report/{config['prefix']}_report.html",
+    ]
+
+if ENABLE_GENOTYPE:
+    ALL_TARGETS += [
+        f"results/genotype/{config['prefix']}_read_assignments.tsv",
+        f"results/genotype/{config['prefix']}_candidate_snps.tsv",
+        f"results/genotype/{config['prefix']}_molecule_snps.tsv",
+        f"results/genotype/{config['prefix']}_candidate_mod_sites.tsv",
+        f"results/genotype/{config['prefix']}_candidate_mod_sites.bed",
+        f"results/genotype/{config['prefix']}_molecule_mod_calls.tsv",
+        f"results/genotype/{config['prefix']}_snp_transcript_assoc.tsv",
+        f"results/genotype/{config['prefix']}_snp_mod_assoc.tsv",
+        f"results/genotype/{config['prefix']}_snp_tx_mod_dependency.tsv",
+        f"results/genotype/{config['prefix']}_haplotype_blocks.tsv",
+        f"results/genotype/{config['prefix']}_molecule_haplotypes.tsv",
+        f"results/genotype/{config['prefix']}_haplotype_transcript_assoc.tsv",
+        f"results/genotype/{config['prefix']}_haplotype_mod_assoc.tsv",
+    ]
 
 rule all:
     input: ALL_TARGETS

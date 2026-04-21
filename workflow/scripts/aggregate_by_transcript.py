@@ -212,8 +212,11 @@ def main():
             keep_cols = [c for c in ["gtf_gene_name","gtf_gene_id","gtf_transcript_id",
                                      "classification","match_source","iso_tes","iso_chain_tx",
                                      "gtf_tes","gtf_chain_tx","tes_delta_bp","exon_overlap_bp",
-                                     "read_support","frac_global","polya_support_frac","sample_counts",
-                                     "gene_index","transcript_index","code"]
+                                     "read_support","exact_chain_reads","trunc_assigned_reads",
+                                     "family_reachable_reads","anchor_reads","anchor_frac","absorb_allowed",
+                                     "frac_global","polya_support_frac","sample_counts",
+                                     "gene_index","transcript_index","metagene_index","zn_index",
+                                     "metagene_partition_count","assignment_mode","code"]
                          if c in summ.columns]
             summ_sub = summ[keep_cols].drop_duplicates("code")
             df = df.merge(summ_sub, on="code", how="left")
@@ -270,4 +273,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-

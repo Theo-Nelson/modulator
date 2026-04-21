@@ -126,6 +126,31 @@ def load_gene_exon_unions(gtf_path):
     return gene_index
 
 
+def load_transcript_meta(gtf_path):
+    tx_meta = {}
+    with open_text(gtf_path) as f:
+        for line in f:
+            if not line.strip() or line.startswith("#"):
+                continue
+            parts = line.rstrip("\n").split("\t")
+            if len(parts) < 9:
+                continue
+            chrom, source, feature, start, end, score, strand, frame, attrs = parts
+            if feature != "transcript":
+                continue
+            a = parse_gtf_attrs(attrs)
+            zt = a.get("zt_label")
+            if not zt:
+                continue
+            tx_meta[zt] = {
+                "gene_id": a.get("gene_id", ""),
+                "gene_name": a.get("ref_gene_name", a.get("gene_name", a.get("gene_id", ""))),
+                "metagene_index": a.get("metagene_index", ""),
+                "zn_index": a.get("zn_index", ""),
+            }
+    return tx_meta
+
+
 def find_overlapping_genes(read_exons, chrom, strand, gene_index, same_strand_only=True):
     """
     Return list of overlapping genes with positive exonic overlap.
@@ -178,6 +203,12 @@ def main():
         help="What to do with reads overlapping zero genes in the GTF exonic union"
     )
     ap.add_argument(
+        "--mode",
+        choices=["resolve", "legacy_scrap"],
+        default="resolve",
+        help="How to handle reads overlapping multiple genes"
+    )
+    ap.add_argument(
         "--same-strand-only",
         action="store_true",
         default=True,
@@ -192,6 +223,7 @@ def main():
     os.makedirs(os.path.dirname(args.out_scrap_tx_counts_tsv) or ".", exist_ok=True)
 
     gene_index = load_gene_exon_unions(args.gtf)
+    tx_meta = load_transcript_meta(args.gtf)
     sample = args.sample or os.path.basename(args.bam).replace(".bam", "")
 
     summary_counts = Counter()
@@ -213,6 +245,10 @@ def main():
                 "zt",
                 "zg",
                 "zn",
+                "action",
+                "resolution",
+                "assigned_gene_id",
+                "assigned_gene_name",
                 "n_overlapping_genes",
                 "overlapping_gene_ids",
                 "overlapping_gene_names",
@@ -254,12 +290,34 @@ def main():
                     scrap_out.write(aln)
                     summary_counts["zero_gene_scrapped"] += 1
             else:
-                scrap_out.write(aln)
-                summary_counts["multi_gene_scrapped"] += 1
-
                 genes = [g["gene_id"] for g, ov in overlaps]
                 names = [g["gene_name"] for g, ov in overlaps]
                 ovs = [str(ov) for g, ov in overlaps]
+                assigned_gene_id = ""
+                assigned_gene_name = ""
+                resolution = "multi_gene_unresolved"
+                action = "keep"
+
+                if zt and zt in tx_meta:
+                    assigned_gene_id = tx_meta[zt].get("gene_id", "")
+                    assigned_gene_name = tx_meta[zt].get("gene_name", "")
+                    if assigned_gene_id in genes:
+                        resolution = "multi_gene_kept_by_zt"
+                    else:
+                        resolution = "multi_gene_assignment_conflict"
+                else:
+                    resolution = "multi_gene_no_zt"
+
+                if args.mode == "legacy_scrap":
+                    action = "scrap"
+                    resolution = "multi_gene_scrapped_legacy"
+
+                if action == "scrap":
+                    scrap_out.write(aln)
+                    summary_counts["multi_gene_scrapped"] += 1
+                else:
+                    clean_out.write(aln)
+                    summary_counts[resolution] += 1
 
                 removed_fh.write(
                     "\t".join([
@@ -269,6 +327,10 @@ def main():
                         str(zt),
                         str(zg),
                         str(zn),
+                        action,
+                        resolution,
+                        assigned_gene_id,
+                        assigned_gene_name,
                         str(n_genes),
                         ",".join(genes),
                         ",".join(names),
@@ -276,9 +338,10 @@ def main():
                     ]) + "\n"
                 )
 
-                for gid in genes:
-                    per_gene_removed[gid] += 1
-                if zt:
+                if action == "scrap":
+                    for gid in genes:
+                        per_gene_removed[gid] += 1
+                if zt and action == "scrap":
                     per_zt_removed[zt] += 1
                     per_scrap_tx_removed[zt] += 1
                     per_scrap_tx_meta[zt] = {

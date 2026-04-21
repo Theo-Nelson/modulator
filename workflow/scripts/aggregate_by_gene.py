@@ -119,6 +119,26 @@ def frac_modified(nmod: int, cov: int, min_cov: int) -> float:
     return round(f, 6)
 
 
+def exon_overlap_len(ex1, ex2):
+    total = 0
+    i = 0
+    j = 0
+    ex1 = sorted(ex1)
+    ex2 = sorted(ex2)
+    while i < len(ex1) and j < len(ex2):
+        s1, e1 = ex1[i]
+        s2, e2 = ex2[j]
+        lo = max(s1, s2)
+        hi = min(e1, e2)
+        if hi >= lo:
+            total += (hi - lo + 1)
+        if e1 < e2:
+            i += 1
+        else:
+            j += 1
+    return total
+
+
 def row_pass_filter(
     cov: int,
     nmod: int,
@@ -332,16 +352,18 @@ def uniq_sorted_file(in_sorted: str, out_path: str, key_func):
 
 # ----------------------------- GTF interval indexing -----------------------------
 
-Interval = namedtuple("Interval", ["start", "end", "gene_id", "gene_name", "strand"])
+TxInterval = namedtuple("TxInterval", ["start", "end", "gene_id", "gene_name", "strand", "zn", "exons"])
+GeneInterval = namedtuple("GeneInterval", ["start", "end", "gene_id", "gene_name", "strand", "exons"])
 
 
-def load_gene_intervals_from_gtf(gtf_path: str, verbose=False) -> Dict[Tuple[str, str], List[Interval]]:
+def load_gene_intervals_from_gtf(gtf_path: str, verbose=False):
     """
-    Coarse per-gene spans for site->gene mapping.
-    Uses exon/transcript/gene features; takes union span per (chrom,strand,gene_id).
+    Build transcript-aware interval indices from the assembler GTF.
+    Uses transcript-level zn_index to map numbered ZN partitions back to gene labels.
     """
-    gene_bounds: Dict[Tuple[str, str, str], Tuple[int, int]] = {}
-    gene_name_map: Dict[str, str] = {}
+    tx_meta = {}
+    gene_exons = defaultdict(list)
+    gene_name_map = {}
 
     with open_text(gtf_path) as f:
         for ln in f:
@@ -351,9 +373,6 @@ def load_gene_intervals_from_gtf(gtf_path: str, verbose=False) -> Dict[Tuple[str
             if len(parts) < 9:
                 continue
             chrom, _, feature, start, end, _, strand, _, attrs = parts
-            if feature not in ("exon", "transcript", "gene"):
-                continue
-
             a = {}
             for kv in re.finditer(r'(\S+)\s+"([^"]*)"', attrs):
                 a[kv.group(1)] = kv.group(2)
@@ -365,27 +384,66 @@ def load_gene_intervals_from_gtf(gtf_path: str, verbose=False) -> Dict[Tuple[str
 
             s = int(start)
             e = int(end)
-            key = (chrom, strand, gene_id)
-            if key not in gene_bounds:
-                gene_bounds[key] = (s, e)
+            if feature == "transcript":
+                tid = a.get("transcript_id")
+                if not tid:
+                    continue
+                zn = safe_int(a.get("zn_index", a.get("transcript_index", 0)))
+                tx_meta[tid] = dict(
+                    chrom=chrom,
+                    strand=strand,
+                    start=s,
+                    end=e,
+                    gene_id=gene_id,
+                    gene_name=gene_name,
+                    zn=zn,
+                    exons=[],
+                )
+            elif feature == "exon":
+                tid = a.get("transcript_id")
+                if tid and tid in tx_meta:
+                    tx_meta[tid]["exons"].append((s, e))
+                gene_exons[(chrom, strand, gene_id)].append((s, e))
+                gene_name_map[gene_id] = gene_name
+
+    tx_by_cs = defaultdict(list)
+    for meta in tx_meta.values():
+        exons = sorted(meta["exons"]) if meta["exons"] else [(meta["start"], meta["end"])]
+        tx_by_cs[(meta["chrom"], meta["strand"])].append(
+            TxInterval(meta["start"], meta["end"], meta["gene_id"], meta["gene_name"], meta["strand"], meta["zn"], exons)
+        )
+
+    gene_by_cs = defaultdict(list)
+    for (chrom, strand, gid), exons in gene_exons.items():
+        exons = sorted(exons)
+        merged = []
+        for s, e in exons:
+            if not merged or s > merged[-1][1] + 1:
+                merged.append([s, e])
             else:
-                mn, mx = gene_bounds[key]
-                gene_bounds[key] = (min(mn, s), max(mx, e))
-            gene_name_map[gene_id] = gene_name
+                merged[-1][1] = max(merged[-1][1], e)
+        merged_t = [(s, e) for s, e in merged]
+        gene_by_cs[(chrom, strand)].append(
+            GeneInterval(merged_t[0][0], merged_t[-1][1], gid, gene_name_map.get(gid, gid), strand, merged_t)
+        )
 
-    by_cs: Dict[Tuple[str, str], List[Interval]] = defaultdict(list)
-    for (chrom, strand, gid), (s, e) in gene_bounds.items():
-        gname = gene_name_map.get(gid, gid)
-        by_cs[(chrom, strand)].append(Interval(s, e, gid, gname, strand))
-
-    for k in by_cs:
-        by_cs[k].sort(key=lambda iv: (iv.start, iv.end))
+    for k in tx_by_cs:
+        tx_by_cs[k].sort(key=lambda iv: (iv.start, iv.end, iv.zn, iv.gene_id))
+    for k in gene_by_cs:
+        gene_by_cs[k].sort(key=lambda iv: (iv.start, iv.end, iv.gene_id))
 
     if verbose:
-        total = sum(len(v) for v in by_cs.values())
-        print(f"[info] loaded {total} gene spans from {gtf_path}", file=sys.stderr)
+        total_tx = sum(len(v) for v in tx_by_cs.values())
+        total_genes = sum(len(v) for v in gene_by_cs.values())
+        print(f"[info] loaded {total_tx} transcript partitions and {total_genes} gene spans from {gtf_path}", file=sys.stderr)
 
-    return by_cs
+    return tx_by_cs, gene_by_cs
+
+
+def site_interval_1based(pos_start: int, pos_end: int):
+    s = int(pos_start) + 1
+    e = max(s, int(pos_end))
+    return [(s, e)]
 
 
 def assign_gene(
@@ -393,35 +451,55 @@ def assign_gene(
     pos_start: int,
     pos_end: int,
     strand: str,
-    gene_index: Dict[Tuple[str, str], List[Interval]]
+    zn: int,
+    tx_index,
+    gene_index,
 ) -> Tuple[str, str]:
     """
-    Return (gene_id, gene_name) by overlap on same strand; choose max-overlap.
-    If none, try opposite strand first overlap.
+    Return (gene_id, gene_name) using same-strand transcript partitions first,
+    keyed by zn_index and exonic overlap. Falls back to coarse gene overlap.
     """
-    ivs = gene_index.get((chrom, strand), [])
+    site_exon = site_interval_1based(pos_start, pos_end)
+
     best = None
     best_ov = -1
-    for iv in ivs:
+    for iv in tx_index.get((chrom, strand), []):
         if iv.start > pos_end:
             break
-        if iv.end < pos_start:
+        if iv.end < (pos_start + 1):
             continue
-        ov = min(iv.end, pos_end) - max(iv.start, pos_start) + 1
+        if int(iv.zn) != int(zn):
+            continue
+        ov = exon_overlap_len(site_exon, iv.exons)
         if ov > best_ov:
             best_ov = ov
             best = iv
-    if best:
+    if best and best_ov > 0:
+        return best.gene_id, best.gene_name
+
+    best = None
+    best_ov = -1
+    for iv in gene_index.get((chrom, strand), []):
+        if iv.start > pos_end:
+            break
+        if iv.end < (pos_start + 1):
+            continue
+        ov = exon_overlap_len(site_exon, iv.exons)
+        if ov > best_ov:
+            best_ov = ov
+            best = iv
+    if best and best_ov > 0:
         return best.gene_id, best.gene_name
 
     other = "+" if strand == "-" else "-"
-    ivs2 = gene_index.get((chrom, other), [])
-    for iv in ivs2:
+    for iv in gene_index.get((chrom, other), []):
         if iv.start > pos_end:
             break
-        if iv.end < pos_start:
+        if iv.end < (pos_start + 1):
             continue
-        return iv.gene_id, iv.gene_name
+        ov = exon_overlap_len(site_exon, iv.exons)
+        if ov > 0:
+            return iv.gene_id, iv.gene_name
 
     return "", ""
 
@@ -482,6 +560,7 @@ def parse_bed_line(line: str) -> Optional[Dict[str, object]]:
 
 def normalize_to_tsv(
     beds: List[Tuple[str, str, str, int]],
+    tx_index,
     gene_index,
     out_tsv: str,
     verbose: bool = False
@@ -507,7 +586,7 @@ def normalize_to_tsv(
                     strand = rec["strand"]
                     mod = rec["mod_code"]
 
-                    gid, gname = assign_gene(chrom, start0, end0, strand, gene_index)
+                    gid, gname = assign_gene(chrom, start0, end0, strand, zn, tx_index, gene_index)
 
                     vals = [
                         sample, str(int(zn)), chrom, str(start0), str(end0), strand, mod,
@@ -1198,7 +1277,7 @@ def main():
     if not beds:
         sys.exit(f"No numbered ZN partition files found under {args.modkit_dir}")
 
-    gene_index = load_gene_intervals_from_gtf(args.gtf, verbose=args.verbose)
+    tx_index, gene_index = load_gene_intervals_from_gtf(args.gtf, verbose=args.verbose)
 
     workdir = tempfile.mkdtemp(prefix=f"aggregate_by_gene_{os.getpid()}_", dir=args.tmpdir)
     if args.verbose:
@@ -1215,7 +1294,7 @@ def main():
     try:
         # Stage 1: normalize
         norm_tsv = os.path.join(workdir, "norm.tsv")
-        normalize_to_tsv(beds, gene_index, norm_tsv, verbose=args.verbose)
+        normalize_to_tsv(beds, tx_index, gene_index, norm_tsv, verbose=args.verbose)
 
         # Stage 2: external sort for dedup reduce
         norm_sorted = os.path.join(workdir, "norm.sorted.tsv")
