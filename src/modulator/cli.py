@@ -41,7 +41,7 @@ def build_parser() -> argparse.ArgumentParser:
     demo.add_argument("--reference-gtf", required=True, help="Reference GTF to use for the demo run.")
     demo.add_argument(
         "--dataset",
-        choices=["MXD1_reads", "ALCAM_NHSL1_SERAC1_MXD1_RIOK3_reads"],
+        choices=["MXD1_reads", "RPL13_reads", "ALCAM_NHSL1_SERAC1_MXD1_RIOK3_reads"],
         default="MXD1_reads",
         help="Bundled test dataset to use.",
     )
@@ -122,3 +122,7 @@ def main() -> None:
         cmd_demo(args)
     else:
         parser.error(f"Unhandled command: {args.command}")
+
+
+if __name__ == "__main__":
+    main()

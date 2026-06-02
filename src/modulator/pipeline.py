@@ -30,6 +30,7 @@ STAGE_ORDER = [
     "aggregate_zn",
     "aggregate_zt",
     "test_diffs",
+    "classify_diffs",
     "genotype",
     "report",
 ]
@@ -141,8 +142,20 @@ class PipelinePaths:
         return self.test_diffs / f"{self.prefix}__ZN_site_diff_results.tsv"
 
     @property
+    def zn_site_classified(self) -> Path:
+        return self.test_diffs / f"{self.prefix}__ZN_site_classified.tsv"
+
+    @property
     def zn_diff_figs(self) -> Path:
         return self.test_diffs / f"{self.prefix}__figs"
+
+    @property
+    def zn_class_figs(self) -> Path:
+        return self.test_diffs / f"{self.prefix}__figs_by_category"
+
+    @property
+    def zn_class_figs_arch(self) -> Path:
+        return self.test_diffs / f"{self.prefix}__figs_by_category_arch"
 
     @property
     def report_html(self) -> Path:
@@ -350,8 +363,6 @@ class ModulatorPipeline:
             "--polya-support-frac", str(cfg.get("polya_support_frac", 0.5)),
             "--tes-match-tol", str(cfg.get("tes_match_tol", 25)),
             "--exact-tes-tol", str(cfg.get("exact_tes_tol", 10)),
-            "--assignment-mode", str(cfg.get("assignment_mode", "support_first")),
-            "--zn-mode", str(cfg.get("zn_mode", "metagene_colored")),
             "--min-distal-anchor-reads", str(cfg.get("min_distal_anchor_reads", 2)),
             "--min-distal-anchor-frac", str(cfg.get("min_distal_anchor_frac", 0.05)),
             "--min-exact-canonical-reads", str(cfg.get("min_exact_canonical_reads", 1)),
@@ -416,8 +427,6 @@ class ModulatorPipeline:
                 "--out-removed-tsv", str(output_removed),
                 "--out-scrap-tx-counts-tsv", str(output_counts),
                 "--zero-gene-action", str(cfg.get("zero_gene_action", "keep")),
-                "--mode", str(cfg.get("mode", "resolve")),
-                "--same-strand-only",
             ]
             tasks.append((
                 f"multigene_filter[{sample}]",
@@ -671,6 +680,61 @@ class ModulatorPipeline:
             args.extend(["--mod-filter", str(mod)])
         self.run_python_script("test_stoichiometry_diffs.py", args, label="test_stoichiometry_diffs")
 
+    def stage_classify_diffs(self) -> None:
+        cfg = self.config.get("classify_diffs", {})
+        if not as_bool(cfg.get("enable", True), True):
+            return
+        if not self.paths.zn_diff_results.exists() or self.paths.zn_diff_results.stat().st_size == 0:
+            if self.verbose:
+                print(
+                    f"[modulator] skipping classify_diffs because the ZN diff results table is missing or empty: {self.paths.zn_diff_results}",
+                    flush=True,
+                )
+            return
+        if not self.paths.out_gtf.exists():
+            if self.verbose:
+                print(
+                    f"[modulator] skipping classify_diffs because the assembled GTF is missing: {self.paths.out_gtf}",
+                    flush=True,
+                )
+            return
+        args = [
+            "--diff-tsv", str(self.paths.zn_diff_results),
+            "--gtf", str(self.paths.out_gtf),
+            "--out-tsv", str(self.paths.zn_site_classified),
+            "--min-effect", str(cfg.get("min_effect", 0.10)),
+            "--fdr", str(cfg.get("fdr", 0.05)),
+            "--min-cov", str(cfg.get("min_cov", 0)),
+            "--tes-tol", str(cfg.get("tes_tol", 200)),
+            "--inside-tol", str(cfg.get("inside_tol", 50)),
+            "--ejc-nt", str(cfg.get("ejc_nt", 150)),
+            "--intergenic-gap", str(cfg.get("intergenic_gap", 1000)),
+            "--verbose",
+        ]
+        if as_bool(cfg.get("figures", True), True):
+            # Isoform architecture-map figures are the PRIMARY per-category figure.
+            # They are built from the GTF isoform models + the diff table's
+            # per_transcript_json, so they need no --zn-long.
+            args.extend([
+                "--arch-figs-dir", str(self.paths.zn_class_figs_arch),
+                "--figs-per-category", str(int(cfg.get("figs_per_category", 10))),
+            ])
+            # The 2-panel per-sample stoichiometry figures additionally need --zn-long.
+            if self.paths.zn_filtered_long.exists():
+                args.extend([
+                    "--zn-long", str(self.paths.zn_filtered_long),
+                    "--figs-dir", str(self.paths.zn_class_figs),
+                ])
+        mod_filter = cfg.get("mod_filter")
+        if mod_filter is None:
+            mod_filter = self.config.get("test_diffs", {}).get("mod_filter")
+        # An empty/None mod_filter means classify ALL modifications -- the diff table
+        # already carries every mod_code emitted upstream. Only restrict when set.
+        if mod_filter:
+            args.append("--mod-filter")
+            args.extend(str(m) for m in mod_filter)
+        self.run_python_script("classify_diff_sites.py", args, label="classify_diff_sites")
+
     def stage_genotype(self) -> None:
         geno = self.config.get("genotype", {})
         if not as_bool(geno.get("enable", False), False):
@@ -856,6 +920,10 @@ class ModulatorPipeline:
             "--zt-long", str(self.paths.zt_filtered_long) if self.paths.zt_filtered_long.exists() else "",
             "--diff-results", str(self.paths.zn_diff_results) if self.paths.zn_diff_results.exists() else "",
             "--diff-figs-dir", str(self.paths.zn_diff_figs) if self.paths.zn_diff_figs.exists() else "",
+            "--classified-sites", str(self.paths.zn_site_classified) if self.paths.zn_site_classified.exists() else "",
+            "--class-figs-dir", str(self.paths.zn_class_figs) if self.paths.zn_class_figs.exists() else "",
+            "--arch-figs-dir", str(self.paths.zn_class_figs_arch) if self.paths.zn_class_figs_arch.exists() else "",
+            "--max-class-figs-per-category", str(int(report_cfg.get("max_class_figs_per_category", 10))),
             "--multigene-summary-glob", str(self.paths.zt_scrap_dir / "*.multigene_filter_summary.tsv") if self.paths.zt_scrap_dir.exists() else "",
             "--candidate-snps", str(self.paths.geno_candidate_snps) if self.paths.geno_candidate_snps.exists() else "",
             "--snp-tx-assoc", str(self.paths.geno_snp_tx) if self.paths.geno_snp_tx.exists() else "",

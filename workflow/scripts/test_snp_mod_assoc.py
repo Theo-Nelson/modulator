@@ -6,7 +6,7 @@ import os
 
 import pandas as pd
 
-from genotype_utils import benjamini_hochberg, binary_rate_delta, run_contingency_test
+from genotype_utils import benjamini_hochberg, binary_rate_delta, context_key_from_row, context_key_from_snp_row, run_contingency_test
 
 
 def parse_args():
@@ -19,27 +19,6 @@ def parse_args():
     ap.add_argument("--test", choices=["auto", "fisher", "chi2"], default="auto")
     ap.add_argument("--pseudocount", type=float, default=0.5)
     return ap.parse_args()
-
-
-def snp_context(row):
-    mg = [x for x in str(row.get("metagene_indices", "")).split(";") if x]
-    if len(set(mg)) == 1:
-        return f"MG:{mg[0]}"
-    genes = [x for x in str(row.get("gene_names", "")).split(";") if x]
-    if len(set(genes)) == 1:
-        return f"GENE:{genes[0]}"
-    return f"CHR:{row['chrom']}"
-
-
-def mod_context(row):
-    mg = str(row.get("metagene_index", "")).strip()
-    if mg and mg.lower() not in {"nan", "none", "null"}:
-        return f"MG:{mg}"
-    gene = str(row.get("gene_name", "")).strip()
-    if gene and gene.lower() not in {"nan", "none", "null"}:
-        return f"GENE:{gene}"
-    return f"CHR:{row['chrom']}"
-
 
 def main():
     args = parse_args()
@@ -65,8 +44,8 @@ def main():
         out.to_csv(args.out_tsv, sep="\t", index=False)
         return
 
-    snp_df["context_key"] = snp_df.apply(snp_context, axis=1)
-    mod_df["context_key"] = mod_df.apply(mod_context, axis=1)
+    snp_df["context_key"] = snp_df.apply(context_key_from_snp_row, axis=1)
+    mod_df["context_key"] = mod_df.apply(context_key_from_row, axis=1)
 
     merged = snp_df.merge(
         mod_df,

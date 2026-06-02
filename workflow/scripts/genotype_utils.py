@@ -163,15 +163,70 @@ def load_read_assignments(path: str) -> pd.DataFrame:
     return df
 
 
-def context_key_from_row(row) -> str:
-    mg = str(row.get("metagene_index", "")).strip()
-    if mg and mg.lower() not in {"nan", "none", "null"}:
+def normalize_text_token(value, *, numeric: bool = False) -> str:
+    if value is None or pd.isna(value):
+        return ""
+    text = str(value).strip()
+    if text.lower() in {"", "nan", "none", "null"}:
+        return ""
+    if numeric:
+        try:
+            num = float(text)
+        except Exception:
+            return text
+        if math.isfinite(num) and num.is_integer():
+            return str(int(num))
+    return text
+
+
+def first_present_token(row, keys: Iterable[str], *, numeric: bool = False) -> str:
+    for key in keys:
+        token = normalize_text_token(row.get(key, ""), numeric=numeric)
+        if token:
+            return token
+    return ""
+
+
+def build_context_key(chrom: str, *, metagene: str = "", gene: str = "") -> str:
+    mg = normalize_text_token(metagene, numeric=True)
+    if mg:
         return f"MG:{mg}"
-    gene = str(row.get("gene_name", "")).strip()
-    if gene and gene.lower() not in {"nan", "none", "null"}:
-        return f"GENE:{gene}"
-    chrom = str(row.get("chrom", "")).strip()
-    return f"CHR:{chrom}" if chrom else "CHR:"
+    gene_name = normalize_text_token(gene)
+    if gene_name:
+        return f"GENE:{gene_name}"
+    chrom_name = normalize_text_token(chrom)
+    return f"CHR:{chrom_name}" if chrom_name else "CHR:"
+
+
+def context_key_from_snp_row(row) -> str:
+    metagenes = [
+        normalize_text_token(token, numeric=True)
+        for token in str(row.get("metagene_indices", "")).split(";")
+    ]
+    metagenes = [token for token in metagenes if token]
+    if len(set(metagenes)) == 1 and metagenes:
+        return f"MG:{metagenes[0]}"
+
+    genes = [normalize_text_token(token) for token in str(row.get("gene_names", "")).split(";")]
+    genes = [token for token in genes if token]
+    if len(set(genes)) == 1 and genes:
+        return f"GENE:{genes[0]}"
+
+    return build_context_key(str(row.get("chrom", "")))
+
+
+def context_key_from_row(
+    row,
+    *,
+    chrom_key: str = "chrom",
+    metagene_keys: Iterable[str] = ("metagene_index",),
+    gene_keys: Iterable[str] = ("gene_name",),
+) -> str:
+    return build_context_key(
+        str(row.get(chrom_key, "")),
+        metagene=first_present_token(row, metagene_keys, numeric=True),
+        gene=first_present_token(row, gene_keys),
+    )
 
 
 def normalize_string_series(series: pd.Series, fill_value: str = "") -> pd.Series:

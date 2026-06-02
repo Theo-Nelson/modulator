@@ -20,6 +20,7 @@ if ENABLE_HTML_REPORT:
                 ([f"results/aggregate_zt/{PREFIX}_FILTERED_long.tsv"] if ENABLE_ZT and ENABLE_AGG_ZT else []) +
                 ([f"results/test_diffs/{PREFIX}__ZN_site_diff_results.tsv"] if ENABLE_ZN and ENABLE_AGG_ZN and ENABLE_TEST_DIFFS else []) +
                 ([f"results/test_diffs/{PREFIX}__figs"] if ENABLE_ZN and ENABLE_AGG_ZN and ENABLE_TEST_DIFFS else []) +
+                ([f"results/test_diffs/{PREFIX}__ZN_site_classified.tsv"] if ENABLE_ZN and ENABLE_AGG_ZN and ENABLE_TEST_DIFFS and ENABLE_CLASSIFY_DIFFS else []) +
                 (MULTIGENE_SUMMARIES if ENABLE_MULTIGENE_FILTER else []) +
                 ([
                     f"results/genotype/{PREFIX}_candidate_snps.tsv",
@@ -39,6 +40,10 @@ if ENABLE_HTML_REPORT:
             zt_long = (f"results/aggregate_zt/{PREFIX}_FILTERED_long.tsv" if ENABLE_ZT and ENABLE_AGG_ZT else ""),
             diff_tsv = (f"results/test_diffs/{PREFIX}__ZN_site_diff_results.tsv" if ENABLE_ZN and ENABLE_AGG_ZN and ENABLE_TEST_DIFFS else ""),
             diff_figs_dir = (f"results/test_diffs/{PREFIX}__figs" if ENABLE_ZN and ENABLE_AGG_ZN and ENABLE_TEST_DIFFS else ""),
+            classified_tsv = (f"results/test_diffs/{PREFIX}__ZN_site_classified.tsv" if ENABLE_ZN and ENABLE_AGG_ZN and ENABLE_TEST_DIFFS and ENABLE_CLASSIFY_DIFFS else ""),
+            class_figs_dir = (f"results/test_diffs/{PREFIX}__figs_by_category" if ENABLE_ZN and ENABLE_AGG_ZN and ENABLE_TEST_DIFFS and ENABLE_CLASSIFY_DIFFS else ""),
+            arch_figs_dir = (f"results/test_diffs/{PREFIX}__figs_by_category_arch" if ENABLE_ZN and ENABLE_AGG_ZN and ENABLE_TEST_DIFFS and ENABLE_CLASSIFY_DIFFS else ""),
+            max_class_figs_per_category = int(REPORT_CFG.get("max_class_figs_per_category", 10)),
             multigene_summary_glob = (f"{ZT_SCRAP_DIR}/*.multigene_filter_summary.tsv" if ENABLE_MULTIGENE_FILTER else ""),
             candidate_snps = (f"results/genotype/{PREFIX}_candidate_snps.tsv" if ENABLE_GENOTYPE else ""),
             snp_tx_assoc = (f"results/genotype/{PREFIX}_snp_transcript_assoc.tsv" if ENABLE_GENOTYPE else ""),
@@ -74,6 +79,10 @@ if ENABLE_HTML_REPORT:
               --zt-long "{params.zt_long}" \
               --diff-results "{params.diff_tsv}" \
               --diff-figs-dir "{params.diff_figs_dir}" \
+              --classified-sites "{params.classified_tsv}" \
+              --class-figs-dir "{params.class_figs_dir}" \
+              --arch-figs-dir "{params.arch_figs_dir}" \
+              --max-class-figs-per-category {params.max_class_figs_per_category} \
               --multigene-summary-glob "{params.multigene_summary_glob}" \
               --candidate-snps "{params.candidate_snps}" \
               --snp-tx-assoc "{params.snp_tx_assoc}" \

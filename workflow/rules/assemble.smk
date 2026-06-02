@@ -77,8 +77,6 @@ rule assemble_transcripts:
         polya_support_frac   = config.get("assembler", {}).get("polya_support_frac", 0.5),
         tes_match_tol        = config.get("assembler", {}).get("tes_match_tol", 25),
         exact_tes_tol        = config.get("assembler", {}).get("exact_tes_tol", 10),
-        assignment_mode      = config.get("assembler", {}).get("assignment_mode", "support_first"),
-        zn_mode              = config.get("assembler", {}).get("zn_mode", "metagene_colored"),
         min_distal_anchor_reads = config.get("assembler", {}).get("min_distal_anchor_reads", 2),
         min_distal_anchor_frac  = config.get("assembler", {}).get("min_distal_anchor_frac", 0.05),
         min_exact_canonical_reads = config.get("assembler", {}).get("min_exact_canonical_reads", 1),
@@ -131,8 +129,6 @@ rule assemble_transcripts:
             --polya-support-frac "{params.polya_support_frac}" \
             --tes-match-tol "{params.tes_match_tol}" \
             --exact-tes-tol "{params.exact_tes_tol}" \
-            --assignment-mode "{params.assignment_mode}" \
-            --zn-mode "{params.zn_mode}" \
             --min-distal-anchor-reads "{params.min_distal_anchor_reads}" \
             --min-distal-anchor-frac "{params.min_distal_anchor_frac}" \
             --min-exact-canonical-reads "{params.min_exact_canonical_reads}" \

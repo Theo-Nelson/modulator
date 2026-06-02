@@ -207,14 +207,8 @@ def absorb_allowed_for_chain(feature, iso_params):
         return False
     return True
 
-def canonical_order(exact_counts, features, assignment_mode):
+def canonical_order(exact_counts, features):
     chains = list(exact_counts.keys())
-    if assignment_mode == "longest_first":
-        return sorted(
-            chains,
-            key=lambda ch: (len(ch), exact_counts[ch]),
-            reverse=True,
-        )
     return sorted(
         chains,
         key=lambda ch: (
@@ -578,7 +572,6 @@ def _process_core(core_args):
             canons = canonical_order(
                 exact_counts,
                 chain_features,
-                iso_params["assignment_mode"],
             )
 
             assigned = set()
@@ -656,23 +649,12 @@ def _process_core(core_args):
                     distal_unique_prefix=feat["unique_prefix"],
                     distal_unique_5p_junction=feat["distal_unique_5p_junction"],
                     exact_sample_ct=Counter(m["sample"] for m in full_len_members),
-                    assignment_mode=iso_params["assignment_mode"],
+                    assignment_mode="support_first",
                 ))
 
     return isoforms
 
-def assign_metagene_partitions(final_kept, zn_mode="metagene_colored"):
-    if zn_mode == "gene_local":
-        per_gene_max = defaultdict(int)
-        for iso in final_kept:
-            per_gene_max[iso["gene_index"]] = max(per_gene_max[iso["gene_index"]], iso["gene_tx_index"])
-        for iso in final_kept:
-            iso["metagene_index"] = iso["gene_index"]
-            iso["zn_index"] = iso["gene_tx_index"]
-            iso["metagene_gene_indexes"] = str(iso["gene_index"])
-            iso["metagene_partition_count"] = per_gene_max[iso["gene_index"]]
-        return final_kept
-
+def assign_metagene_partitions(final_kept):
     gene_records = {}
     for iso in final_kept:
         gidx = iso["gene_index"]
@@ -797,8 +779,6 @@ def main():
     # Annotation behavior
     ap.add_argument("--tes-match-tol", type=int, default=25)
     ap.add_argument("--exact-tes-tol", type=int, default=10)
-    ap.add_argument("--assignment-mode", choices=["longest_first", "support_first"], default="support_first")
-    ap.add_argument("--zn-mode", choices=["gene_local", "metagene_colored"], default="metagene_colored")
     ap.add_argument("--min-distal-anchor-reads", type=int, default=2)
     ap.add_argument("--min-distal-anchor-frac", type=float, default=0.05)
     ap.add_argument("--min-exact-canonical-reads", type=int, default=1)
@@ -919,7 +899,6 @@ def main():
         apa_window=int(args.tes_window if args.tes_window is not None else args.apa_window),
         min_polya_length=int(args.min_polya_length),
         min_polya_purity=float(args.min_polya_purity),
-        assignment_mode=str(args.assignment_mode),
         min_distal_anchor_reads=int(args.min_distal_anchor_reads),
         min_distal_anchor_frac=float(args.min_distal_anchor_frac),
         min_exact_canonical_reads=int(args.min_exact_canonical_reads),
@@ -1063,7 +1042,7 @@ def main():
             iso["gene_tx_index"] = tidx
             iso["zt_label"] = f"{gn}.{gid}.G{gidx}.T{tidx}"
 
-    assign_metagene_partitions(final_kept, zn_mode=args.zn_mode)
+    assign_metagene_partitions(final_kept)
 
     # Write GTF
     with open(args.out_gtf, "w") as out:
@@ -1130,26 +1109,57 @@ def main():
         PC = U[:, :pcs] * S[:pcs] if pcs else np.zeros((X.shape[0], 0))
         var_expl = (S**2) / (S**2).sum() if S.size else np.zeros_like(S)
 
-        plt.figure(figsize=(6,5))
-        if pcs >= 2:
-            plt.scatter(PC[:,0], PC[:,1])
-            for i, name in enumerate(all_samples):
-                plt.text(PC[i,0], PC[i,1], name, fontsize=8, ha="left", va="bottom")
-            plt.xlabel(f"PC1 ({var_expl[0]*100:.1f}% var)")
-            plt.ylabel(f"PC2 ({var_expl[1]*100:.1f}% var)")
-        else:
-            x = PC[:,0] if pcs >= 1 else np.zeros(X.shape[0])
-            plt.scatter(x, np.zeros_like(x))
-            for i, name in enumerate(all_samples):
-                plt.text(x[i], 0.0, name, fontsize=8, ha="left", va="bottom")
-            xl = f"PC1 ({var_expl[0]*100:.1f}% var)" if pcs>=1 else "PC1"
-            plt.xlabel(xl); plt.ylabel("PC2")
-        plt.title("Sample PCA (log1p transcript counts)")
-        plt.tight_layout()
-        plt.savefig(pca_png, dpi=150)
-        plt.close()
+        fig, ax = plt.subplots(figsize=(8.6, 6.8))
+        cmap = plt.get_cmap("tab10")
+        colors = [cmap(i % cmap.N) for i in range(len(all_samples))]
+        x = PC[:, 0] if pcs >= 1 else np.zeros(X.shape[0])
+        y = PC[:, 1] if pcs >= 2 else np.zeros(X.shape[0])
+
+        for idx, name in enumerate(all_samples):
+            ax.scatter(
+                x[idx],
+                y[idx],
+                s=90,
+                color=colors[idx],
+                edgecolors="white",
+                linewidths=1.2,
+                label=name,
+                zorder=3,
+            )
+
+        ax.axhline(0.0, color="#c9d1d8", linewidth=1.0, zorder=1)
+        ax.axvline(0.0, color="#c9d1d8", linewidth=1.0, zorder=1)
+        ax.grid(True, linestyle="--", linewidth=0.6, alpha=0.35)
+        ax.spines["top"].set_visible(False)
+        ax.spines["right"].set_visible(False)
+        ax.spines["left"].set_color("#4d5761")
+        ax.spines["bottom"].set_color("#4d5761")
+        ax.tick_params(colors="#2f353a")
+
+        ax.set_xlabel(f"PC1 ({var_expl[0]*100:.1f}% variance)" if pcs >= 1 else "PC1")
+        ax.set_ylabel(f"PC2 ({var_expl[1]*100:.1f}% variance)" if pcs >= 2 else "PC2")
+        ax.set_title("Sample PCA of log1p transcript counts")
+
+        if all_samples:
+            ax.legend(
+                loc="upper center",
+                bbox_to_anchor=(0.5, -0.16),
+                ncol=min(2, max(1, len(all_samples))),
+                frameon=False,
+                fontsize=8,
+                handletextpad=0.5,
+                columnspacing=1.2,
+            )
+
+        fig.tight_layout(rect=[0, 0.08, 1, 1])
+        fig.savefig(pca_png, dpi=300, bbox_inches="tight")
+        plt.close(fig)
     else:
-        plt.figure(figsize=(6,5)); plt.title("Sample PCA (no data)"); plt.savefig(pca_png, dpi=150); plt.close()
+        fig, ax = plt.subplots(figsize=(8.6, 6.8))
+        ax.set_title("Sample PCA (no data)")
+        ax.axis("off")
+        fig.savefig(pca_png, dpi=300, bbox_inches="tight")
+        plt.close(fig)
 
     rows = []
     for sname in all_samples:

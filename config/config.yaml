@@ -24,8 +24,6 @@ assembler:
   polya_support_frac: 0.5
   tes_match_tol: 25
   exact_tes_tol: 10
-  assignment_mode: support_first
-  zn_mode: metagene_colored
   min_distal_anchor_reads: 2
   min_distal_anchor_frac: 0.05
   min_exact_canonical_reads: 1
@@ -37,7 +35,6 @@ assembler:
 
 multigene_filter:
   enable: true
-  mode: resolve
   zero_gene_action: keep
 
 modkit:
@@ -143,12 +140,32 @@ test_diffs:
   gene_filter: null     # e.g., ["ALCAM","RIOK3"]
   mod_filter: null      # e.g., ["a","m"]
 
+# Post-test_diffs granular structural classification of significant ZN sites.
+# Assigns each significant between-isoform site a single MECE category explaining
+# WHY the isoforms differ in modification stoichiometry there (IPA-private, EJC
+# relief, tandem-APA, alternative/intergenic terminal exon, etc.), anchored to the
+# longest-3'UTR isoform. Covers ALL detected modifications, not just m6A. Only sites
+# passing fdr AND min_effect (the >10% absolute rule) classify.
+classify_diffs:
+  enable: true
+  min_effect: 0.10      # >10% absolute stoichiometry difference gate
+  fdr: 0.05             # BH-FDR gate (p_adj_bh)
+  mod_filter: null      # null -> ALL detected modifications; e.g. ["a"] for m6A only
+  min_cov: 0            # extra per-isoform Ncov floor (test_diffs already filters)
+  tes_tol: 200          # TES match tolerance for architecture/APA calls
+  inside_tol: 50        # last-exon acceptor match tolerance
+  ejc_nt: 150           # EJC suppression zone (nt) for SPLICING_EJC
+  intergenic_gap: 1000  # min gap (bp) between disjoint terminal exons -> INTERGENIC_TERMINAL_EXON
+  figures: true         # render per-category figures (isoform architecture maps + 2-panel stoich)
+  figs_per_category: 10 # top sites (by effect) to plot per category
+
 report:
   enable: true
   title: "modulator HTML report"
   max_diff_figs: 6
   top_transcripts: 20
   top_genes: 20
+  max_class_figs_per_category: 10   # per-category figures embedded in the report
 
 genotype:
   enable: false

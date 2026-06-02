@@ -13,13 +13,18 @@ rule aggregate_modkit_zn:
         # enable toggle (use _as_bool so "false" strings don't count as true)
         enabled    = _as_bool(config.get("toggles", {}).get("enable_zn_aggregate", True)),
 
-        # NEW: tmpdir + chunk-lines are CLI-overridable (robust fallbacks)
-        tmpdir = (
+        # NEW: tmpdir + chunk-lines are CLI-overridable (robust fallbacks).
+        # tmpdir is a DEFERRED lambda: `resources` is a lazy rule_items_proxy at
+        # parse time (it has __getitem__ but no __contains__/__iter__, so the old
+        # `"tmpdir" in resources` fell into Python's unbounded index-iteration
+        # fallback and hung every dry-run for ~minutes). Resolving it inside a
+        # job-time lambda gives the real Resources object, where getattr is safe.
+        tmpdir = lambda wildcards, resources: (
             config.get("aggregation_tmpdir")
             or config.get("aggregation", {}).get("tmpdir")
-            or (resources.tmpdir if "tmpdir" in resources else None)
+            or getattr(resources, "tmpdir", None)
             or os.environ.get("TMPDIR")
-            or "/scratch/group/p.bio240371.000/horner_lab_modulator/tmp"
+            or "results/aggregate_zn/tmp"
         ),
         chunk_lines = int(
             config.get("aggregation_chunk_lines")

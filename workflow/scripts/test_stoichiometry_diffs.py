@@ -36,6 +36,7 @@ import numpy as np
 import pandas as pd
 from scipy.stats import chi2_contingency, fisher_exact
 import matplotlib.pyplot as plt
+from matplotlib.ticker import MaxNLocator
 
 
 # ------------------------------ CLI ------------------------------
@@ -215,40 +216,118 @@ def make_plot(df_site, per_tx, title, out_png):
     """
     Two-panel figure:
       (1) per-sample stoichiometries by transcript
-      (2) pooled stoichiometry per transcript
+      (2) pooled coverages with modified-call overlay
     """
-    # per-sample
     samp = (df_site.groupby(["ZN_transcript_index", "sample"], as_index=False)[["Nvalid_cov", "Nmod"]]
                   .sum())
     samp = samp.loc[samp["Nvalid_cov"] > 0].copy()
     samp["frac"] = samp["Nmod"] / samp["Nvalid_cov"]
 
-    pooled = pd.DataFrame(per_tx)
+    pooled = pd.DataFrame(per_tx).sort_values("ZN").reset_index(drop=True)
     zn_order = sorted(pooled["ZN"].tolist())
+    sample_names = sorted(samp["sample"].astype(str).unique())
+    offsets = np.linspace(-0.18, 0.18, num=max(1, len(sample_names)))
+    palette = plt.get_cmap("tab10")
+    sample_colors = {
+        sample: palette(idx % palette.N)
+        for idx, sample in enumerate(sample_names)
+    }
 
-    fig = plt.figure(figsize=(7, 7))
+    fig, (ax1, ax2) = plt.subplots(
+        2,
+        1,
+        figsize=(8.5, 7.4),
+        sharex=True,
+        gridspec_kw={"height_ratios": [1.15, 1.0]},
+    )
 
-    ax1 = fig.add_subplot(2, 1, 1)
-    for zn in zn_order:
-        sub = samp.loc[samp["ZN_transcript_index"] == zn]
-        if len(sub):
-            ax1.scatter([zn] * len(sub), sub["frac"])
-    ax1.set_xlabel("Transcript index (ZN)")
-    ax1.set_ylabel("Stoichiometry (per-sample)")
+    handles = []
+    for offset, sample in zip(offsets, sample_names):
+        sub = samp.loc[samp["sample"].astype(str) == sample]
+        if sub.empty:
+            continue
+        handle = ax1.scatter(
+            sub["ZN_transcript_index"].astype(float) + offset,
+            sub["frac"],
+            s=48,
+            color=sample_colors[sample],
+            edgecolors="white",
+            linewidths=0.7,
+            alpha=0.92,
+            label=sample,
+            zorder=3,
+        )
+        handles.append(handle)
+    ax1.set_ylabel("Modified fraction")
     ax1.set_title("Per-sample stoichiometries")
-    ax1.grid(True, linestyle="--", linewidth=0.5, alpha=0.5)
+    ax1.set_ylim(0.0, 1.02)
+    ax1.grid(True, axis="y", linestyle="--", linewidth=0.6, alpha=0.4)
 
-    ax2 = fig.add_subplot(2, 1, 2)
-    ax2.bar(pooled["ZN"], pooled["frac"])
+    ax2.bar(
+        pooled["ZN"],
+        pooled["Ncov"],
+        width=0.72,
+        color="#d9e1ea",
+        edgecolor="#6a7785",
+        linewidth=1.0,
+        label="Total coverage",
+        zorder=1,
+    )
+    ax2.bar(
+        pooled["ZN"],
+        pooled["Nmod"],
+        width=0.72,
+        color="#d46a5d",
+        edgecolor="#983f33",
+        linewidth=1.0,
+        label="Modified calls",
+        zorder=2,
+    )
+    max_cov = float(pooled["Ncov"].max()) if not pooled.empty else 0.0
+    label_pad = max(1.0, max_cov * 0.02)
+    for row in pooled.itertuples(index=False):
+        frac_pct = 100.0 * float(row.frac)
+        ax2.text(
+            row.ZN,
+            float(row.Ncov) + label_pad,
+            f"{frac_pct:.0f}%",
+            ha="center",
+            va="bottom",
+            fontsize=8,
+            color="#4a3f35",
+        )
     ax2.set_xlabel("Transcript index (ZN)")
-    ax2.set_ylabel("Stoichiometry (pooled)")
-    ax2.set_title("Pooled stoichiometries (across samples)")
-    ax2.set_ylim(0, 1.0)
-    ax2.grid(True, linestyle="--", linewidth=0.5, alpha=0.5)
+    ax2.set_ylabel("Pooled coverage")
+    ax2.set_title("Pooled coverage with modified-call overlay")
+    ax2.set_ylim(0.0, max(1.0, max_cov * 1.18))
+    ax2.grid(True, axis="y", linestyle="--", linewidth=0.6, alpha=0.4)
+
+    for ax in (ax1, ax2):
+        ax.set_xticks(zn_order)
+        ax.xaxis.set_major_locator(MaxNLocator(integer=True))
+        ax.spines["top"].set_visible(False)
+        ax.spines["right"].set_visible(False)
+        ax.spines["left"].set_color("#5e554c")
+        ax.spines["bottom"].set_color("#5e554c")
+        ax.tick_params(colors="#3f3933")
+
+    if handles:
+        legend_cols = min(3, len(handles))
+        fig.legend(
+            handles=handles,
+            labels=sample_names,
+            loc="lower center",
+            bbox_to_anchor=(0.5, 0.01),
+            ncol=legend_cols,
+            frameon=False,
+            fontsize=8,
+            handletextpad=0.4,
+            columnspacing=1.2,
+        )
 
     fig.suptitle(title, y=0.98, fontsize=12)
-    fig.tight_layout(rect=[0, 0, 1, 0.96])
-    fig.savefig(out_png, dpi=160)
+    fig.tight_layout(rect=[0, 0.05, 1, 0.95])
+    fig.savefig(out_png, dpi=300, bbox_inches="tight")
     plt.close(fig)
 
 
@@ -371,4 +450,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-

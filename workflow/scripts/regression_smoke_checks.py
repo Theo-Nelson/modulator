@@ -82,11 +82,9 @@ def test_metagene_coloring(module):
         },
     ]
 
-    metagene = module.assign_metagene_partitions(copy.deepcopy(base), zn_mode="metagene_colored")
-    gene_local = module.assign_metagene_partitions(copy.deepcopy(base), zn_mode="gene_local")
+    metagene = module.assign_metagene_partitions(copy.deepcopy(base))
 
     mg_by_gene = {(x["gene_index"], x["gene_tx_index"]): (x["metagene_index"], x["zn_index"]) for x in metagene}
-    gl_by_gene = {(x["gene_index"], x["gene_tx_index"]): (x["metagene_index"], x["zn_index"]) for x in gene_local}
 
     if mg_by_gene[(1, 1)][0] != mg_by_gene[(2, 1)][0]:
         raise AssertionError("Overlapping genes should share one metagene.")
@@ -94,8 +92,6 @@ def test_metagene_coloring(module):
         raise AssertionError("Overlapping transcripts must not share a ZN partition.")
     if mg_by_gene[(1, 1)][1] != mg_by_gene[(2, 2)][1]:
         raise AssertionError("Non-overlapping transcripts should be allowed to reuse a ZN partition.")
-    if gl_by_gene[(1, 1)][1] != 1 or gl_by_gene[(2, 1)][1] != 1 or gl_by_gene[(2, 2)][1] != 2:
-        raise AssertionError("Legacy gene_local mode should preserve per-gene transcript indexing.")
 
 
 def test_aggregate_partition_mapping(module):

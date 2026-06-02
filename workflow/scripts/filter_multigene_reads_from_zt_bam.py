@@ -202,18 +202,6 @@ def main():
         default="keep",
         help="What to do with reads overlapping zero genes in the GTF exonic union"
     )
-    ap.add_argument(
-        "--mode",
-        choices=["resolve", "legacy_scrap"],
-        default="resolve",
-        help="How to handle reads overlapping multiple genes"
-    )
-    ap.add_argument(
-        "--same-strand-only",
-        action="store_true",
-        default=True,
-        help="Retained for compatibility; overlap checks use the read strand by default"
-    )
     args = ap.parse_args()
 
     os.makedirs(os.path.dirname(args.out_clean_bam) or ".", exist_ok=True)
@@ -271,7 +259,7 @@ def main():
                 chrom,
                 strand,
                 gene_index,
-                same_strand_only=args.same_strand_only,
+                same_strand_only=True,
             )
             n_genes = len(overlaps)
 
@@ -307,10 +295,6 @@ def main():
                         resolution = "multi_gene_assignment_conflict"
                 else:
                     resolution = "multi_gene_no_zt"
-
-                if args.mode == "legacy_scrap":
-                    action = "scrap"
-                    resolution = "multi_gene_scrapped_legacy"
 
                 if action == "scrap":
                     scrap_out.write(aln)

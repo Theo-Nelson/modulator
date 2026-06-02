@@ -9,7 +9,7 @@ import tempfile
 
 import pandas as pd
 
-from genotype_utils import load_read_assignments, run_process_jobs, sample_name_from_bam, safe_float, safe_int
+from genotype_utils import load_read_assignments, normalize_string_series, run_process_jobs, sample_name_from_bam, safe_float, safe_int
 
 
 def parse_args():
@@ -153,6 +153,11 @@ def main():
         "gene_index", "transcript_index", "metagene_index", "classification"
     ] if c in assignments.columns]
     assignments = assignments[keep_assign_cols].drop_duplicates(["sample", "qname"])
+    assignments = assignments.rename(columns={
+        col: f"assignment_{col}"
+        for col in ["gene_id", "gene_name", "metagene_index"]
+        if col in assignments.columns
+    })
 
     jobs = max(1, min(int(args.jobs), len(args.bams)))
     threads_per_job = max(1, int(args.threads) // jobs)
@@ -202,6 +207,14 @@ def main():
         ])
     else:
         df = df.merge(assignments, on=["sample", "qname"], how="left")
+        # Keep site-derived context columns stable for downstream joins while
+        # retaining assignment-derived metadata as explicit fallback columns.
+        for col in ["gene_id", "gene_name", "metagene_index"]:
+            assign_col = f"assignment_{col}"
+            if col in df.columns and assign_col in df.columns:
+                primary = normalize_string_series(df[col])
+                fallback = normalize_string_series(df[assign_col])
+                df[col] = primary.where(primary.ne(""), fallback)
         df["usable"] = (~df["fail"].fillna(True)) & df["within_alignment"].fillna(False)
 
     os.makedirs(os.path.dirname(args.out_tsv) or ".", exist_ok=True)

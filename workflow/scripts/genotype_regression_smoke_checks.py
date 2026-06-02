@@ -21,6 +21,7 @@ def run(cmd):
 def main():
     with tempfile.TemporaryDirectory(prefix="genotype_smoke_") as tmpdir:
         tmp = Path(tmpdir)
+        off_context_mod_site = "chr1:300-301:+:a"
 
         snp_rows = []
         mod_rows = []
@@ -98,6 +99,39 @@ def main():
                 "ZN": 1 if zt == "TX1" else 2,
                 "ZM": 1,
                 "assigned": True,
+                "assignment_gene_id": "GENE1",
+                "assignment_gene_name": "GENE1",
+                "assignment_metagene_index": "1",
+                "usable": True,
+            })
+            mod_rows.append({
+                "sample": sample,
+                "qname": qname,
+                "mod_site_id": off_context_mod_site,
+                "chrom": "chr1",
+                "start0": 300,
+                "end0": 301,
+                "strand": "+",
+                "target_mod_code": "a",
+                "call_code": "a" if idx % 3 == 0 else "-",
+                "state_detail": "modified" if idx % 3 == 0 else "canonical",
+                "target_modified": 1 if idx % 3 == 0 else 0,
+                "call_prob": 0.99,
+                "canonical_base": "A",
+                "modified_primary_base": "A",
+                "fail": False,
+                "within_alignment": True,
+                "gene_id": "GENE_OFF",
+                "gene_name": "GENE_OFF",
+                "metagene_index": "99",
+                "ZT": zt,
+                "ZG": 1,
+                "ZN": 1 if zt == "TX1" else 2,
+                "ZM": 1,
+                "assigned": True,
+                "assignment_gene_id": "GENE_OFF",
+                "assignment_gene_name": "GENE_OFF",
+                "assignment_metagene_index": "99",
                 "usable": True,
             })
 
@@ -125,6 +159,7 @@ def main():
         joint = pd.read_csv(joint_out, sep="\t")
         hap_blocks_df = pd.read_csv(hap_blocks, sep="\t")
         hap_tx = pd.read_csv(hap_tx_out, sep="\t")
+        hap_mod = pd.read_csv(hap_mod_out, sep="\t")
 
         if snp_tx.empty:
             raise AssertionError("Expected non-empty SNP to transcript associations.")
@@ -136,11 +171,17 @@ def main():
             raise AssertionError("Expected at least one haplotype block.")
         if hap_tx.empty:
             raise AssertionError("Expected non-empty haplotype to transcript associations.")
+        if hap_mod.empty:
+            raise AssertionError("Expected non-empty haplotype to mod associations.")
 
         if float(snp_tx.iloc[0]["effect_max_abs_tx_frac_diff"]) <= 0.0:
             raise AssertionError("Expected positive SNP transcript effect size.")
         if float(snp_mod.iloc[0]["effect_abs_delta_mod_frac"]) <= 0.0:
             raise AssertionError("Expected positive SNP mod effect size.")
+        if off_context_mod_site in set(snp_mod.get("mod_site_id", [])):
+            raise AssertionError("Off-context mod site should not appear in SNP-mod associations.")
+        if off_context_mod_site in set(hap_mod.get("mod_site_id", [])):
+            raise AssertionError("Off-context mod site should not appear in haplotype-mod associations.")
 
     print("genotype_regression_smoke_checks: OK")
 

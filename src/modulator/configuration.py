@@ -16,6 +16,7 @@ AUTOPARSE_KEYS = (
     "mods",
     "ref_bases",
     "test_diffs",
+    "classify_diffs",
     "multigene_filter",
     "report",
     "genotype",

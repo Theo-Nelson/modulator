@@ -7,6 +7,8 @@ import os
 
 import pandas as pd
 
+from genotype_utils import context_key_from_snp_row, safe_int
+
 
 def parse_args():
     ap = argparse.ArgumentParser(description="Build local read-backed haplotype blocks from candidate SNP molecules.")
@@ -18,17 +20,6 @@ def parse_args():
     ap.add_argument("--max-block-snps", type=int, default=4)
     ap.add_argument("--min-haplotype-reads", type=int, default=4)
     return ap.parse_args()
-
-
-def context_key(row):
-    mg = [x for x in str(row.get("metagene_indices", "")).split(";") if x]
-    if len(set(mg)) == 1:
-        return f"MG:{mg[0]}"
-    genes = [x for x in str(row.get("gene_names", "")).split(";") if x]
-    if len(set(genes)) == 1:
-        return f"GENE:{genes[0]}"
-    return f"CHR:{row['chrom']}"
-
 
 def split_component(snps_sorted, max_block_snps):
     if len(snps_sorted) <= max_block_snps:
@@ -70,7 +61,7 @@ def main():
         )
         return
 
-    df["context_key"] = df.apply(context_key, axis=1)
+    df["context_key"] = df.apply(context_key_from_snp_row, axis=1)
     snp_meta = (
         df[["snp_id", "chrom", "pos1", "ref", "alt", "context_key"]]
         .drop_duplicates("snp_id")
@@ -181,14 +172,6 @@ def main():
         mol_df = pd.DataFrame(columns=["sample", "qname", "block_id", "context_key", "chrom", "haplotype", "support_rank", "ZT", "ZG", "ZN", "ZM"])
     block_df.to_csv(args.out_blocks_tsv, sep="\t", index=False)
     mol_df.to_csv(args.out_molecules_tsv, sep="\t", index=False)
-
-
-def safe_int(x, default=0):
-    try:
-        return int(x)
-    except Exception:
-        return default
-
 
 if __name__ == "__main__":
     main()

@@ -6,7 +6,7 @@ import os
 
 import pandas as pd
 
-from genotype_utils import benjamini_hochberg, max_abs_distribution_shift, run_contingency_test
+from genotype_utils import benjamini_hochberg, context_key_from_row, max_abs_distribution_shift, run_contingency_test
 
 
 def parse_args():
@@ -21,17 +21,6 @@ def parse_args():
     ap.add_argument("--test", choices=["auto", "fisher", "chi2"], default="auto")
     ap.add_argument("--pseudocount", type=float, default=0.5)
     return ap.parse_args()
-
-
-def mod_context(row):
-    mg = str(row.get("metagene_index", "")).strip()
-    if mg and mg.lower() not in {"nan", "none", "null"}:
-        return f"MG:{mg}"
-    gene = str(row.get("gene_name", "")).strip()
-    if gene and gene.lower() not in {"nan", "none", "null"}:
-        return f"GENE:{gene}"
-    return f"CHR:{row['chrom']}"
-
 
 def main():
     args = parse_args()
@@ -100,12 +89,15 @@ def main():
         mod = mod[(~mod["fail"].fillna(True)) & mod["within_alignment"].fillna(False)].copy()
     mod = mod[mod["state_detail"].isin(["modified", "canonical", "other_mod"])].copy()
     mod["target_state"] = mod["state_detail"].eq("modified").astype(int)
-    mod["context_key"] = mod.apply(mod_context, axis=1)
+    mod["context_key"] = mod.apply(context_key_from_row, axis=1)
 
     mod_rows = []
     if not mod.empty:
         merged = hap.merge(mod, on=["sample", "qname"], how="inner", suffixes=("_hap", "_mod"))
-        merged = merged[(merged["context_key_hap"] == merged["context_key_mod"]) | merged["chrom_hap"].eq(merged["chrom_mod"])]
+        merged = merged[
+            (merged["context_key_hap"] == merged["context_key_mod"]) &
+            merged["chrom_hap"].eq(merged["chrom_mod"])
+        ]
         for (block_id, mod_site_id), sub in merged.groupby(["block_id", "mod_site_id"], sort=False):
             hap_totals = sub.groupby("haplotype").size()
             keep_haps = sorted(hap_totals[hap_totals >= int(args.min_haplotype_reads)].index)

@@ -20,7 +20,7 @@ def _autoparse(value):
                     return value
     return value
 
-for k in ("assembler", "modkit", "aggregation", "toggles", "mods", "ref_bases", "test_diffs", "multigene_filter", "report", "genotype"):
+for k in ("assembler", "modkit", "aggregation", "toggles", "mods", "ref_bases", "test_diffs", "classify_diffs", "multigene_filter", "report", "genotype"):
     if k in config:
         config[k] = _autoparse(config[k])
 
@@ -157,6 +157,7 @@ ENABLE_ZT         = _as_bool(config.get("toggles", {}).get("enable_zt_pileup", T
 ENABLE_AGG_ZN     = _as_bool(config.get("toggles", {}).get("enable_zn_aggregate", True))
 ENABLE_AGG_ZT     = _as_bool(config.get("toggles", {}).get("enable_zt_aggregate", True))
 ENABLE_TEST_DIFFS = _as_bool(config.get("toggles", {}).get("enable_test_diffs", True))
+ENABLE_CLASSIFY_DIFFS = _as_bool(config.get("classify_diffs", {}).get("enable", True))
 ENABLE_MULTIGENE_FILTER = _as_bool(config.get("multigene_filter", {}).get("enable", True))
 ENABLE_HTML_REPORT = _as_bool(config.get("report", {}).get("enable", True))
 ENABLE_GENOTYPE = _as_bool(config.get("genotype", {}).get("enable", False))
@@ -186,6 +187,8 @@ if ENABLE_ZT:
 
 # test_diffs rule file can be included unconditionally; targets will decide scheduling
 include: "rules/test_diffs.smk"
+# classify_diffs runs after test_diffs; targets decide scheduling
+include: "rules/classify_diffs.smk"
 
 if ENABLE_GENOTYPE:
     include: "rules/genotype.smk"
@@ -231,6 +234,11 @@ if ENABLE_ZN:
                 f"results/test_diffs/{config['prefix']}__ZN_site_diff_results.tsv",
                 f"results/test_diffs/{config['prefix']}__figs",
             ]
+            # Granular structural classification of the significant diff sites
+            if ENABLE_CLASSIFY_DIFFS:
+                ALL_TARGETS += [
+                    f"results/test_diffs/{config['prefix']}__ZN_site_classified.tsv",
+                ]
 
 if ENABLE_ZT:
     ALL_TARGETS += expand("results/modkit_zt/{sample}", sample=SAMPLES)
