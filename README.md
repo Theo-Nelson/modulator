@@ -7,16 +7,16 @@
 **modulator** takes aligned long-read (e.g. ONT direct-RNA) BAMs that carry
 base-modification tags and, in a single command:
 
-1. **assembles** transcript isoforms and partitions reads per isoform (`ZN`/`ZT` tags);
+1. **assembles** fragment isoforms and partitions reads per isoform (`ZN`/`ZT` tags) — here *fragment* means the fragmented / partial transcript a long read represents, not an assumed full-length molecule;
 2. **calls modifications per isoform** (via [`modkit`](https://github.com/nanoporetech/modkit) pileup, partitioned by isoform);
 3. finds sites that are **differentially modified _between_ isoforms** of the same gene, and **classifies _why_** (alternative polyadenylation, intronic polyadenylation, EJC, splicing, …), anchored to each gene's longest-3′UTR isoform;
-4. optionally adds a **genotype layer** — read-backed SNPs, SNP↔modification and SNP↔transcript associations, transcript-conditioned dependency tests, and local haplotype blocks;
+4. optionally adds a **genotype layer** — read-backed SNPs, SNP-modification and SNP-fragment associations, fragment-conditioned dependency tests, and local haplotype blocks;
 5. writes a single self-contained **HTML report**.
 
 The supported interface is the `modulator` Python CLI (one command, no nested
 Snakemake config). The legacy `workflow/` Snakemake rules remain for reference.
 
-📖 **Full parameter, output, and HPC reference → [ADVANCED_USAGE.md](ADVANCED_USAGE.md)**
+**Full parameter, output, and HPC reference -> [ADVANCED_USAGE.md](ADVANCED_USAGE.md)**
 
 ---
 
@@ -94,12 +94,12 @@ Nine stages, run in order and individually **resumable** (`--resume`):
 |---|-------|--------------|-----------------|
 | 1 | `assemble` | build isoform models from intron chains; tag reads with metagene-aware `ZN` partitions | `<prefix>.gtf`, `<prefix>_partition_map.tsv` |
 | 2 | `read_stats` | per-sample read-retention funnel + length summaries | `<prefix>_per_sample_read_stats.tsv` |
-| 3 | `multigene_filter` | resolve/keep reads over overlapping genes → cleaned tagged BAMs | `zt_filtered/*.bam` |
+| 3 | `multigene_filter` | resolve/keep reads over overlapping genes -> cleaned tagged BAMs | `zt_filtered/*.bam` |
 | 4 | `modkit_zn` | `modkit pileup` partitioned by `ZN` (per-isoform modification calls) | `modkit_zn/<sample>/*.bed` |
 | 5 | `aggregate_zn` | merge into per-site × isoform × sample stoichiometry | `<prefix>_FILTERED_sites_long.tsv` |
 | 6 | `test_diffs` | between-isoform differential-modification test per site | `<prefix>__ZN_site_diff_results.tsv` |
 | 7 | `classify_diffs` | assign a structural category to each significant site (+ figures) | `<prefix>__ZN_site_classified.tsv` |
-| 8 | `genotype` *(optional)* | SNP discovery, SNP↔mod/transcript association, dependency, haplotypes | `genotype/<prefix>_*.tsv` |
+| 8 | `genotype` *(optional)* | SNP discovery, SNP-mod/fragment association, dependency, haplotypes | `genotype/<prefix>_*.tsv` |
 | 9 | `report` | self-contained HTML report | `report/<prefix>_report.html` |
 
 ## Key outputs
@@ -116,7 +116,7 @@ Where to look first (all under `results/`):
   modified between isoforms (effect size + BH-FDR).
 - **`test_diffs/<prefix>__ZN_site_classified.tsv`** (+ `__figs_by_category_arch/`)
   — the structural reason each site differs, with isoform architecture maps.
-- **`genotype/<prefix>_*.tsv`** — SNPs, SNP↔mod / SNP↔transcript / dependency,
+- **`genotype/<prefix>_*.tsv`** — SNPs, SNP-mod / SNP-fragment / dependency,
   and haplotype blocks (when `genotype.enable=true`).
 
 See [ADVANCED_USAGE.md](ADVANCED_USAGE.md#outputs) for the complete file list.
@@ -133,7 +133,7 @@ modulator validate-config --config config/config.yaml [--set k=v …]
 - `--stages` runs a comma-separated subset (e.g. `--stages assemble,read_stats`).
 - `--resume` skips stages whose outputs already exist.
 
-Full flag reference: [ADVANCED_USAGE.md → CLI](ADVANCED_USAGE.md#command-line-interface).
+Full flag reference: [ADVANCED_USAGE.md -> CLI](ADVANCED_USAGE.md#command-line-interface).
 
 ## Configuration
 
@@ -141,14 +141,14 @@ Nested settings live in `config/config.yaml` under sections `assembler`,
 `multigene`, `modkit`, `aggregation`, `test_diffs`, `classify_diffs`,
 `genotype`, and `report`; override any of them on the command line with
 `--set nested.key=value`. Every knob is documented in
-[ADVANCED_USAGE.md → Stages & parameters](ADVANCED_USAGE.md#stages--parameters).
+[ADVANCED_USAGE.md -> Stages & parameters](ADVANCED_USAGE.md#stages--parameters).
 
 ## Running on a cluster
 
 modulator is designed to run one isolated project directory per sample-set and
 to checkpoint between stages. A minimal Slurm pattern (full recipe, resume/clean
 re-runs, and runtime collection in
-[ADVANCED_USAGE.md → HPC](ADVANCED_USAGE.md#running-on-an-hpc-cluster-slurm)):
+[ADVANCED_USAGE.md -> HPC](ADVANCED_USAGE.md#running-on-an-hpc-cluster-slurm)):
 
 ```bash
 modulator run --workdir "$RUNDIR" --config config/config.yaml --jobs "$JOBS" \

@@ -4,6 +4,12 @@ Complete reference for the command-line interface, configuration, every stage's
 parameters, outputs, the genotype module, HPC execution, and troubleshooting.
 For installation and a quick start, see [README.md](README.md).
 
+> **Terminology:** *fragment* (equivalently *fragmented / partial transcript*)
+> denotes what a single long read represents. modulator does not assume reads are
+> full-length, so isoform models, partitions, and per-site results are all
+> reported in fragment terms. (Literal output names — e.g. `_snp_transcript_assoc.tsv`,
+> `report.top_transcripts`, `per_transcript_json` — retain their original spelling.)
+
 ## Contents
 
 - [Command-line interface](#command-line-interface)
@@ -69,7 +75,7 @@ Top-level keys (usually set with `--set`): `reference_fa`, `reference_gtf`,
 ### 1. Assembly
 
 Builds isoform models from read intron chains and tags reads with a
-**metagene-aware `ZN` partition index** (non-overlapping transcripts within one
+**metagene-aware `ZN` partition index** (non-overlapping fragments within one
 overlapping metagene can share a partition without discarding overlapping-locus
 reads).
 
@@ -83,19 +89,19 @@ reads).
 | `tes_window` | int/null | `null` | — | Overrides `apa_window` for TES clustering if set. |
 | `min_reads` | int | `40` | `1–200` | Minimum total reads to retain an isoform. |
 | `min_frac` | float | `0.00` | `0.0–0.2` | Minimum fraction of all reads supporting an isoform. |
-| `min_introns` | int | `1` | `0–10` | Minimum introns per assembled transcript (`0` keeps single-exon/intronless models). |
+| `min_introns` | int | `1` | `0–10` | Minimum introns per assembled fragment (`0` keeps single-exon/intronless models). |
 | `min_polya_length` | int (nt) | `12` | `8–30` | Minimum soft-clip length for poly(A/T) evidence. |
 | `min_polya_purity` | float | `0.5` | `0.4–0.95` | A/T fraction in the soft-clipped tail to count as poly(A/T). |
 | `polya_support_frac` | float | `0.5` | `0.3–0.9` | Minimum fraction of an isoform's reads with poly(A/T) support. |
-| `tes_match_tol` | int (nt) | `25` | `5–50` | Tolerance for matching transcript end sites to reference TES. |
+| `tes_match_tol` | int (nt) | `25` | `5–50` | Tolerance for matching fragment end sites to reference TES. |
 | `exact_tes_tol` | int (nt) | `10` | `2–20` | Distance to label a match `EXACT` vs `NOVEL_APA`. |
 | `min_distal_anchor_reads` | int | `2` | `1–20` | Exact-chain reads needed before a longer chain absorbs shorter suffix-compatible chains. |
 | `min_distal_anchor_frac` | float | `0.05` | `0.0–1.0` | Exact-chain fraction within a suffix family required for absorption. |
 | `min_exact_canonical_reads` | int | `1` | `1–20` | Minimum exact-chain reads for a canonical to participate in suffix collapse. |
-| `write_zt_bams` | bool | `false` | — | Write one BAM per transcript per sample (many files). |
+| `write_zt_bams` | bool | `false` | — | Write one BAM per fragment per sample (many files). |
 | `write_zt_tagged_sample_bams` | bool | `true` | — | Write one ZT/ZN-tagged BAM per sample (enables downstream modification calling). |
 | `emit_modkit_manifest` | bool | `false` | — | Also write `zt_bams/modkit_manifest.tsv`. |
-| `min_reads_per_sample_for_mod` | int | `5` | `1–50` | Minimum per-sample read support to make a per-transcript BAM. |
+| `min_reads_per_sample_for_mod` | int | `5` | `1–50` | Minimum per-sample read support to make a per-fragment BAM. |
 | `min_total_reads_for_mod` | int | `20` | `10–200` | Minimum total read support for modkit BAM output. |
 | `status_every` | int | `0` | `0+` | Print assembly progress every N reads (`0` = off). |
 
@@ -103,7 +109,7 @@ Notes: a longer suffix-compatible chain absorbs shorter chains only with direct
 exact-chain support from its own distal unique 5′ structure; a read provides
 poly(A/T) support if 3′ soft-clip ≥ `min_polya_length` **and** purity ≥
 `min_polya_purity`; isoforms must pass **all** filters; `ZN` is a metagene-aware
-partition index, not a within-gene transcript index.
+partition index, not a within-gene fragment index.
 
 > **Intronless transcriptomes (e.g. chrM/mitochondria):** set
 > `assembler.min_introns=0` **and** `assembler.min_introns_read=0`, or assembly
@@ -149,13 +155,13 @@ cleaned tagged BAMs. Keys under `modkit.common` map directly to modkit flags
 | `only_tabs` / `mixed_delim` | bool | `false` | output delimiter control |
 | `suppress_progress` | bool | `true` | `--suppress-progress` |
 
-Partition tags are hard-coded to split reads by transcript assignment:
+Partition tags are hard-coded to split reads by fragment assignment:
 
 | Section | Key | Default | Meaning |
 |---------|-----|--------:|---------|
 | `zn` | `partition_tag` | `"ZN"` | metagene-aware partition index from the assembler |
 | `zn` | `per_mod_bed` | `true` | one BED per modification |
-| `zt` | `partition_tag` | `"ZT"` | gene+transcript human-readable code |
+| `zt` | `partition_tag` | `"ZT"` | gene+fragment human-readable code |
 
 > `modkit` is pinned to **0.5.0**: 0.6.x removed `--partition-tag`, which the
 > per-isoform pileup relies on.
@@ -180,16 +186,16 @@ Merges the per-`ZN` modkit bedMethyl into long tables and per-gene/per-mod pivot
 | `mod_fail_margin` | int | `1` | ZN/ZT | Extra margin on `Nfail` in the `Nmod` fail rule. |
 | `emit_raw` | bool | `false`* | ZN/ZT | Write *RAW* (pre-filter) outputs. *Disabled by default to bound disk; the RAW long table is unconsumed downstream.* |
 | `emit_filtered` | bool | `true` | ZN/ZT | Write *FILTERED* outputs. |
-| `write_long` | bool | `true` | ZN/ZT | Emit the long TSV (one row per site × sample × transcript × mod). |
+| `write_long` | bool | `true` | ZN/ZT | Emit the long TSV (one row per site × sample × fragment × mod). |
 | `write_pivots` | bool | `true` | ZN/ZT | Emit per-gene × mod pivots (coverage, fraction, Nmod). |
 | `write_raw_per_gene` | bool | `false` | ZN | Per-gene tables for *RAW*. |
 | `write_filtered_per_gene` | bool | `true` | ZN | Per-gene tables for *FILTERED*. |
 | `min_cov` | int | `0` | ZN/ZT | Zero `frac_modified` when `Nvalid_cov < min_cov` (row kept). |
-| `gtf` | path | assembled GTF | ZN | GTF to map sites → genes (uses `zn_index` first, gene-exon fallback). |
+| `gtf` | path | assembled GTF | ZN | GTF to map sites -> genes (uses `zn_index` first, gene-exon fallback). |
 
 ### 5. Differential test (test_diffs)
 
-Identifies sites that differ in modification stoichiometry **across transcripts
+Identifies sites that differ in modification stoichiometry **across fragments
 within the same gene locus**.
 
 | Key | Type | Default | Description |
@@ -249,7 +255,7 @@ association layers. Enable with `--set genotype.enable=true`.
 | `min_total_cov` | int | `8` | Minimum total depth at a candidate SNP. |
 | `min_alt_frac` / `max_alt_frac` | float | `0.10` / `0.90` | Alt-allele fraction window for segregating SNPs. |
 | `min_baseq` / `min_mapq` | int | `20` / `10` | Quality floors for discovery / molecule extraction. |
-| `mod_sites_require_snp_link` | bool | `true` | Keep only mod sites whose context_key matches a candidate SNP (lossless for SNP↔mod / dependency / haplotype-mod; bounds memory on deep genome-wide data). |
+| `mod_sites_require_snp_link` | bool | `true` | Keep only mod sites whose context_key matches a candidate SNP (lossless for SNP-mod / dependency / haplotype-mod; bounds memory on deep genome-wide data). |
 | `mod_jobs` | int | `8` | Concurrent `modkit extract calls` in the mod-table step (each streams a chromosome — bounds memory). |
 | `min_mod_site_cov` | int | `1` | Minimum aggregated mod-site coverage for SNP-mod testing. |
 | `min_group_reads` | int | `4` | Minimum group support for association/dependency tests. |
@@ -294,7 +300,7 @@ All paths are under `results/`.
 (metagene index), `ZT` (`gene_name.gene_id.G{ZG}.T{tx}`):
 - `assemble/<prefix>.gtf` — assembled isoform models
 - `assemble/<prefix>_metrics.tsv` — isoform-level assembly metrics
-- `assemble/<prefix>_tx_counts.tsv`, `…_tx_counts.pca.png` — transcript × sample counts + PCA
+- `assemble/<prefix>_tx_counts.tsv`, `…_tx_counts.pca.png` — fragment × sample counts + PCA
 - `assemble/<prefix>_per_sample_stats.tsv`, `…_per_sample_read_stats.tsv` — per-sample summaries + read-retention funnel
 - `assemble/<prefix>_tx_assigned_read_lengths.tsv`, `…_partition_map.tsv`
 - `assemble/zt_tagged/*.bam`, `zt_filtered/*.bam` (cleaned, used downstream), `zt_scrap/*.bam`, `zt_bams/*.bam` (optional)
@@ -313,7 +319,7 @@ pivots. FILTERED long tables keep every ZN/sample row at kept sites.
 - `<prefix>_molecule_snps.tsv` — one row per read per candidate SNP
 - `<prefix>_candidate_mod_sites.tsv`, `<prefix>_molecule_mod_calls.tsv`
 - `<prefix>_snp_transcript_assoc.tsv`, `<prefix>_snp_mod_assoc.tsv`
-- `<prefix>_snp_tx_mod_dependency.tsv` — transcript-conditioned SNP-mod dependency
+- `<prefix>_snp_tx_mod_dependency.tsv` — fragment-conditioned SNP-mod dependency
 - `<prefix>_haplotype_blocks.tsv` (gene_names / region / span_bp / snp_coords), `<prefix>_haplotype_transcript_assoc.tsv`, `<prefix>_haplotype_mod_assoc.tsv`
 - `<prefix>__snp_figs/` — per-example figures
 
