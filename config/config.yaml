@@ -73,36 +73,26 @@ modkit:
   zn:
     partition_tag: "ZN"
     per_mod_bed: true
-  zt:
-    partition_tag: "ZT"
 
 toggles:
   enable_zn_pileup: true
-  enable_zt_pileup: true
   enable_zn_aggregate: true
-  enable_zt_aggregate: true
   enable_test_diffs: true
 
 # NEW: authoritative home for aggregation options
 aggregation:
+  engine: stream      # stream = k-way merge of pre-sorted ZN beds (fast, per-chrom parallel + resumable); sort = legacy aggregate_by_gene.py
+  jobs: 12            # chromosomes processed in parallel by the stream engine
   zn:
     filter_enable: true
     count_diff_factor: 3
     mod_fail_margin: 1
-    emit_raw: true
+    emit_raw: false                    # RAW sites_long is huge (~all bedMethyl rows) and not consumed downstream; FILTERED is what test_diffs/genotype/report use. Set true only if you need the full pre-filter table and have disk/quota headroom.
     emit_filtered: true
     write_long: true
     write_pivots: true
-    write_raw_per_gene: true           # (ZN only)
-    write_filtered_per_gene: true      # (ZN only)
-  zt:
-    filter_enable: true
-    count_diff_factor: 3
-    mod_fail_margin: 1
-    emit_raw: true
-    emit_filtered: true
-    write_long: true
-    write_pivots: true
+    write_raw_per_gene: false          # RAW per-gene tables (thousands of files) follow emit_raw
+    write_filtered_per_gene: true      # (ZN only) FILTERED only -> small
 
 # legacy keys kept for compatibility (ignored if aggregation.* is set)
 aggregate_outputs:
@@ -152,7 +142,7 @@ classify_diffs:
   fdr: 0.05             # BH-FDR gate (p_adj_bh)
   mod_filter: null      # null -> ALL detected modifications; e.g. ["a"] for m6A only
   min_cov: 0            # extra per-isoform Ncov floor (test_diffs already filters)
-  tes_tol: 200          # TES match tolerance for architecture/APA calls
+  tes_tol: 25           # TES match tolerance for architecture/APA calls; matches the assembler's tes_match_tol so "same TES" is consistent between assembly and classification (was 200, which lumped sub-200bp tandem-APA into SHARED_TERMINAL_EXON)
   inside_tol: 50        # last-exon acceptor match tolerance
   ejc_nt: 150           # EJC suppression zone (nt) for SPLICING_EJC
   intergenic_gap: 1000  # min gap (bp) between disjoint terminal exons -> INTERGENIC_TERMINAL_EXON
@@ -166,6 +156,7 @@ report:
   top_transcripts: 20
   top_genes: 20
   max_class_figs_per_category: 10   # per-category figures embedded in the report
+  max_snp_figs: 12                  # per-example figures per SNP/haplotype section (embedded + written to results/genotype/<prefix>__snp_figs/)
 
 genotype:
   enable: false
@@ -177,6 +168,8 @@ genotype:
   min_baseq: 20
   min_mapq: 10
   min_mod_site_cov: 1
+  mod_sites_require_snp_link: true   # keep only mod sites whose context_key matches a candidate SNP (sites that can pair with a SNP on a shared read); lossless for snp_mod / snp_tx_mod_dependency / haplotype_mod, avoids 100k+-site molecule_mod OOM on deep genome-wide data. Set false to keep all mod sites.
+  mod_jobs: 16                       # max concurrent modkit `extract calls` in build_molecule_mod_table (separate from genotype.jobs; bounds memory since each streams a chromosome). Lower for very deep 6+ BAM runs.
   min_group_reads: 4
   min_haplotype_reads: 4
   max_haplotype_snps: 4

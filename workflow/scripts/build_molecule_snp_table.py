@@ -147,16 +147,19 @@ def main():
             pos_map[int(row["pos1"])] = row
         cand_by_chrom[chrom] = pos_map
 
-    jobs = max(1, min(int(args.jobs), len(args.bams)))
+    # Shard per (BAM x chromosome) for genome-level parallelism; results concat and
+    # drop_duplicates by (sample,qname,snp_id), so per-shard pieces merge identically.
+    task_args = [
+        (bam, {chrom: pos_map}, args.min_baseq, args.min_mapq, args.primary_only, args.verbose)
+        for bam in args.bams
+        for chrom, pos_map in cand_by_chrom.items()
+    ]
+    jobs = max(1, min(int(args.jobs), len(task_args)))
     rows = []
     if jobs == 1:
-        for bam in args.bams:
-            rows.extend(extract_rows_from_bam(bam, cand_by_chrom, args.min_baseq, args.min_mapq, args.primary_only, args.verbose))
+        for item in task_args:
+            rows.extend(extract_rows_from_bam(*item))
     else:
-        task_args = [
-            (bam, cand_by_chrom, args.min_baseq, args.min_mapq, args.primary_only, args.verbose)
-            for bam in args.bams
-        ]
         for result in run_process_jobs(
             extract_rows_from_bam,
             task_args,
@@ -168,7 +171,11 @@ def main():
 
     df = pd.DataFrame(rows)
     if not df.empty:
-        df = df.drop_duplicates(["sample", "qname", "snp_id"], keep="first").reset_index(drop=True)
+        df = df.drop_duplicates(["sample", "qname", "snp_id"], keep="first")
+        # Deterministic on-disk order: parallel (BAM x chrom) sharding returns rows in
+        # nondeterministic completion order. Sort so the molecule table and every
+        # order-sensitive consumer (haplotype blocks, snp_tx_mod_dependency) are reproducible.
+        df = df.sort_values(["chrom", "pos1", "snp_id", "sample", "qname"]).reset_index(drop=True)
     else:
         df = pd.DataFrame(columns=[
             "sample", "qname", "snp_id", "chrom", "pos1", "start0", "end0", "ref", "alt",

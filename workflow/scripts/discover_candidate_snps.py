@@ -180,13 +180,18 @@ def scan_bam_counts(
 def main():
     args = parse_args()
     exon_records, merged_intervals = load_gtf_exons(args.gtf)
-    jobs = max(1, min(int(args.jobs), len(args.bams)))
+
+    # Shard per (BAM x chromosome) for genome-level parallelism instead of capping
+    # at the sample count. The cross-sample reduce below keys by site, so per-shard
+    # partial counts merge identically.
+    worker_args = [
+        (bam, args.reference_fa, {chrom: ivs}, args.min_baseq, args.min_mapq, args.primary_only, args.verbose)
+        for bam in args.bams
+        for chrom, ivs in merged_intervals.items()
+    ]
+    jobs = max(1, min(int(args.jobs), len(worker_args)))
 
     results = []
-    worker_args = [
-        (bam, args.reference_fa, merged_intervals, args.min_baseq, args.min_mapq, args.primary_only, args.verbose)
-        for bam in args.bams
-    ]
     if jobs == 1:
         for item in worker_args:
             results.append(scan_bam_counts(*item))

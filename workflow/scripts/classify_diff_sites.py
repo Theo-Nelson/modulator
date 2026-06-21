@@ -484,7 +484,9 @@ def render_category_figures(fig_records, zn_long_path, figs_dir, per_category,
 
 # Display names for the standard single-letter modkit codes; any other code
 # (e.g. ChEBI ids like 17596) is shown verbatim so labels stay unambiguous.
-MOD_DISP = {'a': 'm6A', 'm': '5mC', 'h': '5hmC', 'C': '4mC', '17596': 'pseudoU'}
+MOD_DISP = {'a': 'm6A', 'm': '5mC', 'h': '5hmC', 'C': '4mC',
+            '17596': 'inosine', '17802': 'pseudoU',
+            '69426': 'Am', '19227': 'Um', '19228': 'Cm', '19229': 'Gm'}
 
 
 def mod_label(code):

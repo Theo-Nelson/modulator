@@ -39,6 +39,7 @@ def extract_rows_from_bam(
     threads_per_job: int,
     lookup,
     verbose: bool = False,
+    region=None,
 ):
     sample = sample_name_from_bam(bam)
     rows = []
@@ -50,6 +51,18 @@ def extract_rows_from_bam(
             modkit_bin, "extract", "calls", bam, tmp_path,
             "--bgzf",
             "--force",
+            *(["--region", str(region)] if region else []),
+            # Cap modkit's per-chunk read buffering. The default 100kb interval over deep
+            # direct-RNA piles up huge memory at highly-expressed loci (chr1/chr19 etc.) and
+            # OOM'd even a 1TB node when many shards ran concurrently. Smaller chunks bound
+            # peak RSS (more overhead, identical output).
+            "--interval-size", "20000",
+            # Don't estimate a pass-threshold by sampling reads: on sparse inputs
+            # (e.g. region subsets, low-coverage samples) modkit aborts with
+            # "Error! not enough datapoints" when there are too few mod calls over
+            # the candidate-site BED. All calls are emitted; downstream genotype
+            # logic applies its own coverage/quality filters.
+            "--no-filtering",
             "--include-bed", candidate_bed,
             "--reference", reference_fa,
             "--mapped-only",
@@ -147,47 +160,25 @@ def main():
         key = (str(row["chrom"]), int(row["start0"]))
         lookup.setdefault(key, []).append(row)
 
-    assignments = load_read_assignments(args.read_assignments)
-    keep_assign_cols = [c for c in [
-        "sample", "qname", "ZT", "ZG", "ZN", "ZM", "assigned", "gene_id", "gene_name",
-        "gene_index", "transcript_index", "metagene_index", "classification"
-    ] if c in assignments.columns]
-    assignments = assignments[keep_assign_cols].drop_duplicates(["sample", "qname"])
-    assignments = assignments.rename(columns={
-        col: f"assignment_{col}"
-        for col in ["gene_id", "gene_name", "metagene_index"]
-        if col in assignments.columns
-    })
-
-    jobs = max(1, min(int(args.jobs), len(args.bams)))
+    # Shard per (BAM x chromosome) for genome-level parallelism: modkit extract runs
+    # per chrom (--region) over its candidate sites; rows concatenate identically.
+    chroms = sorted({k[0] for k in lookup.keys()})
+    if not chroms:
+        chroms = [None]
+    lookup_by_chrom = {c: ({k: v for k, v in lookup.items() if k[0] == c} if c is not None else lookup) for c in chroms}
+    n_tasks = len(args.bams) * len(chroms)
+    jobs = max(1, min(int(args.jobs), n_tasks))
     threads_per_job = max(1, int(args.threads) // jobs)
+    task_args = [
+        (bam, args.candidate_bed, args.reference_fa, args.modkit_bin, threads_per_job, lookup_by_chrom[c], args.verbose, c)
+        for bam in args.bams
+        for c in chroms
+    ]
     rows = []
     if jobs == 1:
-        for bam in args.bams:
-            rows.extend(
-                extract_rows_from_bam(
-                    bam,
-                    args.candidate_bed,
-                    args.reference_fa,
-                    args.modkit_bin,
-                    threads_per_job,
-                    lookup,
-                    args.verbose,
-                )
-            )
+        for item in task_args:
+            rows.extend(extract_rows_from_bam(*item))
     else:
-        task_args = [
-            (
-                bam,
-                args.candidate_bed,
-                args.reference_fa,
-                args.modkit_bin,
-                threads_per_job,
-                lookup,
-                args.verbose,
-            )
-            for bam in args.bams
-        ]
         for result in run_process_jobs(
             extract_rows_from_bam,
             task_args,
@@ -206,6 +197,20 @@ def main():
             "within_alignment", "gene_id", "gene_name", "metagene_index"
         ])
     else:
+        # Load read assignments AFTER the parallel modkit extraction: read_assignments is
+        # ~22GB on deep runs (~70GB in pandas), and loading it before the worker pool made
+        # the fork copy-on-write that buffer across all jobs -> OOM. Workers never use it.
+        assignments = load_read_assignments(args.read_assignments)
+        keep_assign_cols = [c for c in [
+            "sample", "qname", "ZT", "ZG", "ZN", "ZM", "assigned", "gene_id", "gene_name",
+            "gene_index", "transcript_index", "metagene_index", "classification"
+        ] if c in assignments.columns]
+        assignments = assignments[keep_assign_cols].drop_duplicates(["sample", "qname"])
+        assignments = assignments.rename(columns={
+            col: f"assignment_{col}"
+            for col in ["gene_id", "gene_name", "metagene_index"]
+            if col in assignments.columns
+        })
         df = df.merge(assignments, on=["sample", "qname"], how="left")
         # Keep site-derived context columns stable for downstream joins while
         # retaining assignment-derived metadata as explicit fallback columns.
@@ -216,6 +221,10 @@ def main():
                 fallback = normalize_string_series(df[assign_col])
                 df[col] = primary.where(primary.ne(""), fallback)
         df["usable"] = (~df["fail"].fillna(True)) & df["within_alignment"].fillna(False)
+
+    if not df.empty:
+        # Deterministic on-disk order across (BAM x chrom) shards.
+        df = df.sort_values(["chrom", "start0", "mod_site_id", "sample", "qname"]).reset_index(drop=True)
 
     os.makedirs(os.path.dirname(args.out_tsv) or ".", exist_ok=True)
     df.to_csv(args.out_tsv, sep="\t", index=False)

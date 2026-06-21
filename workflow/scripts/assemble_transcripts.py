@@ -46,6 +46,36 @@ from concurrent.futures import ProcessPoolExecutor, as_completed
 
 import pysam
 
+
+# --- HPC page-cache control -------------------------------------------------
+# Sequentially streaming very large BAMs populates the OS page cache, which on
+# cgroup-v2 HPC nodes is charged to the job's memory and can grow to the size of
+# the data read (hundreds of GB) -> node-level OOM, even though the process's
+# real RSS stays tiny. Periodically advising the kernel to drop already-read
+# pages keeps that cache flat and does not change any results.
+def _drop_page_cache(path, upto_bytes=0):
+    """Best-effort POSIX_FADV_DONTNEED over [0, upto_bytes) of `path` (0 => whole file)."""
+    if not path:
+        return
+    try:
+        if isinstance(path, bytes):
+            path = path.decode()
+        fd = os.open(path, os.O_RDONLY)
+        try:
+            os.posix_fadvise(fd, 0, int(upto_bytes), os.POSIX_FADV_DONTNEED)
+        finally:
+            os.close(fd)
+    except Exception:
+        pass
+
+
+def _bgzf_coffset(fh):
+    """Compressed file offset (bytes) consumed so far by a pysam BGZF reader, else 0."""
+    try:
+        return max(0, int(fh.tell()) >> 16)
+    except Exception:
+        return 0
+
 # --------------------------- utils ---------------------------
 
 def median(vals):
@@ -363,6 +393,7 @@ def _presence_bins_for_chrom(handles, chrom, chrom_len, bin_bp, status_every_rea
     union_presence = np.zeros(nb, dtype=np.bool_)
     for hi, fh in enumerate(handles):
         seen = 0
+        bam_path = getattr(fh, "filename", None)
         try:
             for aln in fh.fetch(contig=chrom):
                 seen += 1
@@ -376,10 +407,14 @@ def _presence_bins_for_chrom(handles, chrom, chrom_len, bin_bp, status_every_rea
                 bs = s // bin_bp
                 be = (e - 1) // bin_bp
                 union_presence[bs:be+1] = True
+                if seen % 1_000_000 == 0:
+                    _drop_page_cache(bam_path, _bgzf_coffset(fh))
                 if status_every_reads and (seen % status_every_reads == 0):
                     print(f"[REGIONIZE] {chrom} reads streamed (bam#{hi+1}): {seen:,}", file=sys.stderr)
         except KeyError:
             continue
+        # Release the page cache consumed by this chromosome's scan of this BAM.
+        _drop_page_cache(bam_path, _bgzf_coffset(fh))
     all_zero = ~union_presence
     return bins, all_zero
 
@@ -1301,7 +1336,11 @@ def main():
             out_path = os.path.join(out_dir2, f"{sample}.zt_tagged.bam")
             with pysam.AlignmentFile(in_path, "rb") as inp, \
                  pysam.AlignmentFile(out_path, "wb", header=inp.header) as outw:
+                _seen_w = 0
                 for aln in (inp.fetch()):
+                    _seen_w += 1
+                    if _seen_w % 1_000_000 == 0:
+                        _drop_page_cache(in_path, _bgzf_coffset(inp))
                     if aln.is_unmapped:
                         outw.write(aln); continue
                     if args.primary_only and (aln.is_secondary or aln.is_supplementary):

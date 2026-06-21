@@ -27,11 +27,40 @@ def split_component(snps_sorted, max_block_snps):
     return [snps_sorted[i:i + max_block_snps] for i in range(0, len(snps_sorted), max_block_snps)]
 
 
+def block_context(chunk, snp_meta):
+    """Gene + coordinate context for a haplotype block, derived from its member SNPs.
+    Returns gene_names (unique, ';'-joined), region (chrom:start-end, 1-based),
+    start1/end1/span_bp, and a readable per-SNP coordinate string (chrom:pos ref>alt)."""
+    chrom = str(snp_meta[chunk[0]].get("chrom", ""))
+    positions = [safe_int(snp_meta[s].get("pos1")) for s in chunk]
+    start1 = min(positions) if positions else 0
+    end1 = max(positions) if positions else 0
+    genes = []
+    for s in chunk:
+        for tok in str(snp_meta[s].get("gene_names", "") or "").split(";"):
+            tok = tok.strip()
+            if tok and tok.lower() not in {"nan", "none", "null"} and tok not in genes:
+                genes.append(tok)
+    snp_coords = "; ".join(
+        f"{snp_meta[s].get('chrom', '')}:{snp_meta[s].get('pos1', '')} "
+        f"{snp_meta[s].get('ref', '')}>{snp_meta[s].get('alt', '')}"
+        for s in chunk
+    )
+    return {
+        "gene_names": ";".join(genes),
+        "region": f"{chrom}:{start1}-{end1}" if chrom else "",
+        "start1": start1,
+        "end1": end1,
+        "span_bp": end1 - start1,
+        "snp_coords": snp_coords,
+    }
+
+
 def main():
     args = parse_args()
     df = pd.read_csv(args.molecule_snps, sep="\t", low_memory=False)
     if df.empty:
-        pd.DataFrame(columns=["block_id", "context_key", "chrom", "n_snps", "snp_ids", "support_reads", "complete_reads", "haplotypes"]).to_csv(
+        pd.DataFrame(columns=["block_id", "context_key", "gene_names", "chrom", "region", "start1", "end1", "span_bp", "n_snps", "snp_ids", "snp_coords", "support_reads", "complete_reads", "haplotypes"]).to_csv(
             args.out_blocks_tsv, sep="\t", index=False
         )
         pd.DataFrame(columns=["sample", "qname", "block_id", "context_key", "chrom", "haplotype", "support_rank", "ZT", "ZG", "ZN", "ZM"]).to_csv(
@@ -41,7 +70,7 @@ def main():
 
     df = df[df["allele_class"].isin(["ref", "alt"])].copy()
     if df.empty:
-        pd.DataFrame(columns=["block_id", "context_key", "chrom", "n_snps", "snp_ids", "support_reads", "complete_reads", "haplotypes"]).to_csv(
+        pd.DataFrame(columns=["block_id", "context_key", "gene_names", "chrom", "region", "start1", "end1", "span_bp", "n_snps", "snp_ids", "snp_coords", "support_reads", "complete_reads", "haplotypes"]).to_csv(
             args.out_blocks_tsv, sep="\t", index=False
         )
         pd.DataFrame(columns=["sample", "qname", "block_id", "context_key", "chrom", "haplotype", "support_rank", "ZT", "ZG", "ZN", "ZM"]).to_csv(
@@ -53,7 +82,7 @@ def main():
     keep_snps = set(alt_support[alt_support >= int(args.min_alt_reads)].index)
     df = df[df["snp_id"].isin(keep_snps)].copy()
     if df.empty:
-        pd.DataFrame(columns=["block_id", "context_key", "chrom", "n_snps", "snp_ids", "support_reads", "complete_reads", "haplotypes"]).to_csv(
+        pd.DataFrame(columns=["block_id", "context_key", "gene_names", "chrom", "region", "start1", "end1", "span_bp", "n_snps", "snp_ids", "snp_coords", "support_reads", "complete_reads", "haplotypes"]).to_csv(
             args.out_blocks_tsv, sep="\t", index=False
         )
         pd.DataFrame(columns=["sample", "qname", "block_id", "context_key", "chrom", "haplotype", "support_rank", "ZT", "ZG", "ZN", "ZM"]).to_csv(
@@ -62,8 +91,16 @@ def main():
         return
 
     df["context_key"] = df.apply(context_key_from_snp_row, axis=1)
+    # Order-invariance: block numbering (HAPBLOCK<i>) follows context_key first-appearance
+    # and read iteration follows row order, so a deterministic sort makes the haplotype
+    # blocks independent of upstream (BAM x chrom) shard completion order.
+    df = df.sort_values(["context_key", "chrom", "pos1", "sample", "qname"], kind="stable").reset_index(drop=True)
+    meta_cols = ["snp_id", "chrom", "pos1", "ref", "alt", "context_key"]
+    for extra in ("gene_names", "gene_ids"):
+        if extra in df.columns:
+            meta_cols.append(extra)
     snp_meta = (
-        df[["snp_id", "chrom", "pos1", "ref", "alt", "context_key"]]
+        df[meta_cols]
         .drop_duplicates("snp_id")
         .set_index("snp_id")
         .to_dict("index")
@@ -134,12 +171,19 @@ def main():
                     continue
                 keep_haps = {h for h, n in hap_counter.items() if n >= int(args.min_haplotype_reads)}
                 complete_reads = sum(hap_counter.values())
+                ctxinfo = block_context(chunk, snp_meta)
                 block_rows.append({
                     "block_id": block_id,
                     "context_key": ctx,
+                    "gene_names": ctxinfo["gene_names"],
                     "chrom": chrom,
+                    "region": ctxinfo["region"],
+                    "start1": ctxinfo["start1"],
+                    "end1": ctxinfo["end1"],
+                    "span_bp": ctxinfo["span_bp"],
                     "n_snps": len(chunk),
                     "snp_ids": ";".join(chunk),
+                    "snp_coords": ctxinfo["snp_coords"],
                     "support_reads": sum(1 for v in read_snps.values() if any(s in v for s in chunk)),
                     "complete_reads": complete_reads,
                     "haplotypes": ";".join(f"{h}:{hap_counter[h]}" for h in sorted(hap_counter, key=lambda x: (-hap_counter[x], x))),
@@ -166,7 +210,7 @@ def main():
     os.makedirs(os.path.dirname(args.out_blocks_tsv) or ".", exist_ok=True)
     block_df = pd.DataFrame(block_rows)
     if block_df.empty:
-        block_df = pd.DataFrame(columns=["block_id", "context_key", "chrom", "n_snps", "snp_ids", "support_reads", "complete_reads", "haplotypes"])
+        block_df = pd.DataFrame(columns=["block_id", "context_key", "gene_names", "chrom", "region", "start1", "end1", "span_bp", "n_snps", "snp_ids", "snp_coords", "support_reads", "complete_reads", "haplotypes"])
     mol_df = pd.DataFrame(molecule_rows)
     if mol_df.empty:
         mol_df = pd.DataFrame(columns=["sample", "qname", "block_id", "context_key", "chrom", "haplotype", "support_rank", "ZT", "ZG", "ZN", "ZM"])

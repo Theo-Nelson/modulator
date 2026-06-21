@@ -3,6 +3,7 @@ from __future__ import annotations
 import glob
 import os
 import sys
+import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -26,9 +27,7 @@ STAGE_ORDER = [
     "read_stats",
     "multigene_filter",
     "modkit_zn",
-    "modkit_zt",
     "aggregate_zn",
-    "aggregate_zt",
     "test_diffs",
     "classify_diffs",
     "genotype",
@@ -236,12 +235,13 @@ class PipelinePaths:
 
 
 class ModulatorPipeline:
-    def __init__(self, config: dict[str, Any], *, workdir: str | Path, jobs: int = 1, verbose: bool = True):
+    def __init__(self, config: dict[str, Any], *, workdir: str | Path, jobs: int = 1, verbose: bool = True, resume: bool = False):
         self.root = find_project_root(workdir)
         ensure_mpl_config_dir(self.root)
         self.config = config
         self.jobs = max(1, int(jobs))
         self.verbose = verbose
+        self.resume = bool(resume)
         self.prefix = str(config.get("prefix", "modulator_run"))
         self.paths = PipelinePaths(self.root, self.prefix)
         self.samples = self._discover_samples()
@@ -334,12 +334,127 @@ class ModulatorPipeline:
         cmd = [sys.executable, str(self.script_path(script_name)), *args]
         run_command(cmd, cwd=self.root, label=label, verbose=self.verbose)
 
+    @property
+    def _checkpoint_dir(self) -> Path:
+        return self.paths.results / ".checkpoints"
+
+    def _stage_marker(self, stage: str) -> Path:
+        return self._checkpoint_dir / f"{stage}.done"
+
+    def _mark_stage_done(self, stage: str) -> None:
+        try:
+            self._checkpoint_dir.mkdir(parents=True, exist_ok=True)
+            self._stage_marker(stage).write_text(f"done\t{stage}\n")
+        except Exception:
+            pass
+
+    def _nonempty(self, path: Path) -> bool:
+        try:
+            return path.exists() and path.stat().st_size > 0
+        except Exception:
+            return False
+
+    def _geno_reuse(self, out_path: Path, label: str) -> bool:
+        """Within the genotype stage, reuse an existing non-empty output on --resume so a
+        re-run after a later-step failure doesn't redo the expensive per-(sample x chrom)
+        BAM scans. Applied only to the deterministic SNP-side tables, so reuse is exact;
+        everything from candidate_mod_sites onward always re-runs."""
+        if self.resume and self._nonempty(out_path):
+            if self.verbose:
+                print(f"[modulator]   genotype substep {label}: reusing existing output, skipping", flush=True)
+            return True
+        return False
+
+    def _all_samples(self, fn) -> bool:
+        return bool(self.samples) and all(self._nonempty(fn(sample)) for sample in self.samples)
+
+    def _modkit_done(self, which: str) -> bool:
+        base = self.paths.modkit_zn if which == "zn" else self.paths.modkit_zt
+        if not base.exists() or not self.samples:
+            return False
+        for sample in self.samples:
+            d = self.paths.modkit_dir(which, sample)
+            if not d.exists() or not any(d.rglob("*.bed.gz")):
+                return False
+        return True
+
+    def _outputs_present(self, stage: str) -> bool:
+        """Best-effort check that a stage's outputs already exist, so --resume
+        works on a results folder produced before checkpoint markers existed.
+        Disabled/toggled-off stages count as already satisfied (they no-op)."""
+        cfg = self.config
+        p = self.paths
+        toggles = cfg.get("toggles", {})
+        if stage == "assemble":
+            ok = all(self._nonempty(x) for x in (
+                p.out_gtf, p.classification_summary, p.metrics, p.tx_counts,
+                p.partition_map, p.sample_stats, p.tx_assigned_read_lengths))
+            if ok and as_bool(cfg.get("assembler", {}).get("write_zt_tagged_sample_bams", True), True):
+                ok = self._all_samples(p.zt_tagged_bam)
+            return ok
+        if stage == "read_stats":
+            return self._nonempty(p.per_sample_read_stats)
+        if stage == "multigene_filter":
+            if not as_bool(cfg.get("multigene_filter", {}).get("enable", True), True):
+                return True
+            return self._all_samples(p.clean_bam) and self._nonempty(p.multigene_scrap_tx_counts)
+        if stage == "modkit_zn":
+            if not as_bool(toggles.get("enable_zn_pileup", True), True):
+                return True
+            return self._modkit_done("zn")
+        if stage == "aggregate_zn":
+            if not as_bool(toggles.get("enable_zn_aggregate", True), True):
+                return True
+            return self._nonempty(p.zn_filtered_long)
+        if stage == "test_diffs":
+            if not as_bool(toggles.get("enable_test_diffs", True), True):
+                return True
+            return self._nonempty(p.zn_diff_results)
+        if stage == "classify_diffs":
+            if not as_bool(cfg.get("classify_diffs", {}).get("enable", True), True):
+                return True
+            return self._nonempty(p.zn_site_classified)
+        if stage == "genotype":
+            if not as_bool(cfg.get("genotype", {}).get("enable", False), False):
+                return True
+            return self._nonempty(p.geno_hap_mod)
+        if stage == "report":
+            if not as_bool(cfg.get("report", {}).get("enable", True), True):
+                return True
+            return self._nonempty(p.report_html)
+        return False
+
+    def _stage_done(self, stage: str) -> bool:
+        return self._stage_marker(stage).exists() or self._outputs_present(stage)
+
     def run(self, stages: list[str] | None = None) -> None:
         selected = STAGE_ORDER if not stages else [stage for stage in STAGE_ORDER if stage in stages]
+        timings: list[tuple[str, float]] = []
         for stage in selected:
+            if self.resume and self._stage_done(stage):
+                if self.verbose:
+                    print(f"[modulator] stage: {stage} — checkpoint found, skipping", flush=True)
+                continue
             if self.verbose:
                 print(f"[modulator] stage: {stage}", flush=True)
+            t0 = time.perf_counter()
             getattr(self, f"stage_{stage}")()
+            dt = time.perf_counter() - t0
+            timings.append((stage, dt))
+            print(f"[modulator] stage {stage} finished in {dt:.1f}s", flush=True)
+            self._mark_stage_done(stage)
+        if timings:
+            try:
+                tpath = self.paths.results / "stage_timings.tsv"
+                tpath.parent.mkdir(parents=True, exist_ok=True)
+                with open(tpath, "w") as fh:
+                    fh.write("stage\tseconds\n")
+                    for stg, secs in timings:
+                        fh.write(f"{stg}\t{secs:.2f}\n")
+                    fh.write(f"TOTAL\t{sum(s for _, s in timings):.2f}\n")
+                print(f"[modulator] stage timings -> {tpath}", flush=True)
+            except OSError:
+                pass
 
     def stage_assemble(self) -> None:
         cfg = self.config.get("assembler", {})
@@ -569,20 +684,6 @@ class ModulatorPipeline:
         ]
         run_parallel(tasks, jobs=self.jobs)
 
-    def stage_modkit_zt(self) -> None:
-        if not as_bool(self.config.get("toggles", {}).get("enable_zt_pileup", True), True):
-            return
-        zt_cfg = self.config.get("modkit", {}).get("zt", {})
-        partition_tag = str(zt_cfg.get("partition_tag", "ZT"))
-        tasks = [
-            (
-                f"modkit_zt[{sample}]",
-                lambda sample=sample: self._run_modkit_pileup(sample=sample, which="zt", partition_tag=partition_tag),
-            )
-            for sample in self.samples
-        ]
-        run_parallel(tasks, jobs=self.jobs)
-
     def stage_aggregate_zn(self) -> None:
         if not as_bool(self.config.get("toggles", {}).get("enable_zn_aggregate", True), True):
             return
@@ -621,34 +722,18 @@ class ModulatorPipeline:
         args.append("--write-pivots" if as_bool(agg_cfg.get("write_pivots", self.config.get("aggregate_outputs", {}).get("write_pivots", True)), True) else "--no-write-pivots")
         args.append("--write-raw-per-gene" if as_bool(agg_cfg.get("write_raw_per_gene", self.config.get("aggregate_outputs", {}).get("write_raw_per_gene", False)), False) else "--no-write-raw-per-gene")
         args.append("--write-filtered-per-gene" if as_bool(agg_cfg.get("write_filtered_per_gene", self.config.get("aggregate_outputs", {}).get("write_filtered_per_gene", True)), True) else "--no-write-filtered-per-gene")
-        self.run_python_script("aggregate_by_gene.py", args, label="aggregate_by_gene")
-
-    def stage_aggregate_zt(self) -> None:
-        if not as_bool(self.config.get("toggles", {}).get("enable_zt_aggregate", True), True):
-            return
-        agg_cfg = self.config.get("aggregation", {}).get("zt", {})
-        filters_cfg = self.config.get("filters", {})
-        out_prefix = self.paths.aggregate_zt / self.prefix
-        out_prefix.parent.mkdir(parents=True, exist_ok=True)
-        self._require_modkit_outputs("zt")
-        self._require_existing_file(self.paths.classification_summary, "classification summary TSV")
-        args = [
-            "--modkit-dir", str(self.paths.modkit_zt),
-            "--summary-tsv", str(self.paths.classification_summary),
-            "--out-prefix", str(out_prefix),
-            "--min-cov", str(self.config.get("min_cov", 5)),
-            "--count-diff-factor", str(float(agg_cfg.get("count_diff_factor", filters_cfg.get("count_diff_factor", 3)))),
-            "--mod-fail-margin", str(int(agg_cfg.get("mod_fail_margin", filters_cfg.get("mod_fail_margin", 1)))),
-            "--debug-summary",
-            "--verbose",
-        ]
-        if as_bool(agg_cfg.get("filter_enable", filters_cfg.get("enable_site_filter", True)), True):
-            args.append("--filter-enable")
-        args.append("--emit-raw" if as_bool(agg_cfg.get("emit_raw", self.config.get("aggregate_outputs", {}).get("emit_raw", True)), True) else "--no-emit-raw")
-        args.append("--emit-filtered" if as_bool(agg_cfg.get("emit_filtered", self.config.get("aggregate_outputs", {}).get("emit_filtered", True)), True) else "--no-emit-filtered")
-        args.append("--write-long" if as_bool(agg_cfg.get("write_long", self.config.get("aggregate_outputs", {}).get("write_long", True)), True) else "--no-write-long")
-        args.append("--write-pivots" if as_bool(agg_cfg.get("write_pivots", self.config.get("aggregate_outputs", {}).get("write_pivots", True)), True) else "--no-write-pivots")
-        self.run_python_script("aggregate_by_transcript.py", args, label="aggregate_by_transcript")
+        # Default to the streaming engine: it k-way-merges the already-sorted,
+        # tabix-indexed per-ZN beds (no normalize.tsv, no genome-wide external sort),
+        # is parallel across chromosomes, and is per-chromosome resumable. Output is
+        # content-identical to the sort engine (validated). Set aggregation.engine=sort
+        # to fall back to aggregate_by_gene.py.
+        engine = str(self.config.get("aggregation", {}).get("engine", "stream")).strip().lower()
+        if engine == "stream":
+            agg_jobs = max(1, int(self.config.get("aggregation", {}).get("jobs", min(self.top_threads, 12) if self.top_threads else 8)))
+            args.extend(["--jobs", str(agg_jobs)])
+            self.run_python_script("aggregate_zn_stream.py", args, label="aggregate_zn_stream")
+        else:
+            self.run_python_script("aggregate_by_gene.py", args, label="aggregate_by_gene")
 
     def stage_test_diffs(self) -> None:
         if not as_bool(self.config.get("toggles", {}).get("enable_test_diffs", True), True):
@@ -740,7 +825,10 @@ class ModulatorPipeline:
         if not as_bool(geno.get("enable", False), False):
             return
         self._require_reference_fa()
-        geno_jobs = max(1, min(len(self.samples), int(geno.get("jobs", 2))))
+        # The genotype scripts now shard BAM scans per (sample x chromosome), so
+        # parallelism is no longer capped at the sample count -- size it to the CPU
+        # budget instead.
+        geno_jobs = max(1, min(self.top_threads if self.top_threads > 0 else 8, int(geno.get("jobs", self.top_threads or 8))))
         sample_bams = [
             str(self._require_existing_file(self._modkit_input_bam(sample), f"genotype input BAM for sample {sample}"))
             for sample in self.samples
@@ -748,62 +836,72 @@ class ModulatorPipeline:
         self._require_existing_file(self.paths.classification_summary, "classification summary TSV")
         self.paths.genotype.mkdir(parents=True, exist_ok=True)
 
-        self.run_python_script(
-            "build_read_assignment_table.py",
-            [
-                "--bams", *sample_bams,
-                "--summary-tsv", str(self.paths.classification_summary),
-                "--out-tsv", str(self.paths.geno_read_assignments),
-                "--jobs", str(geno_jobs),
-                "--primary-only",
-                "--verbose",
-            ],
-            label="build_read_assignment_table",
-        )
-        self.run_python_script(
-            "discover_candidate_snps.py",
-            [
-                "--bams", *sample_bams,
-                "--reference-fa", str(self.reference_fa),
-                "--gtf", str(self.paths.out_gtf),
-                "--out-tsv", str(self.paths.geno_candidate_snps),
-                "--min-alt-reads", str(int(geno.get("min_alt_reads", 4))),
-                "--min-total-cov", str(int(geno.get("min_total_cov", 8))),
-                "--min-alt-frac", str(float(geno.get("min_alt_frac", 0.10))),
-                "--max-alt-frac", str(float(geno.get("max_alt_frac", 0.90))),
-                "--min-baseq", str(int(geno.get("min_baseq", 20))),
-                "--min-mapq", str(int(geno.get("min_mapq", self.config.get("assembler", {}).get("min_mapq", 10)))),
-                "--jobs", str(geno_jobs),
-                "--primary-only",
-                "--verbose",
-            ],
-            label="discover_candidate_snps",
-        )
-        self.run_python_script(
-            "build_molecule_snp_table.py",
-            [
-                "--bams", *sample_bams,
-                "--candidate-snps", str(self.paths.geno_candidate_snps),
-                "--out-tsv", str(self.paths.geno_molecule_snps),
-                "--min-baseq", str(int(geno.get("min_baseq", 20))),
-                "--min-mapq", str(int(geno.get("min_mapq", self.config.get("assembler", {}).get("min_mapq", 10)))),
-                "--jobs", str(geno_jobs),
-                "--primary-only",
-                "--verbose",
-            ],
-            label="build_molecule_snp_table",
-        )
+        if not self._geno_reuse(self.paths.geno_read_assignments, "build_read_assignment_table"):
+            self.run_python_script(
+                "build_read_assignment_table.py",
+                [
+                    "--bams", *sample_bams,
+                    "--summary-tsv", str(self.paths.classification_summary),
+                    "--out-tsv", str(self.paths.geno_read_assignments),
+                    "--jobs", str(geno_jobs),
+                    "--primary-only",
+                    "--verbose",
+                ],
+                label="build_read_assignment_table",
+            )
+        if not self._geno_reuse(self.paths.geno_candidate_snps, "discover_candidate_snps"):
+            self.run_python_script(
+                "discover_candidate_snps.py",
+                [
+                    "--bams", *sample_bams,
+                    "--reference-fa", str(self.reference_fa),
+                    "--gtf", str(self.paths.out_gtf),
+                    "--out-tsv", str(self.paths.geno_candidate_snps),
+                    "--min-alt-reads", str(int(geno.get("min_alt_reads", 4))),
+                    "--min-total-cov", str(int(geno.get("min_total_cov", 8))),
+                    "--min-alt-frac", str(float(geno.get("min_alt_frac", 0.10))),
+                    "--max-alt-frac", str(float(geno.get("max_alt_frac", 0.90))),
+                    "--min-baseq", str(int(geno.get("min_baseq", 20))),
+                    "--min-mapq", str(int(geno.get("min_mapq", self.config.get("assembler", {}).get("min_mapq", 10)))),
+                    "--jobs", str(geno_jobs),
+                    "--primary-only",
+                    "--verbose",
+                ],
+                label="discover_candidate_snps",
+            )
+        if not self._geno_reuse(self.paths.geno_molecule_snps, "build_molecule_snp_table"):
+            self.run_python_script(
+                "build_molecule_snp_table.py",
+                [
+                    "--bams", *sample_bams,
+                    "--candidate-snps", str(self.paths.geno_candidate_snps),
+                    "--out-tsv", str(self.paths.geno_molecule_snps),
+                    "--min-baseq", str(int(geno.get("min_baseq", 20))),
+                    "--min-mapq", str(int(geno.get("min_mapq", self.config.get("assembler", {}).get("min_mapq", 10)))),
+                    "--jobs", str(geno_jobs),
+                    "--primary-only",
+                    "--verbose",
+                ],
+                label="build_molecule_snp_table",
+            )
         zn_long = str(self.paths.zn_filtered_long) if self.paths.zn_filtered_long.exists() else ""
         zt_long = str(self.paths.zt_filtered_long) if self.paths.zt_filtered_long.exists() else ""
+        mod_site_args = [
+            "--zn-long", zn_long,
+            "--zt-long", zt_long,
+            "--out-tsv", str(self.paths.geno_candidate_mod_sites),
+            "--out-bed", str(self.paths.geno_candidate_mod_bed),
+            "--min-total-cov", str(int(geno.get("min_mod_site_cov", 1))),
+        ]
+        # Restrict candidate mod sites to those that can pair with a candidate SNP (same
+        # context_key on a shared read). Lossless for snp_mod_assoc/snp_tx_mod_dependency/
+        # haplotype_mod_assoc and keeps the per-read mod table tractable on deep genome-wide
+        # data (otherwise 100k+ sites -> molecule_mod_calls OOM). Toggle off to keep all sites.
+        if as_bool(geno.get("mod_sites_require_snp_link", True), True):
+            mod_site_args += ["--candidate-snps", str(self.paths.geno_candidate_snps)]
         self.run_python_script(
             "build_candidate_mod_sites.py",
-            [
-                "--zn-long", zn_long,
-                "--zt-long", zt_long,
-                "--out-tsv", str(self.paths.geno_candidate_mod_sites),
-                "--out-bed", str(self.paths.geno_candidate_mod_bed),
-                "--min-total-cov", str(int(geno.get("min_mod_site_cov", 1))),
-            ],
+            mod_site_args,
             label="build_candidate_mod_sites",
         )
         self.run_python_script(
@@ -815,8 +913,11 @@ class ModulatorPipeline:
                 "--read-assignments", str(self.paths.geno_read_assignments),
                 "--reference-fa", str(self.reference_fa),
                 "--out-tsv", str(self.paths.geno_molecule_mod_calls),
-                "--threads", str(max(1, min(8, self.top_threads))),
-                "--jobs", str(geno_jobs),
+                "--threads", str(max(1, self.top_threads)),
+                # Cap concurrent modkit `extract calls` separately from the (cheap, pysam)
+                # SNP steps: each modkit process streams a chromosome's reads, so too many
+                # at once is memory-heavy. Defaults to 24, never more than geno_jobs.
+                "--jobs", str(max(1, min(geno_jobs, int(geno.get("mod_jobs", 8))))),
                 "--verbose",
             ],
             label="build_molecule_mod_table",
@@ -932,5 +1033,7 @@ class ModulatorPipeline:
             "--hap-blocks", str(self.paths.geno_hap_blocks) if self.paths.geno_hap_blocks.exists() else "",
             "--hap-tx-assoc", str(self.paths.geno_hap_tx) if self.paths.geno_hap_tx.exists() else "",
             "--hap-mod-assoc", str(self.paths.geno_hap_mod) if self.paths.geno_hap_mod.exists() else "",
+            "--snp-figs-dir", str(self.paths.genotype / f"{self.prefix}__snp_figs"),
+            "--max-snp-figs", str(int(report_cfg.get("max_snp_figs", 12))),
         ]
         self.run_python_script("generate_html_report.py", args, label="generate_html_report")

@@ -62,10 +62,13 @@ def main():
     snp_mod_map = snp_mod.set_index(["snp_id", "mod_site_id"])[["p_value", "p_adj_bh", "effect_abs_delta_mod_frac"]].to_dict("index")
 
     rows = []
-    for (snp_id, mod_site_id), sub in merged.groupby(["snp_id", "mod_site_id"], sort=False):
+    # sort=True on both groupbys: a deterministic stratum order makes the CMH
+    # float summation (cmh_test_2x2xk sums over `strata`) reproducible regardless of
+    # upstream (BAM x chrom) shard order; floating-point addition is not associative.
+    for (snp_id, mod_site_id), sub in merged.groupby(["snp_id", "mod_site_id"], sort=True):
         strata = []
         stratum_details = []
-        for tx, tx_sub in sub.groupby("transcript_label", sort=False):
+        for tx, tx_sub in sub.groupby("transcript_label", sort=True):
             grp = tx_sub.groupby(["allele_class", "target_state"]).size()
             a = int(grp.get(("ref", 1), 0))
             b = int(grp.get(("ref", 0), 0))
@@ -127,7 +130,7 @@ def main():
             "snp_mod_p_value": snp_mod_meta.get("p_value"),
             "snp_mod_p_adj_bh": snp_mod_meta.get("p_adj_bh"),
             "snp_mod_effect": snp_mod_meta.get("effect_abs_delta_mod_frac"),
-            "strata_json": json.dumps(stratum_details, separators=(",", ":")),
+            "strata_json": json.dumps(sorted(stratum_details, key=lambda d: str(d["ZT"])), separators=(",", ":")),
         })
 
     out = pd.DataFrame(rows)
@@ -146,7 +149,10 @@ def main():
             else:
                 classifications.append("unclear")
         out["classification"] = classifications
-        out = out.sort_values(["cmh_p_adj_bh", "weighted_within_tx_effect"], ascending=[True, False]).reset_index(drop=True)
+        out = out.sort_values(
+            ["cmh_p_adj_bh", "weighted_within_tx_effect", "snp_id", "mod_site_id"],
+            ascending=[True, False, True, True],
+        ).reset_index(drop=True)
     else:
         out = pd.DataFrame(columns=[
             "snp_id", "mod_site_id", "chrom", "pos1", "mod_start0", "target_mod_code",

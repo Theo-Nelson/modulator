@@ -34,14 +34,22 @@ def safe_get_tag(aln, tag, default=""):
         return default
 
 
-def collect_rows_from_bam(bam: str, primary_only: bool, verbose: bool = False):
+def bam_chroms_with_reads(bam: str):
+    try:
+        with pysam.AlignmentFile(bam, "rb") as fh:
+            return [s.contig for s in fh.get_index_statistics() if s.mapped > 0]
+    except Exception:
+        return []
+
+
+def collect_rows_from_bam(bam: str, primary_only: bool, verbose: bool = False, region=None):
     sample = sample_name_from_bam(bam)
     if verbose:
-        print(f"[info] read assignments start: {sample}", file=sys.stderr, flush=True)
+        print(f"[info] read assignments start: {sample} {region or 'all'}", file=sys.stderr, flush=True)
 
     rows = []
     with pysam.AlignmentFile(bam, "rb") as fh:
-        for aln in fh.fetch():
+        for aln in (fh.fetch(contig=region) if region else fh.fetch()):
             if aln.is_unmapped:
                 continue
             if primary_only and (aln.is_secondary or aln.is_supplementary):
@@ -67,13 +75,20 @@ def collect_rows_from_bam(bam: str, primary_only: bool, verbose: bool = False):
 
 def main():
     args = parse_args()
-    jobs = max(1, min(int(args.jobs), len(args.bams)))
+    # Shard per (BAM x chromosome-with-reads) for parallelism beyond the sample count.
+    task_args = []
+    for bam in args.bams:
+        chroms = bam_chroms_with_reads(bam)
+        if chroms:
+            task_args.extend((bam, args.primary_only, args.verbose, c) for c in chroms)
+        else:
+            task_args.append((bam, args.primary_only, args.verbose, None))
+    jobs = max(1, min(int(args.jobs), len(task_args)))
     rows = []
     if jobs == 1:
-        for bam in args.bams:
-            rows.extend(collect_rows_from_bam(bam, args.primary_only, args.verbose))
+        for item in task_args:
+            rows.extend(collect_rows_from_bam(*item))
     else:
-        task_args = [(bam, args.primary_only, args.verbose) for bam in args.bams]
         for result in run_process_jobs(
             collect_rows_from_bam,
             task_args,
@@ -104,6 +119,13 @@ def main():
             "zn_index": "summary_zn_index",
         })
         df = df.merge(meta, on="ZT", how="left")
+
+    if not df.empty:
+        # Deterministic on-disk order across (BAM x chrom-with-reads) shards; also makes
+        # the downstream drop_duplicates(["sample","qname"]) selection reproducible.
+        sort_cols = [c for c in ["sample", "qname", "chrom", "start0", "end0", "strand"] if c in df.columns]
+        if sort_cols:
+            df = df.sort_values(sort_cols).reset_index(drop=True)
 
     out_dir = os.path.dirname(args.out_tsv) or "."
     os.makedirs(out_dir, exist_ok=True)

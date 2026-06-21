@@ -400,7 +400,22 @@ def main():
         })
 
     if not results:
-        sys.exit("No sites had ≥2 transcripts meeting the coverage threshold; nothing to test.")
+        # Single-isoform loci (e.g. mitochondrial chrM genes) have no site with >=2
+        # transcript partitions to contrast -> nothing to test. Emit an empty results
+        # table (header only) + empty figs dir and exit 0 so the pipeline continues to
+        # genotype/report instead of aborting.
+        out_tsv = f"{args.out_prefix}__ZN_site_diff_results.tsv"
+        os.makedirs(os.path.dirname(out_tsv) or ".", exist_ok=True)
+        empty_cols = [
+            "gene_name", "mod_code", "chrom", "start0", "end0", "strand",
+            "n_tx_tested", "test_name", "stat_name", "stat_value", "p_value",
+            "effect_max_abs_frac_diff", "per_transcript_json", "p_adj_bh",
+        ]
+        pd.DataFrame(columns=empty_cols).to_csv(out_tsv, sep="\t", index=False)
+        os.makedirs(f"{args.out_prefix}__figs", exist_ok=True)
+        print("[info] No sites had >=2 transcripts meeting the coverage threshold; "
+              f"wrote empty {out_tsv} and continuing (nothing to test).")
+        return
 
     res_df = pd.DataFrame(results)
     res_df["p_adj_bh"] = benjamini_hochberg(res_df["p_value"].values)

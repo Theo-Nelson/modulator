@@ -3,11 +3,29 @@
 import argparse
 import base64
 import glob
+import hashlib
 import html
+import itertools
 import os
+import re
+import sys
 from pathlib import Path
 
 import pandas as pd
+
+
+# Display names for modkit/dorado modification codes (ChEBI ids -> friendly names).
+# Dorado RNA004 v5.2.0 set: m6A, inosine, pseudoU, 5mC, and the 2'-O-methyls (Nm).
+# Unknown codes are shown verbatim.
+MOD_DISPLAY = {
+    "a": "m6A", "m": "5mC", "h": "5hmC", "C": "4mC",
+    "17596": "inosine", "17802": "pseudoU",
+    "69426": "Am", "19227": "Um", "19228": "Cm", "19229": "Gm",
+}
+
+
+def mod_display(code):
+    return MOD_DISPLAY.get(str(code), str(code))
 
 
 CARD_DEFINITIONS = {
@@ -88,6 +106,11 @@ COLUMN_DEFINITIONS = {
     "block_id": "Identifier for the reported haplotype block.",
     "context_key": "Gene- or metagene-aware context key used to restrict genotype and modification joins to the same local feature family.",
     "haplotypes": "Observed allele strings for the retained read-backed haplotypes in the reported block.",
+    "region": "Genomic span of the haplotype block as chrom:start-end (1-based; first to last SNP position).",
+    "start1": "1-based coordinate of the first (leftmost) SNP in the haplotype block.",
+    "end1": "1-based coordinate of the last (rightmost) SNP in the haplotype block.",
+    "span_bp": "Distance in base pairs between the first and last SNP in the haplotype block.",
+    "snp_coords": "Per-SNP coordinates and alleles in the block (chrom:pos ref>alt), in genomic order.",
     "alt_frac": "Alternative-allele fraction across all supporting reads at the candidate SNP locus.",
     "total_cov": "Total coverage accumulated across samples at the reported SNP or mod site.",
     "ref_count": "Reference-base support across all reads for the candidate SNP locus.",
@@ -167,6 +190,8 @@ def parse_args():
     ap.add_argument("--hap-blocks", default="")
     ap.add_argument("--hap-tx-assoc", default="")
     ap.add_argument("--hap-mod-assoc", default="")
+    ap.add_argument("--snp-figs-dir", default="", help="Directory to write per-example SNP/haplotype figures into (also embedded inline).")
+    ap.add_argument("--max-snp-figs", type=int, default=12, help="Max per-example figures per SNP/haplotype section.")
     ap.add_argument("--max-diff-figs", type=int, default=6)
     ap.add_argument("--top-transcripts", type=int, default=20)
     ap.add_argument("--top-genes", type=int, default=20)
@@ -211,9 +236,10 @@ def embed_png(path):
     return f"data:image/png;base64,{encoded}"
 
 
-def category_distribution_png(counts):
+def category_distribution_png(counts, mod_label=None):
     """Horizontal bar chart of classified-site counts per category. Returns a
-    base64 data URI (or "" if matplotlib/data unavailable)."""
+    base64 data URI (or "" if matplotlib/data unavailable). ``mod_label`` names the
+    modification in the title/axis (e.g. "m6A"); None -> generic wording."""
     if not counts:
         return ""
     try:
@@ -233,8 +259,13 @@ def category_distribution_png(counts):
     bars = ax.barh(list(ypos), values, color="#c98a5e", edgecolor="#7d3c1f", linewidth=0.9)
     ax.set_yticks(list(ypos))
     ax.set_yticklabels(labels, fontsize=9)
-    ax.set_xlabel("Significant m6A sites")
-    ax.set_title("Differential m6A sites by structural category")
+    if mod_label:
+        _ml = str(mod_label).strip()
+        ax.set_xlabel(f"Significant {_ml} sites")
+        ax.set_title(f"Differential {_ml} sites by structural category")
+    else:
+        ax.set_xlabel("Significant sites")
+        ax.set_title("Differential modification sites by structural category")
     pad = max(values) * 0.01 if values else 0.1
     for rect, val in zip(bars, values):
         ax.text(rect.get_width() + pad, rect.get_y() + rect.get_height() / 2.0,
@@ -258,7 +289,7 @@ def clickable_image_html(src, alt, *, caption="", figure_class="image-card"):
     return (
         f"<figure class='{figure_class}'>"
         f"<a class='image-link' href='{src}' target='_blank' rel='noopener noreferrer' title='Open full-size image in a new tab'>"
-        f"<img src='{src}' alt='{escaped_alt}' />"
+        f"<img src='{src}' alt='{escaped_alt}' loading='lazy' />"
         "<span class='expand-badge' aria-hidden='true'>↗</span>"
         "</a>"
         f"{caption_html}"
@@ -363,8 +394,32 @@ def build_classification_section(class_df, class_figs_dir, arch_figs_dir, max_fi
     counts = class_df["category"].value_counts().to_dict()
     total = int(sum(counts.values())) or 1
 
-    dist_uri = category_distribution_png(counts)
-    dist_html = clickable_image_html(dist_uri, "Category distribution", figure_class="hero-figure") if dist_uri else ""
+    # The classifier covers ALL detected modifications (not just m6A). Render one
+    # correctly-titled distribution per mod_code, plus a combined overview, instead of
+    # a single chart hard-labeled "m6A".
+    mods_present = (
+        sorted(class_df["mod_code"].dropna().astype(str).unique())
+        if "mod_code" in class_df.columns else []
+    )
+    permod_figs = []
+    if len(mods_present) > 1:
+        combined = category_distribution_png(counts, mod_label=None)
+        hero_html = (
+            clickable_image_html(combined, "Category distribution — all modifications",
+                                 figure_class="hero-figure", caption="All modifications combined")
+            if combined else ""
+        )
+        for mod in mods_present:
+            mc = class_df.loc[class_df["mod_code"].astype(str) == mod, "category"].value_counts().to_dict()
+            uri = category_distribution_png(mc, mod_label=mod_display(mod))
+            if uri:
+                cap = mod_display(mod) if mod_display(mod) == mod else f"{mod_display(mod)} ({mod})"
+                permod_figs.append(clickable_image_html(uri, f"Category distribution — {mod_display(mod)}", caption=cap))
+    else:
+        only_label = mod_display(mods_present[0]) if mods_present else None
+        uri = category_distribution_png(counts, mod_label=only_label)
+        hero_html = clickable_image_html(uri, "Category distribution", figure_class="hero-figure") if uri else ""
+    permod_html = "".join(permod_figs)
 
     summary_df = (
         pd.DataFrame({"category": list(counts.keys()), "n_sites": list(counts.values())})
@@ -380,9 +435,15 @@ def build_classification_section(class_df, class_figs_dir, arch_figs_dir, max_fi
         "<div class='overview-layout'>"
         f"<div>{df_to_html(summary_df, max_rows=len(summary_df))}"
         f"{definitions_html(cat_defs, summary='Category definitions', open_by_default=False)}</div>"
-        f"<div class='hero'>{dist_html or '<p class=\"muted\">Distribution graph unavailable.</p>'}</div>"
+        f"<div class='hero'>{hero_html or '<p class=\"muted\">Distribution graph unavailable.</p>'}</div>"
         "</div>"
     )
+    if permod_html:
+        overview += (
+            "<details class='definitions' open>"
+            "<summary>Per-modification category distributions</summary>"
+            f"<div class='gallery'>{permod_html}</div></details>"
+        )
 
     detail_cols = [
         c for c in [
@@ -433,6 +494,43 @@ def build_classification_section(class_df, class_figs_dir, arch_figs_dir, max_fi
     )
 
 
+def externalize_data_uris(html_doc, out_html):
+    """Replace inline base64 image data: URIs with sidecar files referenced by relative
+    path. Chrome blocks top-level navigation to data: URLs (so clicking a figure to
+    open it full-size only worked in Firefox), and inlining many multi-MB PNGs bloats
+    the HTML past 100 MB. Writing images next to the report fixes both; identical
+    images are de-duplicated. Returns (new_html, n_images, rel_dir)."""
+    out_dir = os.path.dirname(os.path.abspath(out_html)) or "."
+    stem = os.path.splitext(os.path.basename(out_html))[0]
+    rel_dir = f"{stem}_files"
+    abs_dir = os.path.join(out_dir, rel_dir)
+    seen = {}
+    counter = itertools.count(1)
+    made = {"n": 0}
+    pattern = re.compile(r"data:image/(png|jpeg|jpg|gif|svg\+xml);base64,([A-Za-z0-9+/=]+)")
+
+    def repl(match):
+        fmt, b64 = match.group(1), match.group(2)
+        digest = hashlib.md5(b64.encode("ascii")).hexdigest()
+        rel = seen.get(digest)
+        if rel is None:
+            try:
+                raw = base64.b64decode(b64)
+            except Exception:
+                return match.group(0)
+            os.makedirs(abs_dir, exist_ok=True)
+            ext = {"jpeg": "jpg", "svg+xml": "svg"}.get(fmt, fmt)
+            name = f"fig_{next(counter):04d}.{ext}"
+            with open(os.path.join(abs_dir, name), "wb") as fh:
+                fh.write(raw)
+            rel = f"{rel_dir}/{name}"
+            seen[digest] = rel
+            made["n"] += 1
+        return rel
+
+    return pattern.sub(repl, html_doc), made["n"], rel_dir
+
+
 def main():
     args = parse_args()
 
@@ -455,6 +553,17 @@ def main():
     hap_blocks_df = read_tsv(args.hap_blocks)
     hap_tx_assoc_df = read_tsv(args.hap_tx_assoc)
     hap_mod_assoc_df = read_tsv(args.hap_mod_assoc)
+
+    # Per-example (per-row) figures for the genotype/SNP sections.
+    try:
+        import snp_report_figures
+        snp_galleries = snp_report_figures.build_snp_galleries(
+            snp_tx=snp_tx_assoc_df, snp_mod=snp_mod_assoc_df, snp_tx_mod=snp_tx_mod_assoc_df,
+            hap_tx=hap_tx_assoc_df, hap_mod=hap_mod_assoc_df,
+            figs_dir=args.snp_figs_dir, max_figs=args.max_snp_figs,
+        )
+    except Exception:
+        snp_galleries = {}
 
     overview_cards = []
     n_tx = len(class_df)
@@ -578,7 +687,7 @@ def main():
 
     hap_blocks_df_view = pd.DataFrame()
     if not hap_blocks_df.empty:
-        keep = [c for c in ["block_id", "context_key", "chrom", "n_snps", "support_reads", "complete_reads", "haplotypes"] if c in hap_blocks_df.columns]
+        keep = [c for c in ["block_id", "gene_names", "context_key", "chrom", "region", "span_bp", "n_snps", "snp_coords", "support_reads", "complete_reads", "haplotypes"] if c in hap_blocks_df.columns]
         hap_blocks_df_view = hap_blocks_df[keep].sort_values(["complete_reads", "n_snps"], ascending=False)
 
     hap_tx_df_view = pd.DataFrame()
@@ -711,7 +820,7 @@ def main():
     body.append(
         section(
             "SNP to Transcript Associations",
-            df_to_html(snp_tx_df_view, max_rows=args.top_genes) if not snp_tx_df_view.empty else "<p class='muted'>No SNP to transcript associations available.</p>",
+            (df_to_html(snp_tx_df_view, max_rows=args.top_genes) if not snp_tx_df_view.empty else "<p class='muted'>No SNP to transcript associations available.</p>") + snp_galleries.get("snp_tx", ""),
             intro="Associations between segregating SNP alleles and transcript-partition usage.",
             definitions=definitions_html(column_definitions(list(snp_tx_df_view.columns)), summary="Column definitions") if not snp_tx_df_view.empty else "",
         )
@@ -719,7 +828,7 @@ def main():
     body.append(
         section(
             "SNP to Epitranscriptome Associations",
-            df_to_html(snp_mod_df_view, max_rows=args.top_genes) if not snp_mod_df_view.empty else "<p class='muted'>No SNP to epitranscriptome associations available.</p>",
+            (df_to_html(snp_mod_df_view, max_rows=args.top_genes) if not snp_mod_df_view.empty else "<p class='muted'>No SNP to epitranscriptome associations available.</p>") + snp_galleries.get("snp_mod", ""),
             intro="Associations between segregating SNP alleles and target modification states on the same molecules.",
             definitions=definitions_html(column_definitions(list(snp_mod_df_view.columns)), summary="Column definitions") if not snp_mod_df_view.empty else "",
         )
@@ -727,7 +836,7 @@ def main():
     body.append(
         section(
             "SNP Transcript Epitranscriptome Dependency",
-            df_to_html(joint_df_view, max_rows=args.top_genes) if not joint_df_view.empty else "<p class='muted'>No joint SNP-transcript-epitranscriptome dependency results available.</p>",
+            (df_to_html(joint_df_view, max_rows=args.top_genes) if not joint_df_view.empty else "<p class='muted'>No joint SNP-transcript-epitranscriptome dependency results available.</p>") + snp_galleries.get("snp_tx_mod", ""),
             intro="Transcript-conditioned SNP/mod tests that distinguish direct epitranscriptome effects from transcript-composition shifts.",
             definitions=definitions_html(column_definitions(list(joint_df_view.columns)), summary="Column definitions") if not joint_df_view.empty else "",
         )
@@ -746,7 +855,7 @@ def main():
         hap_sections.append(
             subsection(
                 "Haplotype to Transcript",
-                df_to_html(hap_tx_df_view, max_rows=args.top_genes),
+                df_to_html(hap_tx_df_view, max_rows=args.top_genes) + snp_galleries.get("hap_tx", ""),
                 definitions=definitions_html(column_definitions(list(hap_tx_df_view.columns)), summary="Column definitions"),
             )
         )
@@ -754,7 +863,7 @@ def main():
         hap_sections.append(
             subsection(
                 "Haplotype to Epitranscriptome",
-                df_to_html(hap_mod_df_view, max_rows=args.top_genes),
+                df_to_html(hap_mod_df_view, max_rows=args.top_genes) + snp_galleries.get("hap_mod", ""),
                 definitions=definitions_html(column_definitions(list(hap_mod_df_view.columns)), summary="Column definitions"),
             )
         )
@@ -987,6 +1096,47 @@ def main():
         min-width: 620px;
       }}
     }}
+    #img-lightbox {{
+      position: fixed;
+      inset: 0;
+      z-index: 1000;
+      display: none;
+      align-items: center;
+      justify-content: center;
+      background: rgba(20, 14, 8, 0.88);
+      padding: 28px;
+    }}
+    #img-lightbox.open {{ display: flex; }}
+    #img-lightbox img {{
+      max-width: 95vw;
+      max-height: 88vh;
+      width: auto;
+      height: auto;
+      border-radius: 10px;
+      border: 1px solid var(--line);
+      box-shadow: 0 18px 60px rgba(0, 0, 0, 0.5);
+      background: white;
+    }}
+    #img-lightbox .lightbox-bar {{
+      position: fixed;
+      top: 14px;
+      right: 18px;
+      display: flex;
+      gap: 12px;
+      align-items: center;
+    }}
+    #img-lightbox .lightbox-bar a,
+    #img-lightbox .lightbox-bar button {{
+      color: #fdf6ec;
+      background: rgba(0, 0, 0, 0.45);
+      border: 1px solid rgba(255, 255, 255, 0.4);
+      border-radius: 999px;
+      padding: 6px 14px;
+      font: inherit;
+      font-size: 0.92rem;
+      cursor: pointer;
+      text-decoration: none;
+    }}
   </style>
 </head>
 <body>
@@ -997,13 +1147,52 @@ def main():
     </header>
     {''.join(body)}
   </main>
+  <div id="img-lightbox" aria-hidden="true" role="dialog" aria-label="Enlarged figure">
+    <div class="lightbox-bar">
+      <a id="lightbox-open" href="#" target="_blank" rel="noopener noreferrer">Open in new tab ↗</a>
+      <button type="button" id="lightbox-close" aria-label="Close">Close ✕</button>
+    </div>
+    <img id="lightbox-img" src="" alt="Enlarged figure" />
+  </div>
+  <script>
+  (function () {{
+    var lb = document.getElementById('img-lightbox');
+    var img = document.getElementById('lightbox-img');
+    var openLink = document.getElementById('lightbox-open');
+    function show(src) {{
+      img.setAttribute('src', src);
+      openLink.setAttribute('href', src);
+      lb.classList.add('open');
+      lb.setAttribute('aria-hidden', 'false');
+    }}
+    function hide() {{
+      lb.classList.remove('open');
+      lb.setAttribute('aria-hidden', 'true');
+      img.removeAttribute('src');
+    }}
+    document.addEventListener('click', function (e) {{
+      var link = e.target && e.target.closest ? e.target.closest('a.image-link') : null;
+      if (link) {{
+        if (e.button !== 0 || e.metaKey || e.ctrlKey || e.shiftKey || e.altKey) return;
+        e.preventDefault();
+        var im = link.querySelector('img');
+        show(im ? im.getAttribute('src') : link.getAttribute('href'));
+        return;
+      }}
+      if (e.target === lb || (e.target && e.target.id === 'lightbox-close')) hide();
+    }});
+    document.addEventListener('keydown', function (e) {{ if (e.key === 'Escape') hide(); }});
+  }})();
+  </script>
 </body>
 </html>
 """
 
     os.makedirs(os.path.dirname(args.out_html) or ".", exist_ok=True)
+    html_doc, n_imgs, rel_dir = externalize_data_uris(html_doc, args.out_html)
     with open(args.out_html, "w") as out:
         out.write(html_doc)
+    print(f"[report] externalized {n_imgs} image(s) into {rel_dir}/", file=sys.stderr)
 
 
 if __name__ == "__main__":

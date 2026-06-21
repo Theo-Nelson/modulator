@@ -5,11 +5,19 @@ import os
 
 import pandas as pd
 
+from genotype_utils import context_key_from_row, context_key_from_snp_row
+
 
 def parse_args():
     ap = argparse.ArgumentParser(description="Build unique candidate mod sites from aggregated modulator outputs.")
     ap.add_argument("--zn-long", default="", help="ZN filtered long TSV")
     ap.add_argument("--zt-long", default="", help="ZT filtered long TSV fallback")
+    ap.add_argument("--candidate-snps", default="", help=(
+        "Candidate SNP TSV. When given, keep only mod sites whose context_key "
+        "(metagene/gene/chrom) matches a candidate SNP's context_key -- i.e. sites that can "
+        "actually pair with a SNP on a shared read in snp_mod_assoc / snp_tx_mod_dependency / "
+        "haplotype_mod_assoc. Drops genome-wide mod sites with no linked SNP (lossless for "
+        "those outputs) and keeps the per-read mod table tractable on deep data."))
     ap.add_argument("--out-tsv", required=True, help="Output candidate mod site TSV")
     ap.add_argument("--out-bed", required=True, help="Output BED for modkit extract include-bed")
     ap.add_argument("--min-total-cov", type=int, default=1, help="Minimum aggregated coverage to keep a site")
@@ -61,6 +69,23 @@ def main():
         out = grouped[["mod_site_id"] + cols + ["total_cov", "total_nmod", "supporting_rows", "n_samples"]].sort_values(
             ["chrom", "start0", "end0", "strand", "mod_code"]
         )
+
+    # Keep only SNP-linked mod sites: downstream pairing is by equal context_key on a shared
+    # read, so a mod site whose context has no candidate SNP can never appear in
+    # snp_mod_assoc / snp_tx_mod_dependency / haplotype_mod_assoc. Dropping those is lossless
+    # for those outputs and keeps the per-read mod-call table at SNP scale.
+    if args.candidate_snps and os.path.exists(args.candidate_snps) and os.path.getsize(args.candidate_snps) and not out.empty:
+        snps = load_input(args.candidate_snps)
+        if not snps.empty:
+            snp_keys = {context_key_from_snp_row(r) for r in snps.to_dict("records")}
+            before = len(out)
+            mod_keys = out.apply(context_key_from_row, axis=1)
+            out = out[mod_keys.isin(snp_keys)].copy()
+            print(
+                f"[info] mod-site SNP-link filter: {before} -> {len(out)} sites "
+                f"({len(snp_keys)} SNP context_keys)",
+                flush=True,
+            )
 
     os.makedirs(os.path.dirname(args.out_tsv) or ".", exist_ok=True)
     out.to_csv(args.out_tsv, sep="\t", index=False)
