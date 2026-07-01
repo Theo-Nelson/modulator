@@ -2,14 +2,14 @@
 
 # modulator
 
-> Isoform-resolved RNA-modification analysis for long-read direct-RNA sequencing.
+> Transcript-fragment-resolved RNA-modification analysis for long-read direct-RNA sequencing.
 
 **modulator** takes aligned long-read (e.g. ONT direct-RNA) BAMs that carry
 base-modification tags and, in a single command:
 
-1. **assembles** fragment isoforms and partitions reads per isoform (`ZN`/`ZT` tags) — here *fragment* means the fragmented / partial transcript a long read represents, not an assumed full-length molecule;
-2. **calls modifications per isoform** (via [`modkit`](https://github.com/nanoporetech/modkit) pileup, partitioned by isoform);
-3. finds sites that are **differentially modified _between_ isoforms** of the same gene, and **classifies _why_** (alternative polyadenylation, intronic polyadenylation, EJC, splicing, …), anchored to each gene's longest-3′UTR isoform;
+1. **assembles** fragment transcripts and partitions reads per transcript (`ZN`/`ZT` tags) — here *fragment* means the fragmented / partial transcript a long read represents, not an assumed full-length molecule;
+2. **calls modifications per transcript** (via [`modkit`](https://github.com/nanoporetech/modkit) pileup, partitioned by transcript);
+3. finds sites that are **differentially modified _between_ transcripts** of the same gene, and **classifies _why_** (alternative polyadenylation, intronic polyadenylation, EJC, splicing, …), anchored to each gene's longest-3′UTR transcript;
 4. optionally adds a **genotype layer** — read-backed SNPs, SNP-modification and SNP-fragment associations, fragment-conditioned dependency tests, and local haplotype blocks;
 5. writes a single self-contained **HTML report**.
 
@@ -92,12 +92,12 @@ Nine stages, run in order and individually **resumable** (`--resume`):
 
 | # | stage | what it does | headline output |
 |---|-------|--------------|-----------------|
-| 1 | `assemble` | build isoform models from intron chains; tag reads with metagene-aware `ZN` partitions | `<prefix>.gtf`, `<prefix>_partition_map.tsv` |
+| 1 | `assemble` | build transcript models from intron chains; tag reads with metagene-aware `ZN` partitions | `<prefix>.gtf`, `<prefix>_partition_map.tsv` |
 | 2 | `read_stats` | per-sample read-retention funnel + length summaries | `<prefix>_per_sample_read_stats.tsv` |
 | 3 | `multigene_filter` | resolve/keep reads over overlapping genes -> cleaned tagged BAMs | `zt_filtered/*.bam` |
-| 4 | `modkit_zn` | `modkit pileup` partitioned by `ZN` (per-isoform modification calls) | `modkit_zn/<sample>/*.bed` |
-| 5 | `aggregate_zn` | merge into per-site × isoform × sample stoichiometry | `<prefix>_FILTERED_sites_long.tsv` |
-| 6 | `test_diffs` | between-isoform differential-modification test per site | `<prefix>__ZN_site_diff_results.tsv` |
+| 4 | `modkit_zn` | `modkit pileup` partitioned by `ZN` (per-transcript modification calls) | `modkit_zn/<sample>/*.bed` |
+| 5 | `aggregate_zn` | merge into per-site × transcript × sample stoichiometry | `<prefix>_FILTERED_sites_long.tsv` |
+| 6 | `test_diffs` | between-transcript differential-modification test per site | `<prefix>__ZN_site_diff_results.tsv` |
 | 7 | `classify_diffs` | assign a structural category to each significant site (+ figures) | `<prefix>__ZN_site_classified.tsv` |
 | 8 | `genotype` *(optional)* | SNP discovery, SNP-mod/fragment association, dependency, haplotypes | `genotype/<prefix>_*.tsv` |
 | 9 | `report` | self-contained HTML report | `report/<prefix>_report.html` |
@@ -110,12 +110,12 @@ Where to look first (all under `results/`):
   per-modification structural-category graphs, per-sample stoichiometry, and the
   genotype/SNP tables. Images are written to a sidecar `<prefix>_report_files/`
   folder so the report stays small and opens in any browser.
-- **`aggregate_zn/<prefix>_FILTERED_sites_long.tsv`** — per-site, per-isoform,
+- **`aggregate_zn/<prefix>_FILTERED_sites_long.tsv`** — per-site, per-transcript,
   per-sample modification stoichiometry (the quantitative core).
 - **`test_diffs/<prefix>__ZN_site_diff_results.tsv`** — sites differentially
-  modified between isoforms (effect size + BH-FDR).
+  modified between transcripts (effect size + BH-FDR).
 - **`test_diffs/<prefix>__ZN_site_classified.tsv`** (+ `__figs_by_category_arch/`)
-  — the structural reason each site differs, with isoform architecture maps.
+  — the structural reason each site differs, with transcript architecture maps.
 - **`genotype/<prefix>_*.tsv`** — SNPs, SNP-mod / SNP-fragment / dependency,
   and haplotype blocks (when `genotype.enable=true`).
 
