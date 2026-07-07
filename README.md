@@ -10,11 +10,10 @@ base-modification tags and, in a single command:
 1. **assembles** fragment transcripts and partitions reads per transcript (`ZN`/`ZT` tags) — here *fragment* means the fragmented / partial transcript a long read represents, not an assumed full-length molecule;
 2. **calls modifications per transcript** (via [`modkit`](https://github.com/nanoporetech/modkit) pileup, partitioned by transcript);
 3. finds sites that are **differentially modified _between_ transcripts** of the same gene, and **classifies _why_** (alternative polyadenylation, intronic polyadenylation, EJC, splicing, …), anchored to each gene's longest-3′UTR transcript;
-4. optionally adds a **genotype layer** — read-backed SNPs, SNP-modification and SNP-fragment associations, fragment-conditioned dependency tests, and local haplotype blocks;
+4. connects to **genotype** — read-backed SNPs, SNP-modification and SNP-fragment associations, fragment-conditioned dependency tests, and local haplotype blocks;
 5. writes a single self-contained **HTML report**.
 
-The supported interface is the `modulator` Python CLI (one command, no nested
-Snakemake config). The legacy `workflow/` Snakemake rules remain for reference.
+The supported interface is the `modulator` Python CLI.
 
 **Full parameter, output, and HPC reference -> [ADVANCED_USAGE.md](ADVANCED_USAGE.md)**
 
@@ -42,7 +41,7 @@ cd modulator
 # 3. create + activate the environment
 micromamba env create -n modulator -f workflow/envs/modulator.yaml
 micromamba activate modulator
-# 4. install the CLI (editable)
+# 4. install the CLI 
 python -m pip install -e .
 ```
 
@@ -50,7 +49,7 @@ This provides the `modulator` command (Python ≥ 3.11; bundles `modkit` 0.5.0,
 `samtools`, `pysam`, `pandas`, `scipy`, `matplotlib`). No-install fallback:
 `PYTHONPATH=src python -m modulator …`.
 
-Quick code-path sanity check (no data needed):
+Quick code-path check:
 
 ```bash
 python workflow/scripts/regression_smoke_checks.py
@@ -63,7 +62,7 @@ python workflow/scripts/genotype_regression_smoke_checks.py
   (e.g. `minimap2 -ax splice -uf` for ONT dRNA), one per sample.
 - **Modification tags**: `MM`/`ML` tags from a modification-aware basecaller
   (e.g. Dorado). modulator does not call modifications from the signal — it
-  summarizes the tags already in the reads.
+  summarizes the modification tags already present in the reads.
 - **Reference**: matching genome FASTA (+ `.fai`) and a GTF annotation.
 
 ## Quick start
