@@ -248,6 +248,10 @@ def parse_extracted_calls(sample, calls_tsv, lookup, shard_dir, chunk_rows, verb
                 header = line.split("\t")
                 continue
             fields = line.split("\t")
+            if fields == header:
+                # per-chromosome extracts are concatenated into one per-sample file, so the modkit
+                # header line reappears at each chunk boundary -- skip those repeats.
+                continue
             if len(fields) != len(header):
                 continue
             rec = dict(zip(header, fields))
