@@ -4,6 +4,8 @@ import argparse
 from collections import defaultdict
 import os
 import re
+import shutil
+import subprocess
 import sys
 
 import pandas as pd
@@ -28,7 +30,12 @@ def parse_args():
     ap.add_argument("--max-alt-frac", type=float, default=0.90)
     ap.add_argument("--min-baseq", type=int, default=20)
     ap.add_argument("--min-mapq", type=int, default=10)
-    ap.add_argument("--jobs", type=int, default=1, help="Number of BAMs to scan in parallel")
+    ap.add_argument("--jobs", type=int, default=1, help="Number of scan shards to run in parallel")
+    ap.add_argument("--window-bp", type=int, default=1_000_000,
+                    help="Split each chromosome's exon intervals into shards spanning at most this "
+                         "many bp, so parallelism isn't capped at one shard per chromosome (R2).")
+    ap.add_argument("--threads", type=int, default=4,
+                    help="samtools threads for the one-time per-BAM prefilter (R3).")
     ap.add_argument("--primary-only", action="store_true")
     ap.add_argument("--verbose", action="store_true")
     return ap.parse_args()
@@ -112,38 +119,71 @@ def init_count_record():
     }
 
 
-def make_read_callback(primary_only: bool, min_mapq: int):
-    if (not primary_only) and int(min_mapq) <= 0:
-        return "all"
+def iter_window_shards(merged_intervals, window_bp):
+    """R2: split each chrom's (sorted, merged, non-overlapping) intervals into shards spanning at
+    most ~window_bp, keeping every interval whole. Because no interval is split, positions are
+    partitioned across shards (each position lands in exactly one shard), so the cross-sample site
+    reduce merges byte-identically to a single per-chromosome scan. Yields (chrom, [intervals])."""
+    window_bp = max(1, int(window_bp))
+    for chrom, ivs in merged_intervals.items():
+        cur = []
+        cur_start = None
+        for s, e in ivs:
+            if cur and (e - cur_start) > window_bp:
+                yield chrom, cur
+                cur = []
+                cur_start = None
+            if cur_start is None:
+                cur_start = s
+            cur.append((s, e))
+        if cur:
+            yield chrom, cur
 
-    def callback(read):
-        if read.is_unmapped:
-            return False
-        if primary_only and (read.is_secondary or read.is_supplementary):
-            return False
-        if read.mapping_quality < int(min_mapq):
-            return False
-        return True
 
-    return callback
+def chroms_with_reads(bam_path):
+    """R4: chromosomes with >=1 mapped read (idxstats col 3). Returns None on failure (never skip)."""
+    try:
+        out = set()
+        for line in pysam.idxstats(bam_path).splitlines():
+            f = line.split("\t")
+            if len(f) >= 3 and f[0] != "*" and int(f[2]) > 0:
+                out.add(f[0])
+        return out
+    except Exception:
+        return None
+
+
+def prefilter_bam(sample, in_bam, out_bam, exclude_flag, min_mapq, threads):
+    """R3: one-time native prefilter so the per-shard count_coverage can run callback-free.
+    `samtools view -F exclude_flag -q min_mapq` reproduces the old per-read callback EXACTLY:
+    exclude_flag = UNMAP(0x4) [+ SECONDARY(0x100)|SUPPLEMENTARY(0x800) when primary_only], plus
+    mapq>=min_mapq; QCFAIL/DUP are kept (the old callback never tested them). count_coverage then
+    counts every remaining read (read_callback='nofilter'), so base counts stay byte-identical while
+    the per-read Python callback (the hot path) is eliminated. Returns (sample, out_bam, chroms)."""
+    threads = max(1, int(threads))
+    subprocess.run(
+        ["samtools", "view", "-b", "-F", str(int(exclude_flag)), "-q", str(max(0, int(min_mapq))),
+         "-@", str(threads), "-o", out_bam, in_bam],
+        check=True,
+    )
+    subprocess.run(["samtools", "index", "-@", str(threads), out_bam], check=True)
+    return sample, out_bam, chroms_with_reads(out_bam)
 
 
 def scan_bam_counts(
+    sample: str,
     bam: str,
     reference_fa: str,
     merged_intervals,
     min_baseq: int,
-    min_mapq: int,
-    primary_only: bool,
+    count_mode,
     verbose: bool = False,
 ):
-    sample = sample_name_from_bam(bam)
     if verbose:
         print(f"[info] SNP scan start: {sample}", file=sys.stderr, flush=True)
 
     sample_counts = {}
     fasta = pysam.FastaFile(reference_fa)
-    callback = make_read_callback(primary_only, min_mapq)
     covered_positions = 0
     try:
         with pysam.AlignmentFile(bam, "rb") as fh:
@@ -155,7 +195,7 @@ def scan_bam_counts(
                         start1 - 1,
                         end1,
                         quality_threshold=int(min_baseq),
-                        read_callback=callback,
+                        read_callback=count_mode,
                     )
                     for offset, ref in enumerate(ref_seq):
                         if ref not in BASE_INDEX:
@@ -181,28 +221,67 @@ def main():
     args = parse_args()
     exon_records, merged_intervals = load_gtf_exons(args.gtf)
 
-    # Shard per (BAM x chromosome) for genome-level parallelism instead of capping
-    # at the sample count. The cross-sample reduce below keys by site, so per-shard
-    # partial counts merge identically.
-    worker_args = [
-        (bam, args.reference_fa, {chrom: ivs}, args.min_baseq, args.min_mapq, args.primary_only, args.verbose)
-        for bam in args.bams
-        for chrom, ivs in merged_intervals.items()
-    ]
-    jobs = max(1, min(int(args.jobs), len(worker_args)))
+    # R3: reproduce the old per-read callback with a one-time native prefilter, so each shard's
+    # count_coverage runs callback-free ('nofilter'). Mode A (primary_only or min_mapq>0) prefilters;
+    # the degenerate Mode B (no primary_only, no mapq) keeps pysam's default 'all' filter on the raw
+    # BAM -- exactly what make_read_callback returned as "all" before this refactor.
+    use_prefilter = bool(args.primary_only) or int(args.min_mapq) > 0
+    exclude_flag = 0x4 | (0x900 if args.primary_only else 0)  # UNMAP + (SECONDARY|SUPPLEMENTARY)
+    tmp_dir = os.path.join(os.path.dirname(args.out_tsv) or ".", "._snp_prefilter")
 
-    results = []
-    if jobs == 1:
-        for item in worker_args:
-            results.append(scan_bam_counts(*item))
-    else:
-        results = run_process_jobs(
-            scan_bam_counts,
-            worker_args,
-            jobs,
-            verbose=args.verbose,
-            label="discover_candidate_snps",
-        )
+    bam_specs = []  # (sample, scan_bam_path, chroms_with_reads_or_None, count_mode)
+    try:
+        if use_prefilter:
+            os.makedirs(tmp_dir, exist_ok=True)
+            nb = max(1, len(args.bams))
+            pf_threads = max(1, int(args.threads) // nb)
+            pf_tasks = [
+                (
+                    sample_name_from_bam(b),
+                    b,
+                    os.path.join(tmp_dir, f"{sample_name_from_bam(b)}.prefiltered.bam"),
+                    exclude_flag,
+                    int(args.min_mapq),
+                    pf_threads,
+                )
+                for b in args.bams
+            ]
+            pf_jobs = max(1, min(len(pf_tasks), int(args.jobs)))
+            pf_results = run_process_jobs(
+                prefilter_bam, pf_tasks, pf_jobs, verbose=args.verbose, label="prefilter_bam"
+            )
+            for sample, out_bam, chroms in pf_results:
+                bam_specs.append((sample, out_bam, chroms, "nofilter"))
+        else:
+            for b in args.bams:
+                sample = sample_name_from_bam(b)
+                bam_specs.append((sample, b, chroms_with_reads(b), "all"))
+
+        # R2 + R4: shard by genomic window, skipping chroms with no reads for a given BAM. The reduce
+        # below keys by site, so per-shard partial counts merge identically to a per-(sample x chrom) scan.
+        worker_args = []
+        for sample, scan_bam, chroms, count_mode in bam_specs:
+            for chrom, ivs in iter_window_shards(merged_intervals, args.window_bp):
+                if chroms is not None and chrom not in chroms:
+                    continue
+                worker_args.append(
+                    (sample, scan_bam, args.reference_fa, {chrom: ivs}, args.min_baseq, count_mode, args.verbose)
+                )
+        jobs = max(1, min(int(args.jobs), len(worker_args))) if worker_args else 1
+
+        if jobs == 1:
+            results = [scan_bam_counts(*item) for item in worker_args]
+        else:
+            results = run_process_jobs(
+                scan_bam_counts,
+                worker_args,
+                jobs,
+                verbose=args.verbose,
+                label="discover_candidate_snps",
+            )
+    finally:
+        if use_prefilter:
+            shutil.rmtree(tmp_dir, ignore_errors=True)
 
     site_counts = {}
     for sample, sample_counts in results:
@@ -277,7 +356,10 @@ def main():
             "ref_frac", "alt_count", "second_alt_count", "alt_frac", "site_class", "samples_with_alt", "gene_ids",
             "gene_names", "metagene_indices", "zt_labels", "sample_base_counts"
         ])
-    df.to_csv(args.out_tsv, sep="\t", index=False)
+    os.makedirs(os.path.dirname(args.out_tsv) or ".", exist_ok=True)
+    _tmp = args.out_tsv + ".tmp"                # atomic write (see build_read_assignment_table)
+    df.to_csv(_tmp, sep="\t", index=False)
+    os.replace(_tmp, args.out_tsv)
 
 
 if __name__ == "__main__":

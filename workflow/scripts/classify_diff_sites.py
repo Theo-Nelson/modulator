@@ -242,6 +242,66 @@ def is_proximal(tes_a, tes_b, strand):
     return (tes_a < tes_b) if strand == '+' else (tes_a > tes_b)
 
 
+# --- Orthogonal stoichiometry axes layered on top of the structural `category` ---
+# The primary `category` is the structural MECE label. These add, in separate columns, the
+# stoichiometry RELATIONSHIP the structural label does not encode: which fragmentform is more
+# modified (direction), how large the gap is (tier), and whether the favored form is itself
+# high- or low-stoichiometry (level). This answers "split by high/low stoichiometry" without
+# multiplying the primary label.
+STRUCTURAL_OF = {
+    'IPA_UNIQUE': 'INTRONIC_POLYADENYLATION', 'IPA_SHARED_EJC': 'INTRONIC_POLYADENYLATION',
+    'SPLICING_EJC': 'EJC_SPLICING', 'SPLICED_EXON_UNIQUE': 'CASSETTE_EXON',
+    'LAST_EXON_PROXIMAL_APA_FAVORED': 'TANDEM_APA', 'LAST_EXON_DISTAL_APA_FAVORED': 'TANDEM_APA',
+    'LAST_EXON_DISTAL_ONLY': 'TANDEM_APA', 'ALTERNATIVE_LAST_EXON': 'ALTERNATIVE_LAST_EXON',
+    'INTERGENIC_TERMINAL_EXON': 'INTERGENIC_TERMINAL_EXON',
+    'SHARED_TERMINAL_EXON': 'SHARED_TERMINAL_EXON', 'SHARED_INTERNAL_EXON': 'SHARED_INTERNAL_EXON',
+    'UNEXPLAINED_SHARED': 'UNEXPLAINED', 'HI_INTRONIC_ARTIFACT': 'ARTIFACT', 'UNCLASSIFIED': 'UNCLASSIFIED',
+}
+
+
+def stoich_tier(delta):
+    d = abs(delta)
+    return ('T1_MARGINAL' if d < 0.25 else 'T2_MODERATE' if d < 0.50
+            else 'T3_STRONG' if d < 0.75 else 'T4_NEAR_BINARY')
+
+
+def hi_stoich_level(f):
+    """Absolute modification level of the favored (higher) fragmentform -- the 'is the alt last
+    exon itself high- or low-stoichiometry' axis."""
+    return 'HI_HYPER' if f >= 0.66 else 'HI_INTERMED' if f >= 0.33 else 'HI_HYPO'
+
+
+def stoich_direction(gene, hiZN, loZN, iso, cat, tes_tol):
+    """(direction, context-aware alias). Direction is the universal 3'UTR-length polarity of the
+    MORE-modified fragmentform; the alias renames it per structural mechanism."""
+    ihi = iso.get((gene, hiZN)); ilo = iso.get((gene, loZN))
+    if ihi is None or ilo is None:
+        return '', ''
+    ht, lt = ihi['tes'], ilo['tes']
+    if ht is None or lt is None or abs(ht - lt) <= tes_tol:
+        base = 'CO_TERMINAL'
+    elif is_proximal(ht, lt, ihi['strand']):
+        base = 'PROXIMAL_HIGHER'          # shorter-3'UTR fragmentform carries more modification
+    else:
+        base = 'DISTAL_HIGHER'            # longer-3'UTR fragmentform carries more modification
+    if cat in ('IPA_UNIQUE', 'IPA_SHARED_EJC'):
+        ctx = 'IPA_FORM_HIGHER' if ihi['arch'] == 'IPA' else 'FULLLENGTH_HIGHER'
+    elif cat == 'SPLICED_EXON_UNIQUE':
+        ctx = 'INCLUDED_ISOFORM_HIGHER'   # hi structurally must contain the base
+    elif cat == 'SPLICING_EJC':
+        ctx = 'EJC_REMOVED_HIGHER'
+    else:
+        ctx = base
+    return base, ctx
+
+
+def make_class_key(structural_category, stoich_direction):
+    """The single primary classification key = mechanism + which fragmentform is more modified,
+    e.g. TANDEM_APA__PROXIMAL_HIGHER. This REPLACES the old fused 14-label `category`. Rows with no
+    direction (UNCLASSIFIED, or missing isoform models) key on structural_category alone."""
+    return f"{structural_category}__{stoich_direction}" if stoich_direction else structural_category
+
+
 def same_last_exon_start(th, tl, strand, inside_tol):
     a = th[0] if strand == '+' else th[1]
     b = tl[0] if strand == '+' else tl[1]
@@ -359,7 +419,9 @@ def parse_args():
     ap.add_argument("--min-cov", type=int, default=0,
                     help="extra per-isoform Ncov floor on the JSON entries (the diff "
                          "table is already coverage-filtered by test_diffs --min-cov). Default 0")
-    ap.add_argument("--tes-tol", type=int, default=200)
+    ap.add_argument("--tes-tol", type=int, default=25,
+                    help="TES match tolerance (bp); matches assembler.tes_match_tol. Default 25 "
+                         "(was 200, which lumped sub-200bp tandem-APA into SHARED_TERMINAL_EXON).")
     ap.add_argument("--inside-tol", type=int, default=50)
     ap.add_argument("--ejc-nt", type=int, default=150)
     ap.add_argument("--intergenic-gap", type=int, default=1000,
@@ -405,7 +467,7 @@ def render_category_figures(fig_records, zn_long_path, figs_dir, per_category,
         return {}
     by_cat = defaultdict(list)
     for rec in fig_records:
-        by_cat[rec['category']].append(rec)
+        by_cat[rec['class_key']].append(rec)
 
     # Headless backend MUST be set before the sibling imports pyplot.
     try:
@@ -516,7 +578,7 @@ def plot_locus_arch(rec, iso, genes, out_png):
     from matplotlib.patches import Rectangle
 
     gene = rec['gene']; chrom = rec['chrom']; pos = int(rec['start0'])
-    strand = rec['strand']; cat = rec['category']; mod = rec['mod']
+    strand = rec['strand']; cat = rec['class_key']; mod = rec['mod']
     hiZN = str(rec.get('hiZN', '')); loZN = str(rec.get('loZN', ''))
     anchorZN = str(rec.get('anchorZN', '') or '')
     eff = float(rec['effect'])
@@ -619,7 +681,7 @@ def render_arch_figures(fig_records, iso, genes, figs_dir, per_category, verbose
         return {}
     by_cat = defaultdict(list)
     for rec in fig_records:
-        by_cat[rec['category']].append(rec)
+        by_cat[rec['class_key']].append(rec)
     made = {}
     for cat, recs in by_cat.items():
         recs = sorted(recs, key=lambda d: d['effect'], reverse=True)[:per_category]
@@ -664,9 +726,11 @@ def main():
 
     out_cols = [
         'gene_name', 'mod_code', 'chrom', 'start0', 'end0', 'strand',
-        'category', 'n_tx_tested', 'effect_max_abs_frac_diff', 'p_adj_bh',
+        'class_key', 'n_tx_tested', 'effect_max_abs_frac_diff', 'p_adj_bh',
         'hi_ZN', 'hi_arch', 'hi_frac', 'lo_ZN', 'lo_arch', 'lo_frac', 'anchor_ZN',
         'status_hi', 'status_lo', 'status_anchor', 'jd_hi', 'jd_lo',
+        'structural_category', 'stoich_direction', 'stoich_direction_ctx',
+        'stoich_tier', 'hi_stoich_level',
     ]
     rows = []
     fig_records = []
@@ -683,7 +747,12 @@ def main():
             continue
         if not (padj <= args.fdr and eff >= args.min_effect):
             continue
-        gene = r['gene_name']; pos = int(r['start0']); strand = r['strand']
+        # Keep pos = 0-based bedMethyl start for the OUTPUT columns / figures (unchanged
+        # semantics). Use cpos = start0+1 (== end0), the base's 1-based coordinate, ONLY for
+        # comparison against the 1-based GTF exon coords in classify()/status_in()/junctions --
+        # else every site is tested 1 bp upstream of its true base and boundary/EJC calls are
+        # systematically off by one.
+        gene = r['gene_name']; pos = int(r['start0']); cpos = pos + 1; strand = r['strand']
         n_considered += 1
 
         per_tx = json.loads(r.get('per_transcript_json', '[]'))
@@ -694,23 +763,33 @@ def main():
             counts['UNCLASSIFIED'] += 1
             rows.append([gene, mod, r['chrom'], pos, r.get('end0', pos + 1), strand,
                          'UNCLASSIFIED', r.get('n_tx_tested', ''), f"{eff:.4f}", f"{padj:.3e}",
-                         '', '', '', '', '', '', '', '', '', '', '', ''])
+                         '', '', '', '', '', '', '', '', '', '', '', '',
+                         'UNCLASSIFIED', '', '', '', ''])
             continue
         hi = max(cov_tx, key=lambda t: t['frac'])
         lo = min(cov_tx, key=lambda t: t['frac'])
         hiZN = str(hi['ZN']); loZN = str(lo['ZN'])
         anchorZN = anchor_of(gene, genes[gene], iso)
         if anchorZN is None:
-            counts['UNCLASSIFIED'] += 1
             cat, info = 'UNCLASSIFIED', dict(status_hi='', status_lo='', status_anchor='',
                                              jd_hi='', jd_lo='')
         else:
-            cat, info = classify(gene, pos, hiZN, loZN, anchorZN, iso,
+            cat, info = classify(gene, cpos, hiZN, loZN, anchorZN, iso,
                                   tes_tol=args.tes_tol, inside_tol=args.inside_tol,
                                   ejc_nt=args.ejc_nt, intergenic_gap=args.intergenic_gap)
-        counts[cat] += 1
+        # The primary label is now the mechanism x direction key (the fused 14-label `cat` is used
+        # only internally to derive the structural mechanism and to key the figure subdirs).
+        struct = STRUCTURAL_OF.get(cat, cat)
+        if anchorZN is not None and (gene, hiZN) in iso and (gene, loZN) in iso:
+            sdir, sctx = stoich_direction(gene, hiZN, loZN, iso, cat, args.tes_tol)
+        else:
+            sdir = sctx = ''
+        stier = stoich_tier(hi['frac'] - lo['frac'])
+        hlvl = hi_stoich_level(hi['frac'])
+        class_key = make_class_key(struct, sdir)
+        counts[class_key] += 1
         fig_records.append({
-            'category': cat, 'gene': gene, 'mod': mod, 'chrom': r['chrom'],
+            'class_key': class_key, 'gene': gene, 'mod': mod, 'chrom': r['chrom'],
             'start0': pos, 'end0': int(r.get('end0', pos + 1)), 'strand': strand,
             'effect': eff, 'padj': padj, 'per_tx': per_tx,
             'hiZN': hiZN, 'loZN': loZN, 'anchorZN': anchorZN or '',
@@ -719,13 +798,14 @@ def main():
         jd_hi = info['jd_hi']; jd_lo = info['jd_lo']
         rows.append([
             gene, mod, r['chrom'], pos, r.get('end0', pos + 1), strand,
-            cat, r.get('n_tx_tested', ''), f"{eff:.4f}", f"{padj:.3e}",
+            class_key, r.get('n_tx_tested', ''), f"{eff:.4f}", f"{padj:.3e}",
             hiZN, iso[(gene, hiZN)]['arch'], f"{hi['frac']:.4f}",
             loZN, iso[(gene, loZN)]['arch'], f"{lo['frac']:.4f}",
             anchorZN or '',
             info['status_hi'], info['status_lo'], info['status_anchor'],
             jd_hi if jd_hi != '' and jd_hi < 10**9 else '',
             jd_lo if jd_lo != '' and jd_lo < 10**9 else '',
+            struct, sdir, sctx, stier, hlvl,
         ])
 
     rows.sort(key=lambda x: (x[6], x[0], x[3]))
@@ -747,13 +827,11 @@ def main():
     print(f"[ok] wrote {args.out_tsv}: {tot} classified sites "
           f"(mod={'/'.join(sorted(mods)) or 'ALL'}, FDR<={args.fdr}, effect>={args.min_effect})")
     if tot:
-        for cat in CATEGORY_ORDER:
-            n = counts.get(cat, 0)
+        # counts is keyed by the primary class_key (structural_category__stoich_direction);
+        # print largest first.
+        for key, n in sorted(counts.items(), key=lambda kv: -kv[1]):
             if n:
-                print(f"    {cat:<32} {n:>6}  ({100*n/tot:.1f}%)")
-        for cat, n in sorted(counts.items(), key=lambda kv: -kv[1]):
-            if cat not in CATEGORY_ORDER and n:
-                print(f"    {cat:<32} {n:>6}  ({100*n/tot:.1f}%)   [unlisted]")
+                print(f"    {key:<44} {n:>6}  ({100*n/tot:.1f}%)")
 
 
 if __name__ == '__main__':

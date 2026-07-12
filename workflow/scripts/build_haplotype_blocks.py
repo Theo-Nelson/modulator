@@ -7,7 +7,25 @@ import os
 
 import pandas as pd
 
-from genotype_utils import context_key_from_snp_row, safe_int
+from genotype_utils import context_key_from_snp_row, safe_int, tsv_header
+
+# Columns actually consumed (grouping/keys + per-SNP metadata + the ZT/ZG/ZN/ZM tags copied into
+# the molecules output). Loading only these -- with repeated string columns as categoricals --
+# avoids materializing all 21 object columns of the ~1.7 GB / 7.5M-row molecule_snps table.
+WANTED_COLS = [
+    "sample", "qname", "snp_id", "chrom", "pos1", "ref", "alt", "allele_class",
+    "observed_base", "gene_names", "gene_ids", "metagene_indices", "ZT", "ZG", "ZN", "ZM",
+]
+# Categoricals ONLY for columns that are never a sort key and never grouped/pivoted with a
+# behavior that depends on category order. chrom is EXCLUDED: it is part of the sort_values key,
+# and a categorical sorts by category codes (appearance order) rather than lexicographically,
+# which would change deterministic block numbering. allele_class stays object (it is .isin'd and
+# grouped). snp_id stays object (it is grouped and its .index becomes keep_snps).
+CATEGORICAL = {
+    "ref": "category", "alt": "category",
+    "gene_names": "category", "gene_ids": "category", "metagene_indices": "category",
+    "observed_base": "category", "ZT": "category", "ZG": "category", "ZN": "category", "ZM": "category",
+}
 
 
 def parse_args():
@@ -58,7 +76,10 @@ def block_context(chunk, snp_meta):
 
 def main():
     args = parse_args()
-    df = pd.read_csv(args.molecule_snps, sep="\t", low_memory=False)
+    header = tsv_header(args.molecule_snps)
+    usecols = [c for c in WANTED_COLS if c in header]
+    dtype = {c: t for c, t in CATEGORICAL.items() if c in usecols}
+    df = pd.read_csv(args.molecule_snps, sep="\t", usecols=usecols, dtype=dtype, low_memory=False)
     if df.empty:
         pd.DataFrame(columns=["block_id", "context_key", "gene_names", "chrom", "region", "start1", "end1", "span_bp", "n_snps", "snp_ids", "snp_coords", "support_reads", "complete_reads", "haplotypes"]).to_csv(
             args.out_blocks_tsv, sep="\t", index=False

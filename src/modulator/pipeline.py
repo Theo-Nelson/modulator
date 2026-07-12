@@ -9,6 +9,7 @@ from pathlib import Path
 from typing import Any
 
 from modulator.runtime import (
+    PeakRSSSampler,
     as_bool,
     ensure_mpl_config_dir,
     ensure_parent,
@@ -25,9 +26,11 @@ from modulator.runtime import (
 STAGE_ORDER = [
     "assemble",
     "read_stats",
+    "splice_junctions",
     "multigene_filter",
     "modkit_zn",
     "aggregate_zn",
+    "novel_loci",
     "test_diffs",
     "classify_diffs",
     "genotype",
@@ -113,6 +116,26 @@ class PipelinePaths:
         return self.assemble / f"{self.prefix}_partition_map.tsv"
 
     @property
+    def splice_junctions(self) -> Path:
+        return self.assemble / f"{self.prefix}_splice_junctions.tsv"
+
+    @property
+    def gene_splice_summary(self) -> Path:
+        return self.assemble / f"{self.prefix}_gene_splice_summary.tsv"
+
+    @property
+    def novel_loci_tsv(self) -> Path:
+        return self.assemble / f"{self.prefix}_novel_loci.tsv"
+
+    @property
+    def novel_fragmentforms(self) -> Path:
+        return self.assemble / f"{self.prefix}_novel_fragmentforms.tsv"
+
+    @property
+    def geno_mod_mod(self) -> Path:
+        return self.genotype / f"{self.prefix}_mod_mod_assoc.tsv"
+
+    @property
     def multigene_scrap_tx_counts(self) -> Path:
         return self.assemble / f"{self.prefix}_multigene_scrap_tx_counts.tsv"
 
@@ -163,6 +186,25 @@ class PipelinePaths:
     @property
     def geno_read_assignments(self) -> Path:
         return self.genotype / f"{self.prefix}_read_assignments.tsv"
+
+    @property
+    def geno_read_assignments_regions(self) -> Path:
+        """Read-assignment table restricted to reads overlapping candidate SNP/mod sites.
+        Deliberately named differently from the genome-wide table so the narrower scope is explicit."""
+        return self.genotype / f"{self.prefix}_read_assignments_candidate_regions.tsv"
+
+    @property
+    def geno_candidate_regions_bed(self) -> Path:
+        return self.genotype / f"{self.prefix}_candidate_regions.bed"
+
+    @property
+    def geno_subset_dir(self) -> Path:
+        return self.genotype / "subset_bams"
+
+    def geno_subset_bam(self, sample_bam: Path) -> Path:
+        # Keep the SAME basename so genotype_utils.sample_name_from_bam() derives an identical
+        # sample name from the subset BAM as from the original.
+        return self.geno_subset_dir / Path(sample_bam).name
 
     @property
     def geno_candidate_snps(self) -> Path:
@@ -242,6 +284,9 @@ class ModulatorPipeline:
         self.jobs = max(1, int(jobs))
         self.verbose = verbose
         self.resume = bool(resume)
+        # When set to a list (only during the genotype stage), run_python_script records
+        # each substep's peak RSS into it, so per-substep memory can be written out.
+        self._substep_mem: list[tuple[str, float]] | None = None
         self.prefix = str(config.get("prefix", "modulator_run"))
         self.paths = PipelinePaths(self.root, self.prefix)
         self.samples = self._discover_samples()
@@ -332,7 +377,9 @@ class ModulatorPipeline:
 
     def run_python_script(self, script_name: str, args: list[str], *, label: str) -> None:
         cmd = [sys.executable, str(self.script_path(script_name)), *args]
-        run_command(cmd, cwd=self.root, label=label, verbose=self.verbose)
+        sink = self._substep_mem
+        on_peak = (lambda lbl, gib: sink.append((lbl, gib))) if sink is not None else None
+        run_command(cmd, cwd=self.root, label=label, verbose=self.verbose, on_peak=on_peak)
 
     @property
     def _checkpoint_dir(self) -> Path:
@@ -374,7 +421,18 @@ class ModulatorPipeline:
             return False
         for sample in self.samples:
             d = self.paths.modkit_dir(which, sample)
-            if not d.exists() or not any(d.rglob("*.bed.gz")):
+            if not d.exists():
+                return False
+            beds_gz = list(d.rglob("*.bed.gz"))
+            if not beds_gz:
+                return False
+            # Every compressed partition must be tabix-indexed, and no raw .bed may be
+            # left behind (other than the intentionally-skipped ungrouped.bed) -- a leftover
+            # raw .bed means the bgzip/tabix loop was interrupted, so aggregate_zn_stream
+            # would silently drop those ZN partitions. Require a fully-finished directory.
+            if any(not Path(str(b) + ".tbi").exists() for b in beds_gz):
+                return False
+            if any(b.name != "ungrouped.bed" for b in d.rglob("*.bed")):
                 return False
         return True
 
@@ -394,6 +452,14 @@ class ModulatorPipeline:
             return ok
         if stage == "read_stats":
             return self._nonempty(p.per_sample_read_stats)
+        if stage == "splice_junctions":
+            if not as_bool(cfg.get("splice_junctions", {}).get("enable", True), True):
+                return True
+            return self._nonempty(p.gene_splice_summary)
+        if stage == "novel_loci":
+            if not as_bool(cfg.get("novel_loci", {}).get("enable", True), True):
+                return True
+            return self._nonempty(p.novel_loci_tsv)
         if stage == "multigene_filter":
             if not as_bool(cfg.get("multigene_filter", {}).get("enable", True), True):
                 return True
@@ -430,6 +496,8 @@ class ModulatorPipeline:
     def run(self, stages: list[str] | None = None) -> None:
         selected = STAGE_ORDER if not stages else [stage for stage in STAGE_ORDER if stage in stages]
         timings: list[tuple[str, float]] = []
+        mem_peaks: list[tuple[str, float]] = []
+        geno_substeps: list[tuple[str, float]] = []
         for stage in selected:
             if self.resume and self._stage_done(stage):
                 if self.verbose:
@@ -437,12 +505,24 @@ class ModulatorPipeline:
                 continue
             if self.verbose:
                 print(f"[modulator] stage: {stage}", flush=True)
+            # Per-substep memory is only meaningful for the (sequential) genotype scripts.
+            self._substep_mem = [] if stage == "genotype" else None
             t0 = time.perf_counter()
-            getattr(self, f"stage_{stage}")()
+            with PeakRSSSampler(os.getpid()) as sampler:  # peak over this process's whole subtree
+                getattr(self, f"stage_{stage}")()
             dt = time.perf_counter() - t0
             timings.append((stage, dt))
-            print(f"[modulator] stage {stage} finished in {dt:.1f}s", flush=True)
-            self._mark_stage_done(stage)
+            mem_peaks.append((stage, sampler.peak_gib))
+            if self._substep_mem:
+                geno_substeps.extend(self._substep_mem)
+            self._substep_mem = None
+            print(f"[modulator] stage {stage} finished in {dt:.1f}s  peak={sampler.peak_gib:.2f} GiB", flush=True)
+            # Only checkpoint a stage that actually produced its outputs. A stage that
+            # early-returned as a no-op on missing/empty input (e.g. test_diffs with an empty
+            # ZN long table) must NOT be marked done, or --resume would skip it forever even
+            # after the upstream input appears. Disabled/toggled-off stages report present.
+            if self._outputs_present(stage):
+                self._mark_stage_done(stage)
         if timings:
             try:
                 tpath = self.paths.results / "stage_timings.tsv"
@@ -453,6 +533,29 @@ class ModulatorPipeline:
                         fh.write(f"{stg}\t{secs:.2f}\n")
                     fh.write(f"TOTAL\t{sum(s for _, s in timings):.2f}\n")
                 print(f"[modulator] stage timings -> {tpath}", flush=True)
+            except OSError:
+                pass
+        if mem_peaks:
+            try:
+                mpath = self.paths.results / "stage_memory.tsv"
+                mpath.parent.mkdir(parents=True, exist_ok=True)
+                with open(mpath, "w") as fh:
+                    fh.write("stage\tpeak_rss_gib\n")
+                    for stg, gib in mem_peaks:
+                        fh.write(f"{stg}\t{gib:.3f}\n")
+                    fh.write(f"MAX\t{max(g for _, g in mem_peaks):.3f}\n")
+                print(f"[modulator] stage memory -> {mpath}", flush=True)
+            except OSError:
+                pass
+        if geno_substeps:
+            try:
+                gpath = self.paths.results / "genotype_memory.tsv"
+                gpath.parent.mkdir(parents=True, exist_ok=True)
+                with open(gpath, "w") as fh:
+                    fh.write("substep\tpeak_rss_gib\n")
+                    for lbl, gib in geno_substeps:
+                        fh.write(f"{lbl}\t{gib:.3f}\n")
+                print(f"[modulator] genotype substep memory -> {gpath}", flush=True)
             except OSError:
                 pass
 
@@ -509,10 +612,52 @@ class ModulatorPipeline:
             "--min-mapq", str(cfg.get("min_mapq", 10)),
             "--min-introns-read", str(cfg.get("min_introns_read", 1)),
             "--require-softclip3p", str(cfg.get("require_softclip3p", 0)),
+            # Samples are scanned in parallel (jobs<=1 stays serial / single-core safe).
+            "--jobs", str(self.jobs),
         ]
         if as_bool(cfg.get("primary_only", True), True):
             args.append("--primary-only")
         self.run_python_script("per_sample_read_stats.py", args, label="per_sample_read_stats")
+
+    def stage_splice_junctions(self) -> None:
+        """Classify every fragmentform intron as canonical (GT-AG) / semi-canonical (GC-AG) /
+        minor U12 (AT-AC) / non-canonical, and summarize per gene."""
+        cfg = self.config.get("splice_junctions", {})
+        if not as_bool(cfg.get("enable", True), True):
+            return
+        reference_fa = self._require_reference_fa()
+        self._require_existing_file(self.paths.out_gtf, "assembled GTF")
+        self.run_python_script(
+            "classify_splice_junctions.py",
+            [
+                "--gtf", str(self.paths.out_gtf),
+                "--reference-fa", str(reference_fa),
+                "--out-junctions", str(self.paths.splice_junctions),
+                "--out-genes", str(self.paths.gene_splice_summary),
+                "--verbose",
+            ],
+            label="classify_splice_junctions",
+        )
+
+    def stage_novel_loci(self) -> None:
+        """Roll up read-backed NOVEL_LOCUS fragmentforms into uniquely-named loci, with their
+        fragmentforms, modification sites, and splice-junction category."""
+        cfg = self.config.get("novel_loci", {})
+        if not as_bool(cfg.get("enable", True), True):
+            return
+        self._require_existing_file(self.paths.out_gtf, "assembled GTF")
+        args = [
+            "--gtf", str(self.paths.out_gtf),
+            "--classification", str(self.paths.classification_summary),
+            "--out-loci", str(self.paths.novel_loci_tsv),
+            "--out-fragmentforms", str(self.paths.novel_fragmentforms),
+            "--verbose",
+        ]
+        if self.paths.zn_filtered_long.exists():
+            args.extend(["--zn-long", str(self.paths.zn_filtered_long)])
+        if self.paths.gene_splice_summary.exists():
+            args.extend(["--splice-genes", str(self.paths.gene_splice_summary)])
+        self.run_python_script("summarize_novel_loci.py", args, label="summarize_novel_loci")
 
     def stage_multigene_filter(self) -> None:
         cfg = self.config.get("multigene_filter", {})
@@ -542,6 +687,7 @@ class ModulatorPipeline:
                 "--out-removed-tsv", str(output_removed),
                 "--out-scrap-tx-counts-tsv", str(output_counts),
                 "--zero-gene-action", str(cfg.get("zero_gene_action", "keep")),
+                "--multi-gene-action", str(cfg.get("multi_gene_action", "scrap_conflict")),
             ]
             tasks.append((
                 f"multigene_filter[{sample}]",
@@ -697,7 +843,7 @@ class ModulatorPipeline:
             self.config.get("aggregation_tmpdir")
             or self.config.get("aggregation", {}).get("tmpdir")
             or os.environ.get("TMPDIR")
-            or str((self.paths.results / "tmp").resolve())
+            or str((self.paths.results / "tmp" / self.prefix).resolve())
         )
         tmpdir_path = resolve_path(self.root, tmpdir)
         if tmpdir_path is None:
@@ -790,7 +936,7 @@ class ModulatorPipeline:
             "--min-effect", str(cfg.get("min_effect", 0.10)),
             "--fdr", str(cfg.get("fdr", 0.05)),
             "--min-cov", str(cfg.get("min_cov", 0)),
-            "--tes-tol", str(cfg.get("tes_tol", 200)),
+            "--tes-tol", str(cfg.get("tes_tol", 25)),
             "--inside-tol", str(cfg.get("inside_tol", 50)),
             "--ejc-nt", str(cfg.get("ejc_nt", 150)),
             "--intergenic-gap", str(cfg.get("intergenic_gap", 1000)),
@@ -829,6 +975,13 @@ class ModulatorPipeline:
         # parallelism is no longer capped at the sample count -- size it to the CPU
         # budget instead.
         geno_jobs = max(1, min(self.top_threads if self.top_threads > 0 else 8, int(geno.get("jobs", self.top_threads or 8))))
+        # discover_candidate_snps is embarrassingly parallel and (with the native prefilter) cheap
+        # per shard, so give it its OWN, larger job budget than the memory-sensitive later substeps
+        # (raising the shared geno_jobs would also inflate their peak RSS). snp_scan_jobs=0/unset ->
+        # use the full thread budget.
+        _snp_cfg = int(geno.get("snp_scan_jobs", 0) or 0)
+        snp_jobs = max(1, min(self.top_threads if self.top_threads > 0 else 8,
+                              _snp_cfg if _snp_cfg > 0 else (self.top_threads or 8)))
         sample_bams = [
             str(self._require_existing_file(self._modkit_input_bam(sample), f"genotype input BAM for sample {sample}"))
             for sample in self.samples
@@ -836,19 +989,7 @@ class ModulatorPipeline:
         self._require_existing_file(self.paths.classification_summary, "classification summary TSV")
         self.paths.genotype.mkdir(parents=True, exist_ok=True)
 
-        if not self._geno_reuse(self.paths.geno_read_assignments, "build_read_assignment_table"):
-            self.run_python_script(
-                "build_read_assignment_table.py",
-                [
-                    "--bams", *sample_bams,
-                    "--summary-tsv", str(self.paths.classification_summary),
-                    "--out-tsv", str(self.paths.geno_read_assignments),
-                    "--jobs", str(geno_jobs),
-                    "--primary-only",
-                    "--verbose",
-                ],
-                label="build_read_assignment_table",
-            )
+        # ---- Step 1: discover candidate SNPs (needs the full BAMs; already locus-restricted). ----
         if not self._geno_reuse(self.paths.geno_candidate_snps, "discover_candidate_snps"):
             self.run_python_script(
                 "discover_candidate_snps.py",
@@ -863,27 +1004,16 @@ class ModulatorPipeline:
                     "--max-alt-frac", str(float(geno.get("max_alt_frac", 0.90))),
                     "--min-baseq", str(int(geno.get("min_baseq", 20))),
                     "--min-mapq", str(int(geno.get("min_mapq", self.config.get("assembler", {}).get("min_mapq", 10)))),
-                    "--jobs", str(geno_jobs),
+                    "--jobs", str(snp_jobs),
+                    "--threads", str(self.top_threads or 8),
+                    "--window-bp", str(int(geno.get("snp_scan_window_bp", 1_000_000))),
                     "--primary-only",
                     "--verbose",
                 ],
                 label="discover_candidate_snps",
             )
-        if not self._geno_reuse(self.paths.geno_molecule_snps, "build_molecule_snp_table"):
-            self.run_python_script(
-                "build_molecule_snp_table.py",
-                [
-                    "--bams", *sample_bams,
-                    "--candidate-snps", str(self.paths.geno_candidate_snps),
-                    "--out-tsv", str(self.paths.geno_molecule_snps),
-                    "--min-baseq", str(int(geno.get("min_baseq", 20))),
-                    "--min-mapq", str(int(geno.get("min_mapq", self.config.get("assembler", {}).get("min_mapq", 10)))),
-                    "--jobs", str(geno_jobs),
-                    "--primary-only",
-                    "--verbose",
-                ],
-                label="build_molecule_snp_table",
-            )
+
+        # ---- Step 2: candidate mod sites (needs zn_long + candidate SNPs; no BAM scan). ----
         zn_long = str(self.paths.zn_filtered_long) if self.paths.zn_filtered_long.exists() else ""
         zt_long = str(self.paths.zt_filtered_long) if self.paths.zt_filtered_long.exists() else ""
         mod_site_args = [
@@ -904,24 +1034,160 @@ class ModulatorPipeline:
             mod_site_args,
             label="build_candidate_mod_sites",
         )
-        self.run_python_script(
-            "build_molecule_mod_table.py",
-            [
-                "--bams", *sample_bams,
-                "--candidate-sites-tsv", str(self.paths.geno_candidate_mod_sites),
-                "--candidate-bed", str(self.paths.geno_candidate_mod_bed),
-                "--read-assignments", str(self.paths.geno_read_assignments),
-                "--reference-fa", str(self.reference_fa),
-                "--out-tsv", str(self.paths.geno_molecule_mod_calls),
-                "--threads", str(max(1, self.top_threads)),
-                # Cap concurrent modkit `extract calls` separately from the (cheap, pysam)
-                # SNP steps: each modkit process streams a chromosome's reads, so too many
-                # at once is memory-heavy. Defaults to 24, never more than geno_jobs.
-                "--jobs", str(max(1, min(geno_jobs, int(geno.get("mod_jobs", 8))))),
-                "--verbose",
-            ],
-            label="build_molecule_mod_table",
-        )
+
+        # ---- Step 3: pre-subset the BAMs to the candidate regions. ----
+        # Every read that can contribute to a snp/mod/haplotype association overlaps at least one
+        # candidate SNP or mod site, so the per-molecule scans below only ever need those reads.
+        # Restricting them here is lossless for every genotype output and removes the genome-wide
+        # off-target reads that otherwise force build_read_assignment_table to materialize an
+        # all-reads table (~22 GB on disk / ~70 GB in pandas on deep runs).
+        subset_cfg = geno.get("subset_bams", {})
+        scan_bams = sample_bams
+        read_assignments_path = self.paths.geno_read_assignments
+        used_subset = False
+        if as_bool(subset_cfg.get("enable", True), True):
+            require_tools(["samtools"])
+            fai = f"{self.reference_fa}.fai"
+            self.run_python_script(
+                "build_candidate_regions_bed.py",
+                [
+                    "--candidate-snps", str(self.paths.geno_candidate_snps),
+                    "--candidate-mod-bed", str(self.paths.geno_candidate_mod_bed),
+                    "--fai", fai if Path(fai).exists() else "",
+                    "--pad", str(int(subset_cfg.get("pad", 0))),
+                    "--out-bed", str(self.paths.geno_candidate_regions_bed),
+                ],
+                label="build_candidate_regions_bed",
+            )
+            bed = self.paths.geno_candidate_regions_bed
+            if self._nonempty(bed):
+                self.paths.geno_subset_dir.mkdir(parents=True, exist_ok=True)
+                sam_threads = max(1, min(4, self.top_threads or 1))
+                # Per-fragmentform depth cap (0 = off). Highly-expressed loci pile hundreds of
+                # thousands of reads on a few isoforms, which makes the per-window modkit extract in
+                # build_molecule_mod_table saturate memory; capping each ZT fragmentform to max_ff
+                # reads (seeded) collapses those isoforms to a bounded size while keeping every isoform
+                # represented. Deterministic; results are a fixed-seed subsample (not full-depth).
+                max_ff = int(subset_cfg.get("max_reads_per_fragmentform", 0) or 0)
+                ff_seed = int(subset_cfg.get("subsample_seed", 12345))
+                cap_script = str(self.script_path("cap_reads_per_fragmentform.py"))
+
+                def _subset(in_bam: str) -> None:
+                    out_bam = self.paths.geno_subset_bam(Path(in_bam))
+                    if max_ff > 0:
+                        regions_bam = f"{out_bam}.regions.bam"
+                        run_command(
+                            ["samtools", "view", "-b", "-M", "-L", str(bed), "-@", str(sam_threads),
+                             str(in_bam), "-o", regions_bam],
+                            cwd=self.root, label=f"samtools_subset[{out_bam.name}]", verbose=self.verbose,
+                        )
+                        run_command(
+                            [sys.executable, cap_script, "--in-bam", regions_bam, "--out-bam", str(out_bam),
+                             "--tag", "ZT", "--max-per-tag", str(max_ff), "--seed", str(ff_seed),
+                             "--threads", str(sam_threads), "--verbose"],
+                            cwd=self.root, label=f"cap_fragmentform[{out_bam.name}]", verbose=self.verbose,
+                        )
+                        try:
+                            os.remove(regions_bam)
+                        except OSError:
+                            pass
+                    else:
+                        run_command(
+                            ["samtools", "view", "-b", "-M", "-L", str(bed), "-@", str(sam_threads),
+                             str(in_bam), "-o", str(out_bam)],
+                            cwd=self.root, label=f"samtools_subset[{out_bam.name}]", verbose=self.verbose,
+                        )
+                        run_command(["samtools", "index", "-@", str(sam_threads), str(out_bam)],
+                                    cwd=self.root, label=f"samtools_index[{out_bam.name}]", verbose=self.verbose)
+
+                run_parallel(
+                    [(f"subset[{Path(b).name}]", (lambda b=b: _subset(b))) for b in sample_bams],
+                    jobs=self.jobs,
+                )
+                scan_bams = [str(self.paths.geno_subset_bam(Path(b))) for b in sample_bams]
+                read_assignments_path = self.paths.geno_read_assignments_regions
+                used_subset = True
+            elif self.verbose:
+                print("[modulator]   genotype: no candidate regions -- skipping BAM subsetting, "
+                      "scanning the full BAMs.", flush=True)
+        if self.verbose:
+            print(f"[modulator]   genotype: per-molecule scans use "
+                  f"{'candidate-region subset BAMs' if used_subset else 'full BAMs'}", flush=True)
+
+        # ---- Step 4: per-molecule tables, over the (subset) BAMs. ----
+        if not self._geno_reuse(read_assignments_path, "build_read_assignment_table"):
+            self.run_python_script(
+                "build_read_assignment_table.py",
+                [
+                    "--bams", *scan_bams,
+                    "--summary-tsv", str(self.paths.classification_summary),
+                    "--out-tsv", str(read_assignments_path),
+                    "--jobs", str(geno_jobs),
+                    "--primary-only",
+                    "--verbose",
+                ],
+                label="build_read_assignment_table",
+            )
+        if not self._geno_reuse(self.paths.geno_molecule_snps, "build_molecule_snp_table"):
+            self.run_python_script(
+                "build_molecule_snp_table.py",
+                [
+                    "--bams", *scan_bams,
+                    "--candidate-snps", str(self.paths.geno_candidate_snps),
+                    "--out-tsv", str(self.paths.geno_molecule_snps),
+                    "--min-baseq", str(int(geno.get("min_baseq", 20))),
+                    "--min-mapq", str(int(geno.get("min_mapq", self.config.get("assembler", {}).get("min_mapq", 10)))),
+                    "--jobs", str(geno_jobs),
+                    "--primary-only",
+                    "--verbose",
+                ],
+                label="build_molecule_snp_table",
+            )
+        mod_args = [
+            # Subset BAMs: modkit only ever emits calls at --candidate-bed positions, and the
+            # read-assignments table it joins against now covers exactly the candidate-region
+            # reads -- so this is lossless, and modkit streams far fewer reads.
+            "--bams", *scan_bams,
+            "--candidate-sites-tsv", str(self.paths.geno_candidate_mod_sites),
+            "--candidate-bed", str(self.paths.geno_candidate_mod_bed),
+            "--read-assignments", str(read_assignments_path),
+            "--reference-fa", str(self.reference_fa),
+            "--out-tsv", str(self.paths.geno_molecule_mod_calls),
+            "--threads", str(max(1, self.top_threads)),
+            # A+B: this substep now streams shards to disk (bounded parent RSS) and shards per
+            # (BAM x site-window), so heavy chromosomes no longer serialize and it can use far
+            # more concurrency than the memory-bound per-molecule SNP steps -- decouple from
+            # geno_jobs and cap at the thread budget. window-bp splits big chroms; interval-size
+            # bounds each modkit process's own RSS.
+            "--jobs", str(max(1, min(self.top_threads, int(geno.get("mod_jobs", 8))))),
+            "--window-bp", str(int(geno.get("mod_scan_window_bp", 1_000_000))),
+            "--interval-size", str(int(geno.get("mod_interval_size", 20000))),
+            "--verbose",
+        ]
+        # Fast path: if `modkit extract calls` was pre-computed once per subset BAM (a separate
+        # per-sample sbatch array across nodes, ~30-60 min/sample vs ~20 h windowed-on-one-node),
+        # parse those TSVs instead of re-running modkit. Identical output; resumable per sample.
+        mod_calls_dir = self.paths.genotype / "mod_calls"
+
+        def _sample_of(bam_path):
+            base = os.path.basename(str(bam_path))
+            for suf in (".zt_tagged.clean.bam", ".zt_tagged.bam", ".bam"):
+                if base.endswith(suf):
+                    return base[: -len(suf)]
+            return os.path.splitext(base)[0]
+
+        pre = []
+        for b in scan_bams:
+            s = _sample_of(b)
+            cp = mod_calls_dir / f"{s}.calls.tsv.bgz"
+            if self._nonempty(cp):
+                pre.append(f"{s}={cp}")
+        if pre and len(pre) == len(scan_bams):
+            mod_args += ["--pre-extracted", *pre]
+            if self.verbose:
+                print(f"[modulator] build_molecule_mod_table: using {len(pre)} pre-extracted "
+                      f"per-sample call set(s) from {mod_calls_dir}", flush=True)
+        self.run_python_script("build_molecule_mod_table.py", mod_args, label="build_molecule_mod_table")
         self.run_python_script(
             "test_snp_transcript_assoc.py",
             [
@@ -987,6 +1253,25 @@ class ModulatorPipeline:
             ],
             label="test_haplotype_associations",
         )
+        # Co-localized modifications: the mod x mod analogue of snp_mod_assoc -- do two nearby
+        # mod sites co-occur on the same molecule more/less than expected? Reuses the per-read
+        # mod-call table, so it adds no BAM scanning.
+        colo = geno.get("colocalized_mods", {})
+        if as_bool(colo.get("enable", True), True):
+            self.run_python_script(
+                "test_mod_mod_assoc.py",
+                [
+                    "--molecule-mods", str(self.paths.geno_molecule_mod_calls),
+                    "--out-tsv", str(self.paths.geno_mod_mod),
+                    "--max-distance", str(int(colo.get("max_distance", 1000))),
+                    "--min-pair-reads", str(int(colo.get("min_pair_reads", 8))),
+                    "--min-state-reads", str(int(colo.get("min_state_reads", 4))),
+                    "--max-sites-per-read", str(int(colo.get("max_sites_per_read", 200))),
+                    "--test", str(geno.get("test", "auto")),
+                    "--pseudocount", str(float(geno.get("pseudocount", 0.5))),
+                ],
+                label="test_mod_mod_assoc",
+            )
 
     def stage_report(self) -> None:
         report_cfg = self.config.get("report", {})
@@ -1026,6 +1311,11 @@ class ModulatorPipeline:
             "--arch-figs-dir", str(self.paths.zn_class_figs_arch) if self.paths.zn_class_figs_arch.exists() else "",
             "--max-class-figs-per-category", str(int(report_cfg.get("max_class_figs_per_category", 10))),
             "--multigene-summary-glob", str(self.paths.zt_scrap_dir / "*.multigene_filter_summary.tsv") if self.paths.zt_scrap_dir.exists() else "",
+            "--splice-junctions", str(self.paths.splice_junctions) if self.paths.splice_junctions.exists() else "",
+            "--splice-genes", str(self.paths.gene_splice_summary) if self.paths.gene_splice_summary.exists() else "",
+            "--novel-loci", str(self.paths.novel_loci_tsv) if self.paths.novel_loci_tsv.exists() else "",
+            "--novel-fragmentforms", str(self.paths.novel_fragmentforms) if self.paths.novel_fragmentforms.exists() else "",
+            "--mod-mod-assoc", str(self.paths.geno_mod_mod) if self.paths.geno_mod_mod.exists() else "",
             "--candidate-snps", str(self.paths.geno_candidate_snps) if self.paths.geno_candidate_snps.exists() else "",
             "--snp-tx-assoc", str(self.paths.geno_snp_tx) if self.paths.geno_snp_tx.exists() else "",
             "--snp-mod-assoc", str(self.paths.geno_snp_mod) if self.paths.geno_snp_mod.exists() else "",

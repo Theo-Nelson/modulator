@@ -6,7 +6,24 @@ import os
 
 import pandas as pd
 
-from genotype_utils import benjamini_hochberg, binary_rate_delta, cmh_test_2x2xk, context_key_from_row, context_key_from_snp_row
+from genotype_utils import (
+    benjamini_hochberg,
+    binary_rate_delta,
+    cmh_test_2x2xk,
+    context_key_from_row,
+    context_key_from_snp_row,
+    load_molecule_mods_for_pairing,
+    read_keys_of,
+    stream_filter_by_read_keys,
+    tsv_header,
+)
+
+# Columns the merge / row-builder touches. chrom, start0, end0 and ZT are kept on BOTH sides so
+# pandas still emits the "_snp"/"_mod" suffixes the code reads (chrom_snp, start0_mod, ZT_mod).
+SNP_USECOLS = [
+    "sample", "qname", "snp_id", "chrom", "pos1", "start0", "end0",
+    "allele_class", "gene_names", "metagene_indices", "ZT",
+]
 
 
 def parse_args():
@@ -21,8 +38,6 @@ def parse_args():
 
 def main():
     args = parse_args()
-    snp_df = pd.read_csv(args.molecule_snps, sep="\t", low_memory=False)
-    mod_df = pd.read_csv(args.molecule_mods, sep="\t", low_memory=False)
     snp_tx = pd.read_csv(args.snp_transcript_assoc, sep="\t", low_memory=False) if os.path.exists(args.snp_transcript_assoc) and os.path.getsize(args.snp_transcript_assoc) else pd.DataFrame()
     snp_mod = pd.read_csv(args.snp_mod_assoc, sep="\t", low_memory=False) if os.path.exists(args.snp_mod_assoc) and os.path.getsize(args.snp_mod_assoc) else pd.DataFrame()
 
@@ -37,13 +52,33 @@ def main():
         return
 
     candidate_pairs = set(zip(snp_mod["snp_id"], snp_mod["mod_site_id"]))
-    snp_df = snp_df[snp_df["allele_class"].isin(["ref", "alt"])].copy()
-    if "usable" in mod_df.columns:
-        mod_df = mod_df[mod_df["usable"].fillna(False)].copy()
-    else:
-        mod_df = mod_df[(~mod_df["fail"].fillna(True)) & mod_df["within_alignment"].fillna(False)].copy()
-    mod_df = mod_df[mod_df["state_detail"].isin(["modified", "canonical", "other_mod"])].copy()
-    mod_df["target_state"] = mod_df["state_detail"].eq("modified").astype(int)
+    # Only (snp_id, mod_site_id) pairs from snp_mod_assoc are ever tested, and the merge is an
+    # inner join on (sample, qname). So restrict BOTH sides to the ids that appear in a candidate
+    # pair, then stream the large SNP table keeping only reads that carry a usable mod call.
+    # Every dropped row is one the original code would have discarded anyway.
+    cand_snp_ids = {s for s, _ in candidate_pairs}
+    cand_mod_ids = {m for _, m in candidate_pairs}
+
+    mod_df = load_molecule_mods_for_pairing(args.molecule_mods, extra_cols=["ZT"])
+    if not mod_df.empty:
+        mod_df = mod_df[mod_df["mod_site_id"].isin(cand_mod_ids)].copy()
+    mod_keys = read_keys_of(mod_df)
+
+    snp_usecols = [c for c in SNP_USECOLS if c in tsv_header(args.molecule_snps)]
+    snp_df = stream_filter_by_read_keys(
+        args.molecule_snps, snp_usecols, mod_keys,
+        row_filter=lambda ch: ch["allele_class"].isin(["ref", "alt"]) & ch["snp_id"].isin(cand_snp_ids),
+    )
+    if snp_df.empty or mod_df.empty:
+        out = pd.DataFrame(columns=[
+            "snp_id", "mod_site_id", "n_reads", "n_transcripts_tested", "cmh_stat", "cmh_p_value",
+            "cmh_common_odds_ratio", "overall_effect_abs_delta_mod_frac", "weighted_within_tx_effect",
+            "classification", "cmh_p_adj_bh"
+        ])
+        os.makedirs(os.path.dirname(args.out_tsv) or ".", exist_ok=True)
+        out.to_csv(args.out_tsv, sep="\t", index=False)
+        return
+
     snp_df["context_key"] = snp_df.apply(context_key_from_snp_row, axis=1)
     mod_df["context_key"] = mod_df.apply(context_key_from_row, axis=1)
 

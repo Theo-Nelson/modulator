@@ -137,7 +137,9 @@ def main():
             "ZT", "ZG", "ZN", "ZM", "gene_names", "gene_ids", "metagene_indices"
         ])
         os.makedirs(os.path.dirname(args.out_tsv) or ".", exist_ok=True)
-        out.to_csv(args.out_tsv, sep="\t", index=False)
+        _tmp = args.out_tsv + ".tmp"           # atomic write (see build_read_assignment_table)
+        out.to_csv(_tmp, sep="\t", index=False)
+        os.replace(_tmp, args.out_tsv)
         return
 
     cand_by_chrom = {}
@@ -184,7 +186,9 @@ def main():
         ])
 
     os.makedirs(os.path.dirname(args.out_tsv) or ".", exist_ok=True)
-    df.to_csv(args.out_tsv, sep="\t", index=False)
+    _tmp = args.out_tsv + ".tmp"               # atomic write (see build_read_assignment_table)
+    df.to_csv(_tmp, sep="\t", index=False)
+    os.replace(_tmp, args.out_tsv)
 
 
 if __name__ == "__main__":

@@ -117,7 +117,11 @@ COLUMN_DEFINITIONS = {
     "alt_count": "Alternative-base support across all reads for the candidate SNP locus.",
     "samples_with_alt": "Samples contributing at least one alternative-allele read at the candidate SNP locus.",
     "effect_max_abs_mod_rate_diff": "Maximum absolute difference in target modified fraction across the haplotypes retained in the reported test.",
-    "category": "Granular structural category explaining why the isoforms differ in modification at the site (see category definitions).",
+    "class_key": "Primary classification key = structural_category__stoich_direction (the structural mechanism plus which fragmentform carries more modification).",
+    "structural_category": "The structural mechanism that makes the isoforms differ at the site (tandem APA, intronic polyadenylation, EJC/splicing, cassette/terminal/internal exon, …).",
+    "stoich_direction": "Which fragmentform is more modified, by 3'UTR length: PROXIMAL_HIGHER (shorter form) / DISTAL_HIGHER (longer) / CO_TERMINAL (same 3' end).",
+    "stoich_tier": "Magnitude of the between-isoform stoichiometry gap: T1_MARGINAL (.10–.25) / T2_MODERATE / T3_STRONG / T4_NEAR_BINARY (≥.75).",
+    "hi_stoich_level": "Absolute modification level of the favored fragmentform: HI_HYPER (≥.66) / HI_INTERMED / HI_HYPO (<.33).",
     "start0": "0-based inclusive start coordinate of the reported modification site.",
     "end0": "0-based exclusive end coordinate of the reported modification site.",
     "strand": "Genomic strand of the reported feature.",
@@ -138,6 +142,18 @@ COLUMN_DEFINITIONS = {
 
 
 CATEGORY_DEFINITIONS = {
+    # structural_category (the primary axis): the 8 mechanisms + 3 residual labels the fine
+    # 14-label `category` collapses into.
+    "TANDEM_APA": "Tandem alternative polyadenylation: both isoforms share the same last exon (same acceptor) but cleave at different 3' ends; the site differs between the shorter- and longer-3'UTR forms.",
+    "ALTERNATIVE_LAST_EXON": "The two isoforms are both terminal at the site but their terminal exons begin at DIFFERENT acceptor sites (distinct last exons).",
+    "INTERGENIC_TERMINAL_EXON": "A non-IPA terminal exon that is genomically disjoint and far (≥ intergenic-gap) from the comparator's terminal exon.",
+    "INTRONIC_POLYADENYLATION": "The high isoform terminates within an intron of the longer form (IPA); the modified base exists only in the mature IPA transcript (IPA-private, or IPA-vs-full-length with EJC relief).",
+    "EJC_SPLICING": "A shared base whose modification tracks removal of a nearby splice junction / exon-junction-complex (EJC) footprint in one isoform.",
+    "CASSETTE_EXON": "The base sits in an internal/cassette exon included in one isoform and spliced out (or absent) in the other.",
+    "SHARED_TERMINAL_EXON": "Both isoforms share the same terminal exon AND the same 3' end; modification tracks isoform identity, not APA/EJC.",
+    "SHARED_INTERNAL_EXON": "The base is in a constitutive internal exon with no junction asymmetry between the isoforms.",
+    "UNEXPLAINED": "Residual: terminal in the high isoform, internal in the low, with no nearby differential junction.",
+    "ARTIFACT": "The high isoform does not structurally contain the base (intronic/absent) — the 'high' stoichiometry is likely intron-read noise.",
     "IPA_UNIQUE": "High isoform is an IPA (intronic polyadenylation) isoform; the A is exonic-terminal in it but intronic/absent in the longer anchor — the modified A only exists in the mature IPA transcript. Cleavage-dependent, IPA-private.",
     "SPLICED_EXON_UNIQUE": "The A sits in an internal/cassette exon present in the high isoform but spliced out (intronic) or absent in the comparator/anchor.",
     "LAST_EXON_DISTAL_ONLY": "The A is in the anchor's distal 3'UTR but the low (proximal) isoform's cleavage site is upstream of it — a distal-3'UTR-private A.",
@@ -183,6 +199,11 @@ def parse_args():
     ap.add_argument("--max-class-figs-per-category", type=int, default=10,
                     help="max per-category figures to embed in the report. Default 10.")
     ap.add_argument("--multigene-summary-glob", default="")
+    ap.add_argument("--splice-junctions", default="", help="*_splice_junctions.tsv (per-intron donor/acceptor classes)")
+    ap.add_argument("--splice-genes", default="", help="*_gene_splice_summary.tsv (per-gene junction repertoire)")
+    ap.add_argument("--novel-loci", default="", help="*_novel_loci.tsv (read-backed novel loci)")
+    ap.add_argument("--novel-fragmentforms", default="", help="*_novel_fragmentforms.tsv")
+    ap.add_argument("--mod-mod-assoc", default="", help="*_mod_mod_assoc.tsv (co-localized modification pairs)")
     ap.add_argument("--candidate-snps", default="")
     ap.add_argument("--snp-tx-assoc", default="")
     ap.add_argument("--snp-mod-assoc", default="")
@@ -281,6 +302,69 @@ def category_distribution_png(counts, mod_label=None):
     plt.close(fig)
     encoded = base64.b64encode(buf.getvalue()).decode("ascii")
     return f"data:image/png;base64,{encoded}"
+
+
+def mod_mod_concordance_png(df, top_n=12):
+    """Panel of 2x2 co-modification tables for the top pairs (by BH-FDR). Each panel is the
+    observed 2x2 (rows = site A modified/unmodified, cols = site B modified/unmodified), coloured
+    by log2(observed / expected-under-independence): red = enriched, blue = depleted. Concordant
+    pairs light up the diagonal (both-modified top-left, both-unmodified bottom-right) -- i.e. they
+    tend to be modified together and unmodified together. Cell text is 'obs (exp)'. base64 or ""."""
+    if df is None or df.empty:
+        return ""
+    need = ["n_both_modified", "n_a_only", "n_b_only", "n_neither",
+            "n_a_modified", "n_a_unmodified", "n_b_modified", "n_reads"]
+    if any(c not in df.columns for c in need):
+        return ""
+    try:
+        import matplotlib
+        matplotlib.use("Agg")
+        import matplotlib.pyplot as plt
+        import numpy as np
+        from io import BytesIO
+    except Exception:
+        return ""
+    sub = df.head(int(top_n))
+    n = len(sub)
+    if n == 0:
+        return ""
+    ncol = min(4, n)
+    nrow = (n + ncol - 1) // ncol
+    fig, axes = plt.subplots(nrow, ncol, figsize=(3.1 * ncol, 3.0 * nrow), squeeze=False)
+    for idx, (_, r) in enumerate(sub.iterrows()):
+        ax = axes[idx // ncol][idx % ncol]
+        nreads = float(r["n_reads"]) or 1.0
+        a_mod = float(r["n_a_modified"]); a_un = float(r["n_a_unmodified"])
+        b_mod = float(r["n_b_modified"]); b_un = nreads - b_mod
+        obs = np.array([[float(r["n_both_modified"]), float(r["n_a_only"])],
+                        [float(r["n_b_only"]), float(r["n_neither"])]])
+        exp = np.array([[a_mod * b_mod, a_mod * b_un],
+                        [a_un * b_mod, a_un * b_un]]) / nreads
+        with np.errstate(divide="ignore", invalid="ignore"):
+            l2 = np.log2(np.where((obs > 0) & (exp > 0), obs / np.where(exp > 0, exp, 1), 1.0))
+        l2 = np.clip(np.nan_to_num(l2), -2, 2)
+        ax.imshow(l2, cmap="RdBu_r", vmin=-2, vmax=2, aspect="equal")
+        for i in range(2):
+            for j in range(2):
+                ax.text(j, i, f"{int(obs[i, j])}\n({exp[i, j]:.0f})", ha="center", va="center",
+                        fontsize=8, color="#111" if abs(l2[i, j]) < 1.2 else "#fff")
+        ax.set_xticks([0, 1]); ax.set_xticklabels(["B+", "B-"], fontsize=8)
+        ax.set_yticks([0, 1]); ax.set_yticklabels(["A+", "A-"], fontsize=8)
+        gene = str(r.get("gene_names", "")).split(";")[0]
+        gene = "" if gene.strip().lower() in ("", "nan", "none") else gene[:12]
+        ca, cb = str(r.get("mod_code_a", "")), str(r.get("mod_code_b", ""))
+        orr = r.get("odds_ratio", float("nan")); dist = r.get("distance_bp", "")
+        ttl = f"{gene} {ca}x{cb}\nd={dist}bp OR={orr:.1f}" if gene else f"{ca}x{cb}  d={dist}bp OR={orr:.1f}"
+        ax.set_title(ttl, fontsize=8)
+    for k in range(n, nrow * ncol):
+        axes[k // ncol][k % ncol].axis("off")
+    fig.suptitle("Co-localized modifications: observed vs expected 2x2 (red = enriched over independence)",
+                 fontsize=10, y=1.0)
+    fig.tight_layout(rect=(0, 0, 1, 0.97))
+    buf = BytesIO()
+    fig.savefig(buf, format="png", dpi=170, bbox_inches="tight")
+    plt.close(fig)
+    return "data:image/png;base64," + base64.b64encode(buf.getvalue()).decode("ascii")
 
 
 def clickable_image_html(src, alt, *, caption="", figure_class="image-card"):
@@ -384,19 +468,28 @@ def build_classification_section(class_df, class_figs_dir, arch_figs_dir, max_fi
     and per-category top sites. Each category features the isoform architecture-map
     (locus-track) figures as the primary visual, with the 2-panel per-sample
     stoichiometry figures kept as a secondary collapsible gallery."""
-    if class_df is None or class_df.empty or "category" not in class_df.columns:
+    key_candidates = [c for c in ("class_key", "structural_category", "category") if c in class_df.columns]
+    if class_df is None or class_df.empty or not key_candidates:
         return section(
             "Site Classification",
             "<p class='muted'>No classified differential sites available.</p>",
-            intro="Granular structural classification of significant between-transcript modification sites.",
+            intro="Structural classification of significant between-transcript modification sites.",
         )
 
-    counts = class_df["category"].value_counts().to_dict()
+    # The single primary key is class_key = structural_category__stoich_direction (mechanism + which
+    # fragmentform is more modified). The old fused 14-label `category` is gone; figures live in
+    # per-class_key subdirs. structural_category / stoich_direction / tier / level remain as the
+    # component columns and drive the cross-tab. (Fallback to older column names for old reports.)
+    key_col = key_candidates[0]
+    has_axes = "structural_category" in class_df.columns and "stoich_direction" in class_df.columns
+    counts = class_df[key_col].value_counts().to_dict()
     total = int(sum(counts.values())) or 1
 
-    # The classifier covers ALL detected modifications (not just m6A). Render one
-    # correctly-titled distribution per mod_code, plus a combined overview, instead of
-    # a single chart hard-labeled "m6A".
+    def _def_for(key):  # a class_key's definition = its structural mechanism (part before "__")
+        struct = str(key).split("__")[0]
+        return CATEGORY_DEFINITIONS.get(struct, CATEGORY_DEFINITIONS.get(str(key),
+                                        "Classification assigned by classify_diff_sites."))
+
     mods_present = (
         sorted(class_df["mod_code"].dropna().astype(str).unique())
         if "mod_code" in class_df.columns else []
@@ -405,74 +498,91 @@ def build_classification_section(class_df, class_figs_dir, arch_figs_dir, max_fi
     if len(mods_present) > 1:
         combined = category_distribution_png(counts, mod_label=None)
         hero_html = (
-            clickable_image_html(combined, "Category distribution — all modifications",
+            clickable_image_html(combined, "Classification distribution — all modifications",
                                  figure_class="hero-figure", caption="All modifications combined")
             if combined else ""
         )
         for mod in mods_present:
-            mc = class_df.loc[class_df["mod_code"].astype(str) == mod, "category"].value_counts().to_dict()
+            mc = class_df.loc[class_df["mod_code"].astype(str) == mod, key_col].value_counts().to_dict()
             uri = category_distribution_png(mc, mod_label=mod_display(mod))
             if uri:
                 cap = mod_display(mod) if mod_display(mod) == mod else f"{mod_display(mod)} ({mod})"
-                permod_figs.append(clickable_image_html(uri, f"Category distribution — {mod_display(mod)}", caption=cap))
+                permod_figs.append(clickable_image_html(uri, f"Classification distribution — {mod_display(mod)}", caption=cap))
     else:
         only_label = mod_display(mods_present[0]) if mods_present else None
         uri = category_distribution_png(counts, mod_label=only_label)
-        hero_html = clickable_image_html(uri, "Category distribution", figure_class="hero-figure") if uri else ""
+        hero_html = clickable_image_html(uri, "Classification distribution", figure_class="hero-figure") if uri else ""
     permod_html = "".join(permod_figs)
 
     summary_df = (
-        pd.DataFrame({"category": list(counts.keys()), "n_sites": list(counts.values())})
+        pd.DataFrame({"class_key": list(counts.keys()), "n_sites": list(counts.values())})
         .sort_values("n_sites", ascending=False)
         .reset_index(drop=True)
     )
     summary_df["pct"] = (100.0 * summary_df["n_sites"] / total).map(lambda v: f"{v:.1f}%")
 
-    present = list(summary_df["category"])
-    cat_defs = [(c, CATEGORY_DEFINITIONS.get(c, "Structural category assigned by classify_diff_sites.")) for c in present]
+    # structural_category x stoich_direction cross-tab -- the compact readable grid of the same key.
+    xtab_html = ""
+    if has_axes:
+        ct = pd.crosstab(class_df["structural_category"], class_df["stoich_direction"].fillna("(n/a)"))
+        dir_order = [d for d in ["PROXIMAL_HIGHER", "DISTAL_HIGHER", "CO_TERMINAL", "(n/a)"] if d in ct.columns]
+        other = [c for c in ct.columns if c not in dir_order]
+        ct = ct[dir_order + other]
+        ct = ct.loc[ct.sum(axis=1).sort_values(ascending=False).index]
+        ct.insert(len(ct.columns), "TOTAL", ct.sum(axis=1))
+        ct = ct.reset_index()
+        xtab_html = subsection(
+            "Sites by structural category × stoichiometry direction",
+            "<p class='section-intro'>The class_key factored into its two components. Rows = structural "
+            "mechanism; columns = which fragmentform carries more modification (PROXIMAL_HIGHER = "
+            "shorter-3'UTR form; DISTAL_HIGHER = longer; CO_TERMINAL = same 3' end).</p>"
+            + df_to_html(ct, max_rows=len(ct)),
+        )
 
+    key_defs = [(k, _def_for(k)) for k in list(summary_df["class_key"])]
     overview = (
         "<div class='overview-layout'>"
         f"<div>{df_to_html(summary_df, max_rows=len(summary_df))}"
-        f"{definitions_html(cat_defs, summary='Category definitions', open_by_default=False)}</div>"
+        f"{definitions_html(key_defs, summary='Structural-mechanism definitions', open_by_default=False)}</div>"
         f"<div class='hero'>{hero_html or '<p class=\"muted\">Distribution graph unavailable.</p>'}</div>"
         "</div>"
-    )
+    ) + xtab_html
     if permod_html:
         overview += (
             "<details class='definitions' open>"
-            "<summary>Per-modification category distributions</summary>"
+            "<summary>Per-modification classification distributions</summary>"
             f"<div class='gallery'>{permod_html}</div></details>"
         )
 
     detail_cols = [
         c for c in [
-            "gene_name", "mod_code", "chrom", "start0", "strand", "hi_ZN", "hi_arch", "hi_frac",
-            "lo_ZN", "lo_arch", "lo_frac", "effect_max_abs_frac_diff", "p_adj_bh",
+            "gene_name", "mod_code", "chrom", "start0", "strand",
+            "class_key", "structural_category", "stoich_direction", "stoich_tier", "hi_stoich_level",
+            "hi_ZN", "hi_arch", "hi_frac", "lo_ZN", "lo_arch", "lo_frac",
+            "effect_max_abs_frac_diff", "p_adj_bh",
         ] if c in class_df.columns
     ]
     sort_cols = [c for c in ["effect_max_abs_frac_diff"] if c in class_df.columns]
 
+    # One block per class_key; figures come from the matching class_key subdir.
     blocks = []
-    for cat in present:
-        sub = class_df[class_df["category"] == cat]
+    for ck in list(summary_df["class_key"]):
+        sub = class_df[class_df[key_col] == ck]
         if sort_cols:
             sub = sub.sort_values(sort_cols, ascending=False)
         n = len(sub)
         table_html = df_to_html(sub[detail_cols] if detail_cols else sub, max_rows=top_n)
-        # Architecture-map (locus-track) figures are the PRIMARY visual (open by default);
-        # the 2-panel per-sample stoichiometry figures are kept as a secondary gallery.
         arch_gallery_html = category_figure_gallery(
-            arch_figs_dir, cat, max_figs_per_category,
-            summary_label="isoform architecture map(s) — exon/intron locus tracks with the site marked",
+            arch_figs_dir, ck, max_figs_per_category,
+            summary_label="isoform architecture map(s) — exon/intron tracks, site marked",
             open_by_default=True,
         )
-        stoich_gallery_html = category_figure_gallery(class_figs_dir, cat, max_figs_per_category)
-        defn = CATEGORY_DEFINITIONS.get(cat, "")
+        stoich_gallery_html = category_figure_gallery(class_figs_dir, ck, max_figs_per_category)
+        defn = _def_for(ck)
         defn_html = f"<p class='section-intro'>{html.escape(defn)}</p>" if defn else ""
         blocks.append(
             subsection(
-                f"{cat} — top {min(top_n, n)} of {n} site(s)",
+                f"{ck} — top {min(top_n, n)} of {n} site(s)",
                 defn_html + table_html + arch_gallery_html + stoich_gallery_html,
             )
         )
@@ -483,12 +593,17 @@ def build_classification_section(class_df, class_figs_dir, arch_figs_dir, max_fi
         body,
         intro=(
             "Every significant between-transcript modification site (across all detected "
-            "mod_codes; BH-FDR and the &gt;10% absolute stoichiometry rule) is assigned one "
-            "MECE structural category explaining why the isoforms differ, anchored to the "
-            "gene's longest-3'UTR isoform. Each category lists its top sites by effect size, "
-            "featuring an isoform architecture map (every isoform drawn as exon/intron tracks "
-            "with the modified site marked) plus the per-sample stoichiometry / pooled-coverage "
-            "figures."
+            "mod_codes; BH-FDR and the &gt;10% absolute stoichiometry rule) is described on two "
+            "orthogonal axes, anchored to the gene's longest-3'UTR isoform: (1) "
+            "<b>structural_category</b> — the mechanism that makes the isoforms differ (tandem APA, "
+            "intronic polyadenylation, EJC/splicing, cassette exon, alternative/intergenic terminal "
+            "exon, shared exon); and (2) <b>stoich_direction</b> — which fragmentform carries more "
+            "modification (proximal/shorter-3'UTR vs distal/longer, or co-terminal), with "
+            "<b>stoich_tier</b> (effect magnitude) and <b>hi_stoich_level</b> (is the favored form "
+            "itself hyper- or hypo-modified). The cross-tab below is the primary view; the legacy "
+            "fused 14-label `category` is retained per site as fine detail and as the figure key. "
+            "Each mechanism lists its top sites with an isoform architecture map (exon/intron tracks "
+            "with the site marked) plus per-sample stoichiometry figures."
         ),
         definitions=definitions_html(column_definitions(detail_cols), summary="Column definitions") if detail_cols else "",
     )
@@ -809,6 +924,60 @@ def main():
             args.max_class_figs_per_category,
         )
     )
+    # --- Splice-junction repertoire (canonical vs non-canonical), read-derived ---
+    splice_genes_df = read_tsv(args.splice_genes) if args.splice_genes else pd.DataFrame()
+    splice_junc_df = read_tsv(args.splice_junctions) if args.splice_junctions else pd.DataFrame()
+    if not splice_junc_df.empty and "junction_class" in splice_junc_df.columns:
+        cls_counts = splice_junc_df["junction_class"].value_counts()
+        total_j = int(cls_counts.sum())
+        overview = "<ul>" + "".join(
+            f"<li><b>{html.escape(str(k))}</b>: {int(v):,} ({100.0 * int(v) / total_j:.2f}%)</li>"
+            for k, v in cls_counts.items()
+        ) + "</ul>"
+        noncanon_genes = splice_genes_df[splice_genes_df.get("has_noncanonical", 0).astype(int) == 1] \
+            if not splice_genes_df.empty and "has_noncanonical" in splice_genes_df.columns else pd.DataFrame()
+        noncanon_html = (
+            subsection("Genes carrying non-canonical junctions", df_to_html(noncanon_genes, max_rows=args.top_genes))
+            if not noncanon_genes.empty
+            else "<p class='muted'>Every gene's junctions are canonical (GT-AG) or semi-canonical (GC-AG).</p>"
+        )
+        body.append(
+            section(
+                "Splice Junction Repertoire",
+                overview
+                + (subsection("Per-gene summary", df_to_html(splice_genes_df, max_rows=args.top_genes)) if not splice_genes_df.empty else "")
+                + noncanon_html,
+                intro="Donor/acceptor dinucleotides of every assembled fragmentform intron, in transcript "
+                      "orientation. GT-AG is the major (U2) spliceosome; GC-AG is semi-canonical; AT-AC is the "
+                      "minor (U12) spliceosome; anything else is non-canonical and worth inspecting. Because the "
+                      "intron chains are read-derived, these are the junctions the reads actually support.",
+                definitions=definitions_html(column_definitions(list(splice_genes_df.columns)), summary="Column definitions") if not splice_genes_df.empty else "",
+            )
+        )
+
+    # --- Novel loci (fragmentforms matching no reference gene) ---
+    novel_loci_df = read_tsv(args.novel_loci) if args.novel_loci else pd.DataFrame()
+    novel_ff_df = read_tsv(args.novel_fragmentforms) if args.novel_fragmentforms else pd.DataFrame()
+    if args.novel_loci:
+        if not novel_loci_df.empty:
+            nl_body = (
+                subsection("Novel loci", df_to_html(novel_loci_df, max_rows=args.top_genes))
+                + (subsection("Fragmentforms of novel loci", df_to_html(novel_ff_df, max_rows=args.top_transcripts)) if not novel_ff_df.empty else "")
+            )
+        else:
+            nl_body = "<p class='muted'>No novel loci: every assembled fragmentform matched a reference gene.</p>"
+        body.append(
+            section(
+                "Novel Loci",
+                nl_body,
+                intro="Read-backed loci whose fragmentforms overlap no transcript in the reference GTF. Each locus "
+                      "is formed by merging overlapping novel fragmentforms on one strand and is given a unique, "
+                      "deterministic, coordinate-anchored name (NOVEL_<chrom>_<strand>_<n>_<start>_<end>), so two "
+                      "distinct novel loci on the same chromosome and strand can never be conflated.",
+                definitions=definitions_html(column_definitions(list(novel_loci_df.columns)), summary="Column definitions") if not novel_loci_df.empty else "",
+            )
+        )
+
     body.append(
         section(
             "Segregating SNP Candidates",
@@ -833,6 +1002,43 @@ def main():
             definitions=definitions_html(column_definitions(list(snp_mod_df_view.columns)), summary="Column definitions") if not snp_mod_df_view.empty else "",
         )
     )
+    # --- Co-localized modifications (mod x mod dependency on shared molecules) ---
+    mod_mod_df = read_tsv(args.mod_mod_assoc) if args.mod_mod_assoc else pd.DataFrame()
+    if args.mod_mod_assoc:
+        if not mod_mod_df.empty:
+            mm_view = mod_mod_df
+            if "p_adj_bh" in mm_view.columns:
+                n_sig = int((pd.to_numeric(mm_view["p_adj_bh"], errors="coerce") < 0.05).sum())
+                header = f"<p><b>{len(mm_view):,}</b> co-localized mod-site pairs tested; <b>{n_sig:,}</b> significant at BH-FDR &lt; 0.05.</p>"
+            else:
+                header = ""
+            if "direction" in mm_view.columns:
+                dc = mm_view["direction"].value_counts().to_dict()
+                header += ("<p>direction: "
+                           + " · ".join(f"<b>{int(dc.get(k,0)):,}</b> {k.lower().replace('_',' ')}"
+                                        for k in ("CONCORDANT", "MUTUALLY_EXCLUSIVE", "INDEPENDENT"))
+                           + "</p>")
+            conc_img = mod_mod_concordance_png(mm_view, top_n=args.max_snp_figs)
+            fig_html = clickable_image_html(
+                conc_img, "Co-localized modification 2x2 concordance panels",
+                caption="Top pairs by FDR. Each 2x2 is observed count (expected under independence); "
+                        "red = enriched. A concordant pair reddens the diagonal (both-modified / both-unmodified).",
+                figure_class="hero-figure") if conc_img else ""
+            mm_body = header + fig_html + df_to_html(mm_view, max_rows=args.top_genes)
+        else:
+            mm_body = "<p class='muted'>No co-localized modification pairs passed the coverage thresholds.</p>"
+        body.append(
+            section(
+                "Co-localized Modifications",
+                mm_body,
+                intro="The modification analogue of the SNP-to-modification test: for every pair of nearby "
+                      "modification sites seen on shared reads, does the state of one predict the state of the "
+                      "other on the SAME molecule? effect_abs_delta_mod_frac is |P(B modified | A modified) - "
+                      "P(B modified | A unmodified)|; jaccard_both is co-modified reads / reads modified at either.",
+                definitions=definitions_html(column_definitions(list(mod_mod_df.columns)), summary="Column definitions") if not mod_mod_df.empty else "",
+            )
+        )
+
     body.append(
         section(
             "SNP Transcript Epitranscriptome Dependency",

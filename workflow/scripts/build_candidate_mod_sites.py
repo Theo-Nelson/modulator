@@ -5,7 +5,7 @@ import os
 
 import pandas as pd
 
-from genotype_utils import context_key_from_row, context_key_from_snp_row
+from genotype_utils import context_key_from_row, context_key_from_snp_row, normalize_text_token
 
 
 def parse_args():
@@ -77,7 +77,21 @@ def main():
     if args.candidate_snps and os.path.exists(args.candidate_snps) and os.path.getsize(args.candidate_snps) and not out.empty:
         snps = load_input(args.candidate_snps)
         if not snps.empty:
-            snp_keys = {context_key_from_snp_row(r) for r in snps.to_dict("records")}
+            # A mod site loaded from the ZN long table has NO metagene_index column, so its
+            # context_key is GENE:{gene_name}; the SNP side, at a single-metagene locus, yields
+            # MG:{metagene}. Comparing those directly (the old code) made isin() False and dropped
+            # EVERY linkable mod site -- violating this filter's "lossless" promise and silently
+            # emptying snp_mod_assoc / snp_tx_mod_dependency / haplotype_mod_assoc on real data.
+            # Match at GENE granularity on both sides: also register each SNP's gene(s) as a
+            # GENE: key. This is a lossless superset -- it never drops a mod site that could pair
+            # with a SNP, and may keep a few extra same-gene/different-metagene sites (safe).
+            snp_keys = set()
+            for r in snps.to_dict("records"):
+                snp_keys.add(context_key_from_snp_row(r))
+                for g in str(r.get("gene_names", "")).split(";"):
+                    g = normalize_text_token(g)
+                    if g:
+                        snp_keys.add(f"GENE:{g}")
             before = len(out)
             mod_keys = out.apply(context_key_from_row, axis=1)
             out = out[mod_keys.isin(snp_keys)].copy()

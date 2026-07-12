@@ -101,17 +101,26 @@ def is_nullish(x) -> bool:
 
 
 def benjamini_hochberg(pvals):
-    """Vectorized BH-FDR."""
+    """Vectorized BH-FDR. Ranks only finite p-values (statsmodels semantics); a NaN would
+    otherwise poison every adjusted p-value via the reversed minimum.accumulate. NaN stays NaN."""
     p = np.asarray(pvals, dtype=float)
-    n = p.size
-    order = np.argsort(p)
-    ranks = np.empty(n, dtype=int)
-    ranks[order] = np.arange(1, n + 1)
-    adj = p * n / ranks
+    if p.size == 0:
+        return p
+    out = np.full(p.size, np.nan, dtype=float)
+    idx = np.flatnonzero(np.isfinite(p))
+    m = idx.size
+    if m == 0:
+        return out
+    pf = p[idx]
+    order = np.argsort(pf)
+    ranks = np.empty(m, dtype=int)
+    ranks[order] = np.arange(1, m + 1)
+    adj = pf * m / ranks
     adj_sorted = np.minimum.accumulate(adj[order][::-1])[::-1]
-    out = np.empty_like(adj)
-    out[order] = adj_sorted
-    return np.minimum(out, 1.0)
+    adj_final = np.empty(m, dtype=float)
+    adj_final[order] = adj_sorted
+    out[idx] = np.minimum(adj_final, 1.0)
+    return out
 
 
 def site_key_tuple(row):

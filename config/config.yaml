@@ -33,9 +33,26 @@ assembler:
   min_reads_per_sample_for_mod: 5
   min_total_reads_for_mod: 20
 
+# Classify every assembled fragmentform intron by its donor/acceptor dinucleotides
+# (GT-AG canonical, GC-AG semi-canonical, AT-AC minor U12, else non-canonical) and summarize
+# per gene. Read-derived, so it reports the junctions the reads actually support.
+splice_junctions:
+  enable: true
+
+# Roll up read-backed NOVEL_LOCUS fragmentforms into uniquely-named loci (grouped by genomic
+# overlap) with their fragmentforms, modification sites, and splice-junction category.
+novel_loci:
+  enable: true
+
 multigene_filter:
   enable: true
   zero_gene_action: keep
+  # What to do with reads exonically overlapping >1 gene:
+  #   scrap_conflict   (default) scrap reads whose ZT-assigned gene is not among the overlapping genes
+  #   scrap_unresolved  additionally scrap reads with no ZT tag
+  #   keep              retain all multi-gene reads (legacy behavior; the filter was previously a no-op)
+  # Reads resolved by their ZT tag (multi_gene_kept_by_zt) are always kept.
+  multi_gene_action: scrap_conflict
 
 modkit:
   common:
@@ -161,6 +178,13 @@ report:
 genotype:
   enable: false
   jobs: 2
+  # discover_candidate_snps parallelism, decoupled from `jobs` (which sizes the memory-heavy
+  # per-molecule substeps). SNP discovery is embarrassingly parallel and low-memory, so it gets its
+  # own knob. 0/unset -> use the full `threads` budget. It also shards by genomic window
+  # (snp_scan_window_bp) so big chromosomes split into many shards instead of one, and prefilters
+  # each BAM once with samtools (native, callback-free count_coverage) for a large per-shard speedup.
+  snp_scan_jobs: 0
+  snp_scan_window_bp: 1000000
   min_alt_reads: 4
   min_total_cov: 8
   min_alt_frac: 0.10
@@ -169,9 +193,37 @@ genotype:
   min_mapq: 10
   min_mod_site_cov: 1
   mod_sites_require_snp_link: true   # keep only mod sites whose context_key matches a candidate SNP (sites that can pair with a SNP on a shared read); lossless for snp_mod / snp_tx_mod_dependency / haplotype_mod, avoids 100k+-site molecule_mod OOM on deep genome-wide data. Set false to keep all mod sites.
-  mod_jobs: 16                       # max concurrent modkit `extract calls` in build_molecule_mod_table (separate from genotype.jobs; bounds memory since each streams a chromosome). Lower for very deep 6+ BAM runs.
+
+  # Pre-subset each BAM to the union of candidate SNP + mod-site regions (samtools view -M -L)
+  # before the per-molecule scans. Every read that can contribute to a snp/mod/haplotype
+  # association overlaps a candidate site, so this is lossless for every genotype output, while
+  # removing the genome-wide off-target reads that otherwise force build_read_assignment_table to
+  # materialize an all-reads table (~22 GB on disk / ~70 GB in pandas on deep runs).
+  # NOTE: with this enabled the read-assignment table is written as
+  #   <prefix>_read_assignments_candidate_regions.tsv   (reads over candidate regions)
+  # instead of
+  #   <prefix>_read_assignments.tsv                     (every primary read, genome-wide).
+  # Set enable=false to restore the genome-wide table and skip subsetting.
+  subset_bams:
+    enable: true
+    pad: 0        # bases to widen each candidate site before merging (0 is lossless; reads need only overlap)
+    max_reads_per_fragmentform: 0   # 0 = off (full depth). N>0 caps each ZT fragmentform (isoform) to N reads by a SEEDED subsample after region-subsetting, so deep highly-expressed loci can't saturate modkit memory in build_molecule_mod_table. Every isoform keeps up to N reads. Changes results (subsampled) but deterministic for a fixed seed. ~400 is ample for the per-isoform mod/stoichiometry + association tests.
+    subsample_seed: 12345
+  mod_jobs: 16                       # max concurrent modkit `extract calls` in build_molecule_mod_table (decoupled from genotype.jobs; capped at `threads`). The substep now streams shards to disk so the parent RSS is bounded and this can run wide.
+  mod_scan_window_bp: 1000000        # split each chrom's candidate mod sites into windows of this span so heavy chromosomes shard into many balanced modkit extracts instead of one monolith.
+  mod_interval_size: 20000           # modkit extract --interval-size: bounds each modkit process's own peak RSS (independent of the parent). Raise for fewer/larger chunks (faster, more modkit RAM).
   min_group_reads: 4
   min_haplotype_reads: 4
   max_haplotype_snps: 4
   test: auto
   pseudocount: 0.5
+  # Co-localized modifications (mod x mod dependency): do two nearby modification sites co-occur
+  # on the same molecule? The modification analogue of snp_mod_assoc. Reuses molecule_mod_calls,
+  # so it costs no extra BAM/modkit work. Pairs are accumulated per-read (never a global
+  # many-to-many self-merge), so memory stays O(#kept pairs).
+  colocalized_mods:
+    enable: true
+    max_distance: 1000      # max bp between two mod sites to call them co-localized
+    min_pair_reads: 8       # min shared reads covering BOTH sites
+    min_state_reads: 4      # min reads in each state of site A (modified / not)
+    max_sites_per_read: 200 # safety cap: skip pairing on reads with more usable calls than this

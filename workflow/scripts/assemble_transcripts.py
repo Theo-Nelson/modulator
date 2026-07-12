@@ -483,6 +483,82 @@ def _cores_from_gaps(chrom_len, gaps):
     # merge tiny slivers created by point breaks (zero-length removed above).
     return cores
 
+
+def _regionize_chrom_core(handles, chrom, clen, cov_bin_bp, status_every, min_gap_bins,
+                          max_breaks, rand_seed, c0, c1):
+    """Regionize ONE chromosome given already-open BAM handles: stream its reads to build
+    zero-coverage bins, derive gaps -> cores, clip to the requested subregion.
+
+    Deterministic: _inject_random_breaks uses a LOCAL random.Random(seed) and
+    _zero_runs_to_gaps/_cores_from_gaps are pure, so a chromosome's cores never depend on which
+    worker runs it or in what order.
+    """
+    bins, all_zero = _presence_bins_for_chrom(
+        handles, chrom, clen, cov_bin_bp, status_every_reads=status_every
+    )
+    gaps = _zero_runs_to_gaps(bins, all_zero, min_gap_bins)
+    injected = _inject_random_breaks(clen, gaps, cov_bin_bp, max_breaks, seed=rand_seed)
+    cores = _cores_from_gaps(clen, gaps + injected)
+    kept = []
+    for (s, e) in cores:
+        if e <= c0 or s >= c1: continue
+        ss = max(s, c0); ee = min(e, c1)
+        if ee > ss:
+            kept.append((chrom, ss, ee))
+    return chrom, len(cores), kept
+
+
+def _regionize_chrom_worker(task):
+    """Picklable ProcessPool entry point: open this worker's own BAM handles, regionize one
+    chromosome, close them. Result is identical to the serial shared-handle path."""
+    (chrom, clen, bam_paths, cov_bin_bp, status_every, min_gap_bins,
+     max_breaks, rand_seed, c0, c1) = task
+    handles = [pysam.AlignmentFile(bp, "rb") for bp in bam_paths]
+    try:
+        return _regionize_chrom_core(handles, chrom, clen, cov_bin_bp, status_every,
+                                     min_gap_bins, max_breaks, rand_seed, c0, c1)
+    finally:
+        for fh in handles:
+            try: fh.close()
+            except Exception: pass
+
+def _write_zt_tagged_sample(task):
+    """Write one sample's ZT/ZN-tagged BAM (picklable ProcessPool entry point). Each sample re-reads
+    its own original BAM and writes its own tagged BAM, so samples are independent -> parallelizable.
+    BGZF read/write use compression threads (`threads=`), which is the main per-sample speedup."""
+    (in_path, out_path, sample_assign, primary_only, io_threads) = task
+    io_threads = max(1, int(io_threads))
+    _seen_w = 0
+    with pysam.AlignmentFile(in_path, "rb", threads=io_threads) as inp, \
+         pysam.AlignmentFile(out_path, "wb", header=inp.header, threads=io_threads) as outw:
+        for aln in inp.fetch():
+            _seen_w += 1
+            if _seen_w % 1_000_000 == 0:
+                _drop_page_cache(in_path, _bgzf_coffset(inp))
+            if aln.is_unmapped:
+                outw.write(aln); continue
+            if primary_only and (aln.is_secondary or aln.is_supplementary):
+                continue
+            tup = sample_assign.get(aln.query_name) if sample_assign else None
+            if tup:
+                zt, zg, zn, zm = tup
+                try:
+                    aln.set_tag("ZT", zt, value_type="Z", replace=True)
+                except TypeError:
+                    aln.set_tag("ZT", zt)
+                for tag, val in (("ZG", int(zg)), ("ZN", int(zn)), ("ZM", int(zm))):
+                    try:
+                        aln.set_tag(tag, val, value_type="i", replace=True)
+                    except TypeError:
+                        aln.set_tag(tag, val)
+            outw.write(aln)
+    try:
+        pysam.index(out_path)
+    except Exception:
+        pass
+    return out_path
+
+
 # --------------------------- per-core processing ---------------------------
 
 def _process_core(core_args):
@@ -886,39 +962,60 @@ def main():
             if chrom and ln>0:
                 chrom_sizes.append((chrom, ln))
 
-    # Regionize
-    bam_handles = [pysam.AlignmentFile(bp, "rb") for bp in bams]
-    try:
-        print("[INFO] Regionizing via all-sample zero-coverage gaps ...", file=sys.stderr)
-        cores_all = []
-        for chrom, clen in chrom_sizes:
-            if only_chrom and chrom != only_chrom:
-                continue
-            bins, all_zero = _presence_bins_for_chrom(
-                bam_handles, chrom, clen, args.cov_bin_bp, status_every_reads=args.status_every
-            )
-            gaps = _zero_runs_to_gaps(bins, all_zero, args.min_gap_bins)
-            injected = _inject_random_breaks(
-                clen, gaps, args.cov_bin_bp, args.max_breakpoints_per_chrom, seed=args.rand_seed
-            )
-            gaps_all = gaps + injected
-            cores = _cores_from_gaps(clen, gaps_all)
+    # Regionize -- one task per chromosome. This pre-pass streams every read of every BAM, so
+    # running it single-threaded (as it used to) left C-1 cores idle for an O(total_reads) scan.
+    # Each chromosome is independent and deterministic, so fan it out across processes; with
+    # threads<=1 (or a single chromosome) it runs serially exactly as before.
+    print("[INFO] Regionizing via all-sample zero-coverage gaps ...", file=sys.stderr)
+    n_threads = max(1, int(args.threads or 0))
+    regionize_tasks = []
+    for chrom, clen in chrom_sizes:
+        if only_chrom and chrom != only_chrom:
+            continue
+        c0 = only_start0 if (only_chrom == chrom and only_start0 is not None) else 0
+        c1 = only_end0 if (only_chrom == chrom and only_end0 is not None) else clen
+        regionize_tasks.append((chrom, clen, bams, args.cov_bin_bp, args.status_every,
+                                args.min_gap_bins, args.max_breakpoints_per_chrom,
+                                args.rand_seed, c0, c1))
 
-            # restrict to requested subregion
-            c0 = only_start0 if (only_chrom==chrom and only_start0 is not None) else 0
-            c1 = only_end0 if (only_chrom==chrom and only_end0 is not None) else clen
-            kept = 0
-            for (s,e) in cores:
-                if e <= c0 or s >= c1: continue
-                ss = max(s, c0); ee = min(e, c1)
-                if ee > ss:
-                    cores_all.append((chrom, ss, ee))
-                    kept += 1
-            print(f"[INFO] {chrom}: cores_total={len(cores)} kept_in_region={kept}", file=sys.stderr)
-    finally:
-        for fh in bam_handles:
-            try: fh.close()
-            except Exception: pass
+    region_results = {}
+    if n_threads > 1 and len(regionize_tasks) > 1:
+        # Each worker holds one open handle (+index) per BAM, so bound concurrency to keep the
+        # total open-file count sane on many-sample runs (e.g. 64 threads x 6 BAMs = 384 fds).
+        max_workers = min(n_threads, len(regionize_tasks), max(1, 256 // max(1, len(bams))))
+        try:
+            with ProcessPoolExecutor(max_workers=max_workers) as ex:
+                for chrom, n_cores, kept in ex.map(_regionize_chrom_worker, regionize_tasks):
+                    region_results[chrom] = (n_cores, kept)
+        except Exception as exc:
+            print(f"[WARN] Falling back to serial regionization: {exc}", file=sys.stderr)
+            region_results = {}
+    if not region_results:
+        # Serial path: open the BAM handles ONCE and reuse them across chromosomes (avoids
+        # re-opening per contig on references with hundreds of contigs).
+        handles = [pysam.AlignmentFile(bp, "rb") for bp in bams]
+        try:
+            for task in regionize_tasks:
+                (chrom, clen, _bam_paths, cov_bin_bp, status_every, min_gap_bins,
+                 max_breaks, rand_seed, c0, c1) = task
+                chrom, n_cores, kept = _regionize_chrom_core(
+                    handles, chrom, clen, cov_bin_bp, status_every, min_gap_bins,
+                    max_breaks, rand_seed, c0, c1)
+                region_results[chrom] = (n_cores, kept)
+        finally:
+            for fh in handles:
+                try: fh.close()
+                except Exception: pass
+
+    # Reassemble in the ORIGINAL chromosome order so cores_all is order-identical to the
+    # serial path (workers may finish in any order).
+    cores_all = []
+    for chrom, _clen in chrom_sizes:
+        if chrom not in region_results:
+            continue
+        n_cores, kept = region_results[chrom]
+        cores_all.extend(kept)
+        print(f"[INFO] {chrom}: cores_total={n_cores} kept_in_region={len(kept)}", file=sys.stderr)
 
     if not cores_all:
         sys.exit("No cores to process (after regionization)")
@@ -1054,13 +1151,42 @@ def main():
     for iso in final_kept:
         iso["annotation"] = annotate_isoform_safe(iso)
 
+    # --- Novel loci: group by genomic OVERLAP, and name uniquely + deterministically. ---
+    # The old key was (f"NOVEL_{chrom}_{strand}", f"{chrom}:{strand}:{tes}"), which was wrong in
+    # both directions: the display half is identical for every novel locus on a (chrom, strand)
+    # -- so distinct loci collide downstream (the report groups by gene_name; aggregate_by_gene
+    # names per-gene files by gene_name and silently overwrites one locus with another) -- while
+    # the id half keys on the exact TES, so ONE novel locus with APA is split into several
+    # "genes". Instead, merge novel fragmentforms whose exon spans overlap on the same
+    # (chrom, strand) into one locus, and name it after its span.
+    novel_isos = [iso for iso in final_kept
+                  if iso["annotation"]["gene_name"] == "NA" and iso["annotation"]["gene_id"] == "NA"]
+    novel_by_cs = defaultdict(list)
+    for iso in novel_isos:
+        novel_by_cs[(iso["chrom"], iso["strand"])].append(iso)
+    for (chrom, strand), isos in novel_by_cs.items():
+        spans = sorted((i["rep_exons"][0][0], i["rep_exons"][-1][1], k) for k, i in enumerate(isos))
+        comps = []  # [start, end, [iso indices]] -- connected components by span overlap
+        for s, e, k in spans:
+            if comps and s <= comps[-1][1]:
+                comps[-1][1] = max(comps[-1][1], e)
+                comps[-1][2].append(k)
+            else:
+                comps.append([s, e, [k]])
+        tok = {"+": "plus", "-": "minus"}.get(strand, "na")
+        for ordinal, (s, e, ks) in enumerate(comps, 1):
+            name = f"NOVEL_{chrom}_{tok}_{ordinal:03d}_{s}_{e}"
+            lid = f"{chrom}:{strand}:{s}-{e}"
+            for k in ks:
+                isos[k]["_novel_locus"] = (name, lid)
+
     buckets = defaultdict(list)
     for iso in final_kept:
         ann = iso["annotation"]
         if ann["gene_name"] != "NA" and ann["gene_id"] != "NA":
             gkey = (ann["gene_name"], ann["gene_id"])
         else:
-            gkey = (f"NOVEL_{iso['chrom']}_{iso['strand']}", f"{iso['chrom']}:{iso['strand']}:{iso['tes']}")
+            gkey = iso["_novel_locus"]
         buckets[gkey].append(iso)
 
     gene_keys_sorted = sorted(buckets.keys(), key=lambda x: (x[0], x[1]))
@@ -1330,37 +1456,29 @@ def main():
     if args.write_zt_tagged_sample_bams:
         out_dir2 = os.path.join(os.path.dirname(args.out_gtf) or ".", "zt_tagged")
         os.makedirs(out_dir2, exist_ok=True)
+        # Parallelize the tagged-BAM writing across samples (was a serial for-loop; on genome-wide
+        # data each sample re-reads a ~100 GB BAM and writes a ~40 GB tagged BAM single-threaded --
+        # the dominant assemble tail). Samples are independent, so fan them out; each writer also
+        # gets BGZF compression threads. Output is byte-identical to the serial path.
+        n_threads = max(1, int(args.threads or 0))
+        tasks = []
         for bam in bams:
-            sample = os.path.basename(bam).replace(".bam","")
-            in_path = bam
+            sample = os.path.basename(bam).replace(".bam", "")
             out_path = os.path.join(out_dir2, f"{sample}.zt_tagged.bam")
-            with pysam.AlignmentFile(in_path, "rb") as inp, \
-                 pysam.AlignmentFile(out_path, "wb", header=inp.header) as outw:
-                _seen_w = 0
-                for aln in (inp.fetch()):
-                    _seen_w += 1
-                    if _seen_w % 1_000_000 == 0:
-                        _drop_page_cache(in_path, _bgzf_coffset(inp))
-                    if aln.is_unmapped:
-                        outw.write(aln); continue
-                    if args.primary_only and (aln.is_secondary or aln.is_supplementary):
-                        continue
-                    qn = aln.query_name
-                    tup = assign.get(sample, {}).get(qn) if assign else None
-                    if tup:
-                        zt, zg, zn, zm = tup
-                        try:
-                            aln.set_tag("ZT", zt, value_type="Z", replace=True)
-                        except TypeError:
-                            aln.set_tag("ZT", zt)
-                        for tag, val in (("ZG", int(zg)), ("ZN", int(zn)), ("ZM", int(zm))):
-                            try:
-                                aln.set_tag(tag, val, value_type="i", replace=True)
-                            except TypeError:
-                                aln.set_tag(tag, val)
-                    outw.write(aln)
-            try: pysam.index(out_path)
-            except Exception: pass
+            tasks.append((bam, out_path, (assign.get(sample, {}) if assign else {}),
+                          bool(args.primary_only), max(2, n_threads // max(1, 2 * len(bams)))))
+        n_workers = min(len(tasks), n_threads)
+        wrote = []
+        if n_workers > 1 and len(tasks) > 1:
+            try:
+                with ProcessPoolExecutor(max_workers=n_workers) as ex:
+                    wrote = list(ex.map(_write_zt_tagged_sample, tasks))
+            except Exception as exc:
+                print(f"[WARN] parallel zt_tagged write failed ({exc}); serial fallback", file=sys.stderr)
+                wrote = []
+        if not wrote:
+            wrote = [_write_zt_tagged_sample(t) for t in tasks]
+        for out_path in wrote:
             print(f"[OK] Wrote ZT/ZN-tagged sample BAM: {out_path}", file=sys.stderr)
 
     print(f"[OK] Wrote GTF: {args.out_gtf}", file=sys.stderr)

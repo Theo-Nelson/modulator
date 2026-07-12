@@ -129,7 +129,9 @@ def main():
 
     out_dir = os.path.dirname(args.out_tsv) or "."
     os.makedirs(out_dir, exist_ok=True)
-    df.to_csv(args.out_tsv, sep="\t", index=False)
+    _tmp = args.out_tsv + ".tmp"          # atomic write: a partial file from an OOM/kill
+    df.to_csv(_tmp, sep="\t", index=False)  # is never left named as the final output, so
+    os.replace(_tmp, args.out_tsv)         # --resume can safely reuse a non-empty final file.
 
 
 if __name__ == "__main__":

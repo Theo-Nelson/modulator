@@ -40,14 +40,24 @@ def benjamini_hochberg(pvals: Iterable[float]) -> np.ndarray:
     p = np.asarray(list(pvals), dtype=float)
     if p.size == 0:
         return np.asarray([], dtype=float)
-    order = np.argsort(p)
-    ranks = np.empty(p.size, dtype=int)
-    ranks[order] = np.arange(1, p.size + 1)
-    adj = p * p.size / ranks
+    # Rank only the finite p-values (statsmodels.multipletests semantics). A single NaN
+    # would otherwise sort last and, via minimum.accumulate on the reversed array, poison
+    # every adjusted p-value with NaN -> total silent loss of significance. NaN in stays NaN.
+    out = np.full(p.size, np.nan, dtype=float)
+    idx = np.flatnonzero(np.isfinite(p))
+    m = idx.size
+    if m == 0:
+        return out
+    pf = p[idx]
+    order = np.argsort(pf)
+    ranks = np.empty(m, dtype=int)
+    ranks[order] = np.arange(1, m + 1)
+    adj = pf * m / ranks
     adj_sorted = np.minimum.accumulate(adj[order][::-1])[::-1]
-    out = np.empty_like(adj)
-    out[order] = adj_sorted
-    return np.minimum(out, 1.0)
+    adj_final = np.empty(m, dtype=float)
+    adj_final[order] = adj_sorted
+    out[idx] = np.minimum(adj_final, 1.0)
+    return out
 
 
 def max_abs_distribution_shift(table: np.ndarray) -> float:
@@ -231,6 +241,89 @@ def context_key_from_row(
 
 def normalize_string_series(series: pd.Series, fill_value: str = "") -> pd.Series:
     return series.fillna(fill_value).astype(str).replace({"nan": fill_value, "None": fill_value, "null": fill_value})
+
+
+# --------------------------------------------------------------------------------------
+# Read-key prefiltering for the pairing tests (snp x mod, hap x mod).
+#
+# All of them inner-join a LARGE per-read table (molecule_snps: 7.5M rows / 1.7GB on Huh7 mock;
+# molecule_haplotypes) against a SMALL one (molecule_mod_calls: ~100k rows over ~53k reads), then
+# keep only rows sharing (sample, qname). Loading the large table whole costs GiB and a row-wise
+# apply over every row -- yet an inner join can never keep a row whose read is absent from the
+# small table. So: read the small table first, collect its read keys, then stream the large table
+# in chunks and retain only matching rows. Exactly lossless, and peak memory drops to
+# O(matching rows) instead of O(whole table).
+# --------------------------------------------------------------------------------------
+
+def tsv_header(path: str) -> List[str]:
+    with open(path) as fh:
+        return fh.readline().rstrip("\n").split("\t")
+
+
+def read_keys_of(df: pd.DataFrame) -> set:
+    """Set of 'sample\\x00qname' keys (a vectorized stand-in for tuple(sample, qname))."""
+    if df.empty:
+        return set()
+    return set(df["sample"].astype(str) + "\x00" + df["qname"].astype(str))
+
+
+def stream_filter_by_read_keys(
+    path: str,
+    usecols: List[str],
+    read_keys: set,
+    *,
+    chunksize: int = 500_000,
+    row_filter=None,
+) -> pd.DataFrame:
+    """Chunked read of a large per-read table, keeping only rows whose (sample, qname) appears in
+    `read_keys` (and that pass `row_filter`, applied per chunk before the key test).
+
+    `usecols` MUST still include every column that collides with the other table's columns, so the
+    downstream merge's ("_snp", "_mod") suffixing is unchanged. Row order is preserved.
+    """
+    if not read_keys:
+        return pd.DataFrame(columns=usecols)
+    kept = []
+    for chunk in pd.read_csv(path, sep="\t", usecols=usecols, low_memory=False, chunksize=chunksize):
+        if row_filter is not None:
+            chunk = chunk[row_filter(chunk)]
+            if chunk.empty:
+                continue
+        keys = chunk["sample"].astype(str) + "\x00" + chunk["qname"].astype(str)
+        chunk = chunk[keys.isin(read_keys)]
+        if not chunk.empty:
+            kept.append(chunk)
+    if not kept:
+        return pd.DataFrame(columns=usecols)
+    return pd.concat(kept, ignore_index=True)
+
+
+def load_molecule_mods_for_pairing(path: str, extra_cols: Optional[List[str]] = None) -> pd.DataFrame:
+    """Load molecule_mod_calls with only the columns the pairing tests need, apply the usable /
+    state_detail filters, and add target_state. Same filtering as before, just column-pruned."""
+    header = tsv_header(path)
+    want = ["sample", "qname", "mod_site_id", "chrom", "start0", "end0",
+            "target_mod_code", "state_detail", "gene_name", "metagene_index"]
+    if "usable" in header:
+        want.append("usable")
+    else:
+        want.extend([c for c in ("fail", "within_alignment") if c in header])
+    for c in (extra_cols or []):
+        if c in header and c not in want:
+            want.append(c)
+    usecols = [c for c in want if c in header]
+
+    mod_df = pd.read_csv(path, sep="\t", usecols=usecols, low_memory=False)
+    if mod_df.empty:
+        return mod_df
+    if "usable" in mod_df.columns:
+        mod_df = mod_df[mod_df["usable"].fillna(False)].copy()
+    else:
+        mod_df = mod_df[(~mod_df["fail"].fillna(True)) & mod_df["within_alignment"].fillna(False)].copy()
+    mod_df = mod_df[mod_df["state_detail"].isin(["modified", "canonical", "other_mod"])].copy()
+    if not mod_df.empty:
+        mod_df["target_state"] = mod_df["state_detail"].eq("modified").astype(int)
+    return mod_df
 
 
 def run_process_jobs(fn, task_args: List[tuple], jobs: int, *, verbose: bool = False, label: str = "parallel jobs"):

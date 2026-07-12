@@ -6,7 +6,24 @@ import os
 
 import pandas as pd
 
-from genotype_utils import benjamini_hochberg, max_abs_distribution_shift, run_contingency_test
+from genotype_utils import benjamini_hochberg, max_abs_distribution_shift, run_contingency_test, tsv_header
+
+# Only these columns are used (grouping: snp_id/allele_class/ZT; per-SNP metadata: the rest). The
+# molecule_snps table is ~1.7 GB / 7.5M rows on Huh7 mock, and reading all 21 object-dtype columns
+# is what pushes this to ~5.6 GB; loading just these -- with the repeated string columns as
+# categoricals -- is far lighter and produces identical output.
+WANTED_COLS = [
+    "snp_id", "allele_class", "ZT", "chrom", "pos1", "ref", "alt",
+    "gene_names", "gene_ids", "metagene_indices",
+]
+# Categoricals for the repeated low-cardinality columns. allele_class and ZT stay object:
+# read_csv builds the full string column transiently regardless of dtype, so categorical ZT gives
+# no read-time saving here and only adds fillna/observed traps. The real cut comes from usecols
+# (10 of 21 columns) + these categoricals.
+CATEGORICAL = {
+    "snp_id": "category", "chrom": "category", "ref": "category", "alt": "category",
+    "gene_names": "category", "gene_ids": "category", "metagene_indices": "category",
+}
 
 
 def parse_args():
@@ -22,14 +39,17 @@ def parse_args():
 
 def main():
     args = parse_args()
-    df = pd.read_csv(args.molecule_snps, sep="\t", low_memory=False)
+    header = tsv_header(args.molecule_snps)
+    usecols = [c for c in WANTED_COLS if c in header]
+    dtype = {c: t for c, t in CATEGORICAL.items() if c in usecols}
+    df = pd.read_csv(args.molecule_snps, sep="\t", usecols=usecols, dtype=dtype, low_memory=False)
     keep = df["allele_class"].isin(["ref", "alt"]) & df["ZT"].fillna("").astype(str).ne("")
     df = df.loc[keep].copy()
 
     rows = []
-    for snp_id, sub in df.groupby("snp_id", sort=False):
-        grp = sub.groupby(["allele_class", "ZT"], as_index=False).size()
-        tx_totals = grp.groupby("ZT")["size"].sum()
+    for snp_id, sub in df.groupby("snp_id", sort=False, observed=True):
+        grp = sub.groupby(["allele_class", "ZT"], as_index=False, observed=True).size()
+        tx_totals = grp.groupby("ZT", observed=True)["size"].sum()
         keep_tx = sorted(tx_totals[tx_totals >= int(args.min_transcript_reads)].index)
         if len(keep_tx) < 2:
             continue

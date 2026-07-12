@@ -40,6 +40,7 @@ import argparse
 import tempfile
 import shutil
 import heapq
+from concurrent.futures import ProcessPoolExecutor
 from collections import defaultdict, namedtuple
 from typing import Dict, Tuple, List, Optional
 
@@ -1100,6 +1101,87 @@ def compute_per_sample_mod_stats_from_dedup(
 # ----------------------------- Per-gene outputs + pivots -----------------------------
 
 
+def _write_one_gene_group(lines, gene_name, gene_id, mod, out_dir, prefix_base,
+                          write_per_gene, write_pivots):
+    """Write the per-gene row TSV and/or the 3 pivots for ONE (gene_name, gene_id, mod) group.
+    `lines` are the already-grouped rows (18 tab-cols each) from the sorted per_gene file. Each
+    group writes to its own basepath files, so this is safe to run in parallel across groups."""
+    safe_g = sanitize_filename_token(gene_name if gene_name else "NA")
+    safe_mod = sanitize_filename_token(str(mod))
+    bp = os.path.join(out_dir, f"{prefix_base}__{safe_g}__{safe_mod}")
+
+    row_fh = open(f"{bp}.tsv", "w") if write_per_gene else None
+    if row_fh is not None:
+        row_fh.write("\t".join(PER_GENE_COLS) + "\n")
+
+    piv_cov = defaultdict(dict)
+    piv_nmod = defaultdict(dict)
+    piv_frac = defaultdict(dict)
+    samples_seen = set()
+
+    for ln in lines:
+        p = ln.rstrip("\n").split("\t")
+        if len(p) < 18:
+            continue
+        gname, gid, m = p[0], p[1], p[2]
+        chrom, start0, end0, strand, zn, sample = p[3], p[4], p[5], p[6], p[7], p[8]
+        cov, nmod, frac = p[9], p[10], p[17]
+        ncan, nother, ndel, nfail, ndiff, nnocall = p[11], p[12], p[13], p[14], p[15], p[16]
+        if row_fh is not None:
+            row_fh.write("\t".join([
+                gname, gid, m, chrom, start0, end0, strand, zn, sample,
+                cov, nmod, ncan, nother, ndel, nfail, ndiff, nnocall, frac
+            ]) + "\n")
+        if write_pivots:
+            samples_seen.add(sample)
+            idx = (chrom, int(start0), int(end0), strand, int(zn))
+            if sample not in piv_cov[idx]:
+                piv_cov[idx][sample] = int(cov)
+                piv_nmod[idx][sample] = int(nmod)
+                piv_frac[idx][sample] = float(frac)
+
+    if row_fh is not None:
+        row_fh.close()
+
+    if write_pivots:
+        samples = sorted(samples_seen)
+        idxs = sorted(piv_cov.keys(), key=lambda t: (t[0], t[1], t[2], t[3], t[4]))
+
+        def write_pivot(path, m, is_float: bool):
+            with open(path, "w") as f:
+                f.write("\t".join(["chrom", "start0", "end0", "strand", "ZN_transcript_index"] + samples) + "\n")
+                for idx in idxs:
+                    chrom, s0, e0, strand, zn = idx
+                    row = [chrom, str(s0), str(e0), strand, str(zn)]
+                    smap = m.get(idx, {})
+                    for s in samples:
+                        v = smap.get(s, 0)
+                        row.append(f"{float(v):.6f}" if is_float else str(int(v)))
+                    f.write("\t".join(row) + "\n")
+
+        write_pivot(f"{bp}_cov_pivot.tsv", piv_cov, is_float=False)
+        write_pivot(f"{bp}_Nmod_pivot.tsv", piv_nmod, is_float=False)
+        write_pivot(f"{bp}_frac_pivot.tsv", piv_frac, is_float=True)
+
+
+def _emit_gene_group_worker(task):
+    """Picklable ProcessPool entry point: read one group's byte range from the sorted file and
+    write its outputs. Reading one gene's rows keeps per-worker memory to a single gene."""
+    (sorted_path, start_off, end_off, gene_name, gene_id, mod,
+     out_dir, prefix_base, write_per_gene, write_pivots) = task
+    lines = []
+    with open(sorted_path, "rb") as f:
+        f.seek(start_off)
+        while f.tell() < end_off:
+            raw = f.readline()
+            if not raw:
+                break
+            lines.append(raw.decode("utf-8", "replace"))
+    _write_one_gene_group(lines, gene_name, gene_id, mod, out_dir, prefix_base,
+                          write_per_gene, write_pivots)
+    return 1
+
+
 def generate_per_gene_outputs_from_dedup(
     dedup_tsv: str,
     out_prefix: str,
@@ -1108,7 +1190,8 @@ def generate_per_gene_outputs_from_dedup(
     write_pivots: bool,
     workdir: str,
     chunk_lines: int,
-    verbose: bool = False
+    verbose: bool = False,
+    jobs: int = 1,
 ):
     """
     Writes per-gene×mod tables and pivots under:
@@ -1116,6 +1199,11 @@ def generate_per_gene_outputs_from_dedup(
 
     - row TSV per gene/mod: <prefix_base>__<gene>__<mod>.tsv
     - pivots: *_cov_pivot.tsv, *_Nmod_pivot.tsv, *_frac_pivot.tsv
+
+    Per-gene groups are independent (distinct output files), so with jobs>1 they are written
+    concurrently across a ProcessPool (each worker reads one gene's byte range from the sorted
+    file -> bounded memory). jobs<=1 keeps a plain serial pass (single-core fallback). Output is
+    identical to the serial path.
     """
     write_per_gene = parse_bool(write_per_gene, default=False)
     write_pivots = parse_bool(write_pivots, default=True)
@@ -1151,102 +1239,56 @@ def generate_per_gene_outputs_from_dedup(
     per_gene_sorted = os.path.join(workdir, f"{tag}.per_gene.sorted.tsv")
     external_sort_tsv(per_gene_uns, per_gene_sorted, key_per_gene, tmpdir=workdir, chunk_lines=chunk_lines, verbose=verbose)
 
-    def basepath(gene_name: str, mod: str) -> str:
-        safe_g = sanitize_filename_token(gene_name if gene_name else "NA")
-        safe_mod = sanitize_filename_token(str(mod))
-        return os.path.join(out_dir, f"{prefix_base}__{safe_g}__{safe_mod}")
-
-    curr_gm = None
-    row_fh = None
-
-    piv_cov = defaultdict(dict)   # idx -> {sample: cov}
-    piv_nmod = defaultdict(dict)  # idx -> {sample: nmod}
-    piv_frac = defaultdict(dict)  # idx -> {sample: frac}
-    samples_seen = set()
-
-    def flush_group():
-        nonlocal curr_gm, row_fh, piv_cov, piv_nmod, piv_frac, samples_seen
-        if curr_gm is None:
-            return
-        gene_name, gene_id, mod = curr_gm
-        bp = basepath(gene_name, mod)
-
-        if row_fh is not None:
-            row_fh.close()
-            row_fh = None
-
-        if write_pivots:
-            samples = sorted(samples_seen)
-            idxs = sorted(piv_cov.keys(), key=lambda t: (t[0], t[1], t[2], t[3], t[4]))
-
-            def write_pivot(path, m, is_float: bool):
-                with open(path, "w") as f:
-                    f.write("\t".join(["chrom", "start0", "end0", "strand", "ZN_transcript_index"] + samples) + "\n")
-                    for idx in idxs:
-                        chrom, s0, e0, strand, zn = idx
-                        row = [chrom, str(s0), str(e0), strand, str(zn)]
-                        smap = m.get(idx, {})
-                        for s in samples:
-                            v = smap.get(s, 0)
-                            if is_float:
-                                row.append(f"{float(v):.6f}")
-                            else:
-                                row.append(str(int(v)))
-                        f.write("\t".join(row) + "\n")
-
-            write_pivot(f"{bp}_cov_pivot.tsv", piv_cov, is_float=False)
-            write_pivot(f"{bp}_Nmod_pivot.tsv", piv_nmod, is_float=False)
-            write_pivot(f"{bp}_frac_pivot.tsv", piv_frac, is_float=True)
-
-        piv_cov = defaultdict(dict)
-        piv_nmod = defaultdict(dict)
-        piv_frac = defaultdict(dict)
-        samples_seen = set()
-
-    with open(per_gene_sorted, "r") as f:
-        for ln in f:
-            p = ln.rstrip("\n").split("\t")
+    # Index the (gene_name, gene_id, mod) group byte-ranges in the sorted file (one cheap serial
+    # pass), then emit each group -- serially (jobs<=1) or across a ProcessPool (jobs>1).
+    groups = []  # (gname, gid, mod, start_off, end_off)
+    with open(per_gene_sorted, "rb") as f:
+        cur = None
+        start = 0
+        while True:
+            off = f.tell()
+            raw = f.readline()
+            if not raw:
+                if cur is not None:
+                    groups.append((cur[0], cur[1], cur[2], start, off))
+                break
+            p = raw.decode("utf-8", "replace").rstrip("\n").split("\t")
             if len(p) < 18:
                 continue
+            gm = (p[0], p[1], p[2])
+            if cur is None:
+                cur = gm
+                start = off
+            elif gm != cur:
+                groups.append((cur[0], cur[1], cur[2], start, off))
+                cur = gm
+                start = off
 
-            gname, gid, mod = p[0], p[1], p[2]
-            chrom, start0, end0, strand, zn, sample = p[3], p[4], p[5], p[6], p[7], p[8]
-            cov, nmod, frac = p[9], p[10], p[17]
-            ncan, nother, ndel, nfail, ndiff, nnocall = p[11], p[12], p[13], p[14], p[15], p[16]
+    tasks = [
+        (per_gene_sorted, s_off, e_off, gname, gid, mod, out_dir, prefix_base,
+         write_per_gene, write_pivots)
+        for (gname, gid, mod, s_off, e_off) in groups
+    ]
 
-            gm = (gname, gid, mod)
-            if curr_gm is None:
-                curr_gm = gm
-                if write_per_gene:
-                    bp = basepath(gname, mod)
-                    row_fh = open(f"{bp}.tsv", "w")
-                    row_fh.write("\t".join(PER_GENE_COLS) + "\n")
+    jobs = max(1, int(jobs))
+    if jobs <= 1 or len(tasks) <= 1:
+        for t in tasks:
+            _emit_gene_group_worker(t)
+    else:
+        try:
+            with ProcessPoolExecutor(max_workers=min(jobs, len(tasks))) as ex:
+                for _ in ex.map(_emit_gene_group_worker, tasks):
+                    pass
+        except Exception as exc:
+            if verbose:
+                print(f"[per-gene {tag}] parallel emit failed ({exc}); serial fallback",
+                      file=sys.stderr)
+            for t in tasks:
+                _emit_gene_group_worker(t)
 
-            if gm != curr_gm:
-                flush_group()
-                curr_gm = gm
-                if write_per_gene:
-                    bp = basepath(gname, mod)
-                    row_fh = open(f"{bp}.tsv", "w")
-                    row_fh.write("\t".join(PER_GENE_COLS) + "\n")
-
-            if write_per_gene and row_fh is not None:
-                row_fh.write("\t".join([
-                    gname, gid, mod, chrom, start0, end0, strand, zn, sample,
-                    cov, nmod, ncan, nother, ndel, nfail, ndiff, nnocall, frac
-                ]) + "\n")
-
-            if write_pivots:
-                samples_seen.add(sample)
-                idx = (chrom, int(start0), int(end0), strand, int(zn))
-                if sample not in piv_cov[idx]:
-                    piv_cov[idx][sample] = int(cov)
-                    piv_nmod[idx][sample] = int(nmod)
-                    piv_frac[idx][sample] = float(frac)
-
-    flush_group()
     if verbose:
-        print(f"[per-gene {tag}] wrote outputs under {out_dir}", file=sys.stderr)
+        print(f"[per-gene {tag}] wrote outputs for {len(groups)} gene-group(s) under "
+              f"{out_dir} (jobs={jobs})", file=sys.stderr)
 
 
 # ----------------------------- Key functions for sorts -----------------------------

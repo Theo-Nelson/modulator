@@ -202,6 +202,16 @@ def main():
         default="keep",
         help="What to do with reads overlapping zero genes in the GTF exonic union"
     )
+    ap.add_argument(
+        "--multi-gene-action",
+        choices=["scrap_conflict", "scrap_unresolved", "keep"],
+        default="scrap_conflict",
+        help="What to do with reads exonically overlapping >1 gene. "
+             "scrap_conflict (default): scrap only reads whose ZT-assigned gene is not among the "
+             "overlapping genes (multi_gene_assignment_conflict). scrap_unresolved: also scrap reads "
+             "with no ZT tag (multi_gene_no_zt). keep: retain all multi-gene reads (legacy no-op). "
+             "Reads resolved by their ZT tag (multi_gene_kept_by_zt) are always kept."
+    )
     args = ap.parse_args()
 
     os.makedirs(os.path.dirname(args.out_clean_bam) or ".", exist_ok=True)
@@ -284,7 +294,6 @@ def main():
                 assigned_gene_id = ""
                 assigned_gene_name = ""
                 resolution = "multi_gene_unresolved"
-                action = "keep"
 
                 if zt and zt in tx_meta:
                     assigned_gene_id = tx_meta[zt].get("gene_id", "")
@@ -295,6 +304,21 @@ def main():
                         resolution = "multi_gene_assignment_conflict"
                 else:
                     resolution = "multi_gene_no_zt"
+
+                # Decide scrap vs keep from the resolution and the policy. Previously `action`
+                # was hard-coded "keep" and never reassigned, so the whole multi-gene filter was
+                # a no-op (every scrap branch below was dead and the scrap outputs were always
+                # empty); multi-gene reads then contaminated per-ZN pileup and genotype scans.
+                if args.multi_gene_action == "keep":
+                    action = "keep"
+                elif resolution == "multi_gene_kept_by_zt":
+                    action = "keep"
+                elif resolution == "multi_gene_assignment_conflict":
+                    action = "scrap"
+                elif resolution == "multi_gene_no_zt":
+                    action = "scrap" if args.multi_gene_action == "scrap_unresolved" else "keep"
+                else:
+                    action = "keep"
 
                 if action == "scrap":
                     scrap_out.write(aln)

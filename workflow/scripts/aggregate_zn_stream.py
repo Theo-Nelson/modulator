@@ -273,14 +273,17 @@ def main():
         print("[stream] phase2: concatenated long + dedup outputs", file=sys.stderr, flush=True)
 
     # ---- Phase 3: reuse the (order-agnostic) per-sample-stats + per-gene/pivot writers ----
+    # The per-gene/pivot writers are parallelized across genes (jobs>1); jobs<=1 stays serial.
     if args.emit_raw:
         agg.compute_per_sample_mod_stats_from_dedup(dedup_raw, base, "RAW", workdir, args.chunk_lines, args.verbose)
         agg.generate_per_gene_outputs_from_dedup(dedup_raw, base, "RAW", args.write_raw_per_gene,
-                                                 args.write_pivots, workdir, args.chunk_lines, args.verbose)
+                                                 args.write_pivots, workdir, args.chunk_lines, args.verbose,
+                                                 jobs=args.jobs)
     if args.emit_filtered and args.filter_enable:
         agg.compute_per_sample_mod_stats_from_dedup(dedup_filt, base, "FILTERED", workdir, args.chunk_lines, args.verbose)
         agg.generate_per_gene_outputs_from_dedup(dedup_filt, base, "FILTERED", args.write_filtered_per_gene,
-                                                 args.write_pivots, workdir, args.chunk_lines, args.verbose)
+                                                 args.write_pivots, workdir, args.chunk_lines, args.verbose,
+                                                 jobs=args.jobs)
 
     # success -> drop the (large) workdir
     shutil.rmtree(workdir, ignore_errors=True)

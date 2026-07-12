@@ -6,7 +6,17 @@ import os
 
 import pandas as pd
 
-from genotype_utils import benjamini_hochberg, binary_rate_delta, context_key_from_row, context_key_from_snp_row, run_contingency_test
+from genotype_utils import (
+    benjamini_hochberg,
+    binary_rate_delta,
+    context_key_from_row,
+    context_key_from_snp_row,
+    load_molecule_mods_for_pairing,
+    read_keys_of,
+    run_contingency_test,
+    stream_filter_by_read_keys,
+    tsv_header,
+)
 
 
 def parse_args():
@@ -20,18 +30,30 @@ def parse_args():
     ap.add_argument("--pseudocount", type=float, default=0.5)
     return ap.parse_args()
 
+SNP_USECOLS = [
+    # Every column the merge/row-builder touches. chrom/start0/end0 are kept even though the SNP
+    # side does not use them directly, because they must still COLLIDE with the mod side so pandas
+    # emits the "_snp"/"_mod" suffixes the row builder reads (e.g. start0_mod, chrom_snp).
+    "sample", "qname", "snp_id", "chrom", "pos1", "start0", "end0",
+    "allele_class", "gene_names", "metagene_indices",
+]
+
+
 def main():
     args = parse_args()
-    snp_df = pd.read_csv(args.molecule_snps, sep="\t", low_memory=False)
-    mod_df = pd.read_csv(args.molecule_mods, sep="\t", low_memory=False)
 
-    snp_df = snp_df[snp_df["allele_class"].isin(["ref", "alt"])].copy()
-    if "usable" in mod_df.columns:
-        mod_df = mod_df[mod_df["usable"].fillna(False)].copy()
-    else:
-        mod_df = mod_df[(~mod_df["fail"].fillna(True)) & mod_df["within_alignment"].fillna(False)].copy()
-    mod_df = mod_df[mod_df["state_detail"].isin(["modified", "canonical", "other_mod"])].copy()
-    mod_df["target_state"] = mod_df["state_detail"].eq("modified").astype(int)
+    # Load the SMALL mod table first, filter it, and take its read keys. The merge below is an
+    # inner join on (sample, qname), so a SNP row whose read has no usable mod call can never
+    # survive it -- streaming molecule_snps and keeping only matching reads is therefore exactly
+    # lossless, and avoids materializing the whole (multi-GB, 7.5M-row) SNP table.
+    mod_df = load_molecule_mods_for_pairing(args.molecule_mods)
+    mod_keys = read_keys_of(mod_df)
+
+    snp_usecols = [c for c in SNP_USECOLS if c in tsv_header(args.molecule_snps)]
+    snp_df = stream_filter_by_read_keys(
+        args.molecule_snps, snp_usecols, mod_keys,
+        row_filter=lambda ch: ch["allele_class"].isin(["ref", "alt"]),
+    )
 
     if snp_df.empty or mod_df.empty:
         out = pd.DataFrame(columns=[
