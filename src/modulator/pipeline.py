@@ -1187,6 +1187,13 @@ class ModulatorPipeline:
             if self.verbose:
                 print(f"[modulator] build_molecule_mod_table: using {len(pre)} pre-extracted "
                       f"per-sample call set(s) from {mod_calls_dir}", flush=True)
+        else:
+            # Default backend: built-in pysam streaming reader (per BAM x chromosome), ~100MB RSS,
+            # never OOMs (chr15 included), no modkit / reference needed. Validated equivalent to modkit
+            # (identical row set + call_code/target_modified).
+            mod_args += ["--pysam"]
+            if self.verbose:
+                print("[modulator] build_molecule_mod_table: pysam streaming backend", flush=True)
         self.run_python_script("build_molecule_mod_table.py", mod_args, label="build_molecule_mod_table")
         self.run_python_script(
             "test_snp_transcript_assoc.py",

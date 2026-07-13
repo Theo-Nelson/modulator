@@ -35,7 +35,7 @@ from itertools import combinations
 
 import pandas as pd
 
-from genotype_utils import benjamini_hochberg, binary_rate_delta, context_key_from_row, run_contingency_test
+from genotype_utils import benjamini_hochberg, binary_rate_delta, context_key_from_row, run_contingency_test, tsv_header
 
 
 OUT_COLS = [
@@ -83,7 +83,16 @@ def main():
         _write_empty(args.out_tsv)
         return
 
-    mod_df = pd.read_csv(args.molecule_mods, sep="\t", low_memory=False)
+    # Load only the columns used below (every referenced column, incl. those context_key_from_row
+    # reads: chrom / metagene_index / gene_name). The full 31-column table is 26-66 GB and an
+    # all-column low_memory=False load peaked near the 256 GB node cap on deep genome-wide runs;
+    # pruning to these ~11 columns is output-identical and ~2-3x lighter.
+    _want = ["sample", "qname", "mod_site_id", "chrom", "start0", "strand", "target_mod_code",
+             "state_detail", "gene_name", "gene_names", "metagene_index",
+             "usable", "fail", "within_alignment"]
+    _hdr = tsv_header(args.molecule_mods)
+    mod_df = pd.read_csv(args.molecule_mods, sep="\t", low_memory=False,
+                         usecols=[c for c in _want if c in _hdr])
     if mod_df.empty:
         _write_empty(args.out_tsv)
         return

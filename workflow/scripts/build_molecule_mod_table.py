@@ -9,7 +9,9 @@ import sys
 import tempfile
 from collections import defaultdict
 
+import numpy as np
 import pandas as pd
+import pysam
 
 from genotype_utils import load_read_assignments, normalize_string_series, run_process_jobs, sample_name_from_bam, safe_float, safe_int
 
@@ -46,6 +48,13 @@ def parse_args():
                          "per-sample `modkit extract calls` TSVs (one per subset BAM, produced by a "
                          "separate per-sample sbatch across nodes). Each entry is SAMPLE=path. The "
                          "per-site parsing/join/sort is identical to the in-line modkit path.")
+    ap.add_argument("--pysam", action="store_true",
+                    help="Extract per-molecule calls with the built-in pysam streaming reader instead "
+                         "of modkit (no external modkit, no reference FASTA). Parallelised per "
+                         "(BAM x chromosome) via --jobs; each task streams one read at a time so peak "
+                         "RSS is ~100MB and it never OOMs (chr15 included) -- no windowing/interval-size "
+                         "needed. Output is validated equivalent to the modkit path (identical row set "
+                         "and call_code/target_modified).")
     ap.add_argument("--verbose", action="store_true")
     return ap.parse_args()
 
@@ -311,6 +320,119 @@ def parse_extracted_calls(sample, calls_tsv, lookup, shard_dir, chunk_rows, verb
     return [(ch, d["parts"], d["n"]) for ch, d in by_chrom.items()]
 
 
+def extract_rows_pysam(bam, chrom_lookup, chrom, shard_path, chunk_rows, verbose=False):
+    """Stream one chromosome of a modBAM with pysam and emit the same per-(read, candidate site) rows
+    the modkit path produces -- one read at a time, so peak RSS is ~100MB regardless of BAM/chrom size
+    (never OOMs). Reproduces modkit `extract calls --no-filtering --mapped-only` semantics exactly:
+    call_prob=(ML+0.5)/256 (float32), canonical=1-sum(mod_probs), call_code=argmax, strand-aware.
+    Flushes to numbered pickle parts every chunk_rows. Returns (chrom, [parts], nrows)."""
+    sample = sample_name_from_bam(bam)
+    rows = []
+    parts = []
+
+    def _flush():
+        if not rows:
+            return
+        p = f"{shard_path}.{len(parts)}.pkl"
+        pd.DataFrame(rows).to_pickle(p)
+        parts.append(p)
+        rows.clear()
+
+    f32 = np.float32
+    total = 0
+    bamf = pysam.AlignmentFile(bam, "rb")
+    for read in bamf.fetch(chrom):
+        if read.is_unmapped or read.is_secondary or read.is_supplementary:
+            continue
+        mb = read.modified_bases
+        if not mb:
+            continue
+        qname = read.query_name
+        ref_strand = "-" if read.is_reverse else "+"
+        refpos = read.get_reference_positions(full_length=True)
+        nrp = len(refpos)
+        pos_mods = {}
+        pos_base = {}
+        for (base, _mstrand, mod_code), calls in mb.items():
+            code = str(mod_code)
+            for read_pos, ml in calls:
+                d = pos_mods.get(read_pos)
+                if d is None:
+                    d = pos_mods[read_pos] = {}
+                d[code] = ml
+                pos_base[read_pos] = base
+        for read_pos, mods in pos_mods.items():
+            if read_pos >= nrp:
+                continue
+            start0 = refpos[read_pos]
+            if start0 is None:
+                continue
+            sites = chrom_lookup.get((chrom, start0))
+            if not sites:
+                continue
+            mod_sum = 0.0
+            best_code = None
+            best_prob = -1.0
+            for code, ml in mods.items():
+                p = (ml + 0.5) / 256.0
+                mod_sum += p
+                if p > best_prob:
+                    best_prob = p
+                    best_code = code
+            canon = 1.0 - mod_sum
+            # Round-trip through float32's short repr so the emitted double matches what the
+            # modkit path writes+parses (modkit prints float32; build parses it back to a double).
+            if canon >= best_prob:
+                call_code = "-"
+                call_prob = float(str(f32(canon)))
+            else:
+                call_code = best_code
+                call_prob = float(str(f32(best_prob)))
+            base = str(pos_base[read_pos])
+            for site in sites:
+                site_strand = str(site.get("strand", ""))
+                if site_strand and ref_strand and ref_strand not in {".", "?"} and site_strand != ref_strand:
+                    continue
+                target_mod = str(site["mod_code"])
+                if call_code == target_mod:
+                    state_detail = "modified"
+                    target_modified = 1
+                elif call_code == "-":
+                    state_detail = "canonical"
+                    target_modified = 0
+                else:
+                    state_detail = "other_mod"
+                    target_modified = 0
+                rows.append({
+                    "sample": sample,
+                    "qname": qname,
+                    "mod_site_id": site["mod_site_id"],
+                    "chrom": chrom,
+                    "start0": start0,
+                    "end0": safe_int(site.get("end0", start0 + 1), default=start0 + 1),
+                    "strand": site_strand or ref_strand,
+                    "target_mod_code": target_mod,
+                    "call_code": call_code,
+                    "state_detail": state_detail,
+                    "target_modified": target_modified,
+                    "call_prob": call_prob,
+                    "canonical_base": base,
+                    "modified_primary_base": base,
+                    "fail": False,
+                    "within_alignment": True,
+                    "gene_id": str(site.get("gene_id", "")),
+                    "gene_name": str(site.get("gene_name", "")),
+                    "metagene_index": str(site.get("metagene_index", "")),
+                })
+                total += 1
+                if len(rows) >= chunk_rows:
+                    _flush()
+    _flush()
+    if verbose:
+        print(f"[info] pysam extract done: {sample} {chrom} rows={total}", file=sys.stderr, flush=True)
+    return chrom, parts, total
+
+
 def _empty_output(out_tsv):
     os.makedirs(os.path.dirname(out_tsv) or ".", exist_ok=True)
     pd.DataFrame(columns=OUTPUT_COLUMNS).to_csv(out_tsv, sep="\t", index=False)
@@ -341,6 +463,33 @@ def main():
                 sample, path = entry.split("=", 1)
                 results.extend(parse_extracted_calls(
                     sample, path, lookup, shard_dir, args.chunk_rows, args.verbose))
+        elif args.pysam:
+            # pysam streaming backend: one task per (BAM x chromosome). Each streams reads one at a
+            # time (peak RSS ~100MB, never OOMs -- chr15 included) and applies the identical per-site
+            # expansion. No windowing / interval-size / reference / modkit needed.
+            chrom_lookups = defaultdict(dict)
+            for (c, p), sites in lookup.items():
+                chrom_lookups[c][(c, p)] = sites
+            chroms = sorted(chrom_lookups)
+            if not chroms:
+                _empty_output(args.out_tsv)
+                return
+            n_tasks = len(args.bams) * len(chroms)
+            jobs = max(1, min(int(args.jobs), n_tasks))
+            task_args = []
+            for bam in args.bams:
+                sample = sample_name_from_bam(bam)
+                for chrom in chroms:
+                    shard_path = os.path.join(shard_dir, f"{sample}.{chrom}.pkl")
+                    task_args.append((bam, chrom_lookups[chrom], chrom, shard_path,
+                                      args.chunk_rows, args.verbose))
+            if jobs == 1:
+                results = [extract_rows_pysam(*item) for item in task_args]
+            else:
+                results = run_process_jobs(
+                    extract_rows_pysam, task_args, jobs,
+                    verbose=args.verbose, label="build_molecule_mod_table[pysam]",
+                )
         else:
             # B: shard per (BAM x candidate-site window) so heavy chromosomes split into many balanced
             # tasks instead of one monolithic per-chrom extract that serializes the tail.

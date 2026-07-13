@@ -6,7 +6,7 @@ import os
 
 import pandas as pd
 
-from genotype_utils import benjamini_hochberg, context_key_from_row, max_abs_distribution_shift, run_contingency_test
+from genotype_utils import benjamini_hochberg, context_key_from_row, max_abs_distribution_shift, run_contingency_test, tsv_header
 
 
 def parse_args():
@@ -25,7 +25,14 @@ def parse_args():
 def main():
     args = parse_args()
     hap = pd.read_csv(args.molecule_haplotypes, sep="\t", low_memory=False)
-    mod = pd.read_csv(args.molecule_mods, sep="\t", low_memory=False)
+    # Load only the mod columns used below (merge keys sample/qname, chrom, mod_site_id,
+    # state_detail, target_mod_code, and the context_key inputs gene_name/metagene_index). The full
+    # 31-column table is 26-66 GB; an all-column load peaked near the 256 GB node cap. Output-identical.
+    _want = ["sample", "qname", "mod_site_id", "chrom", "state_detail", "target_mod_code",
+             "gene_name", "metagene_index", "usable", "fail", "within_alignment"]
+    _hdr = tsv_header(args.molecule_mods)
+    mod = pd.read_csv(args.molecule_mods, sep="\t", low_memory=False,
+                      usecols=[c for c in _want if c in _hdr])
 
     if hap.empty:
         pd.DataFrame(columns=[
