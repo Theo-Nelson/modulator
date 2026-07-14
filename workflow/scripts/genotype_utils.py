@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 
 from concurrent.futures import ProcessPoolExecutor, as_completed
+import gzip
 import math
 import os
 import sys
@@ -260,6 +261,49 @@ def tsv_header(path: str) -> List[str]:
         return fh.readline().rstrip("\n").split("\t")
 
 
+def shard_tsv_by_chrom(path: str, out_dir: str, chrom_col: str = "chrom") -> Dict[str, str]:
+    """Route each raw data line of a TSV to a per-chromosome shard file, preserving exact bytes (so a
+    loader parses a shard identically to a chrom-subset of the original). This lets the association
+    tests process one chromosome at a time in bounded memory instead of loading the whole many-GB
+    table -- peak RAM becomes one chromosome's data, so the pipeline scales to many samples.
+
+    Lossless for these tests: a read maps to a single locus, so all of its mod calls, SNP
+    observations and haplotype membership share one chromosome, and every context_key already
+    embeds chrom -- no (snp, mod), mod-pair or haplotype group ever spans two chromosomes.
+
+    O(#contigs) open handles + O(1) per-line RAM. Returns {chrom: shard_path} ordered by chrom.
+    Handles .gz/.bgz input."""
+    os.makedirs(out_dir, exist_ok=True)
+    opener = gzip.open if str(path).endswith((".gz", ".bgz")) else open
+    writers: Dict[str, object] = {}
+    paths: Dict[str, str] = {}
+    with opener(path, "rt") as fh:
+        header = fh.readline()
+        if not header:
+            return {}
+        cols = header.rstrip("\n").split("\t")
+        try:
+            ci = cols.index(chrom_col)
+        except ValueError:
+            raise ValueError(f"shard_tsv_by_chrom: no {chrom_col!r} column in {path}")
+        for line in fh:
+            parts = line.split("\t", ci + 1)
+            if len(parts) <= ci:
+                continue
+            chrom = parts[ci]
+            w = writers.get(chrom)
+            if w is None:
+                sp = os.path.join(out_dir, "shard_" + chrom.replace("/", "_") + ".tsv")
+                w = open(sp, "wt")
+                w.write(header)
+                writers[chrom] = w
+                paths[chrom] = sp
+            w.write(line)
+    for w in writers.values():
+        w.close()
+    return dict(sorted(paths.items()))
+
+
 def read_keys_of(df: pd.DataFrame) -> set:
     """Set of 'sample\\x00qname' keys (a vectorized stand-in for tuple(sample, qname))."""
     if df.empty:
@@ -298,6 +342,22 @@ def stream_filter_by_read_keys(
     return pd.concat(kept, ignore_index=True)
 
 
+def drop_unassigned_reads(mod_df: pd.DataFrame) -> pd.DataFrame:
+    """Keep only mod calls on reads assigned to a fragmentform (metagene_index populated).
+
+    An unassigned read (assigned=False) has no fragmentform, so build_molecule_mod_table leaves its
+    metagene_index empty and context_key_from_row falls back to GENE:{gene}. The SNP side always
+    carries a GTF metagene (MG:{metagene}), so those reads can never pair in snp_mod / snp_tx / hap --
+    they are already dropped there by the MG:/GENE: context mismatch, silently. mod_mod, whose pair
+    key is context-agnostic, is the ONLY test that counts co-occurrences on these unassigned scrap
+    reads. This filter makes the fragmentform scope explicit and CONSISTENT across all four tests
+    (a no-op for the SNP-based ones, a correction for mod_mod)."""
+    if mod_df.empty or "metagene_index" not in mod_df.columns:
+        return mod_df
+    mg = mod_df["metagene_index"].astype(str).str.strip()
+    return mod_df[mg.ne("") & mg.ne("nan")].copy()
+
+
 def load_molecule_mods_for_pairing(path: str, extra_cols: Optional[List[str]] = None) -> pd.DataFrame:
     """Load molecule_mod_calls with only the columns the pairing tests need, apply the usable /
     state_detail filters, and add target_state. Same filtering as before, just column-pruned."""
@@ -321,6 +381,7 @@ def load_molecule_mods_for_pairing(path: str, extra_cols: Optional[List[str]] = 
     else:
         mod_df = mod_df[(~mod_df["fail"].fillna(True)) & mod_df["within_alignment"].fillna(False)].copy()
     mod_df = mod_df[mod_df["state_detail"].isin(["modified", "canonical", "other_mod"])].copy()
+    mod_df = drop_unassigned_reads(mod_df)
     if not mod_df.empty:
         mod_df["target_state"] = mod_df["state_detail"].eq("modified").astype(int)
     return mod_df

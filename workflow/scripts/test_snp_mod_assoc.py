@@ -1,26 +1,43 @@
 #!/usr/bin/env python3
+"""Bitset engine v2 for SNP x mod association -- corrected + memory-bounded.
 
+Differences from the byte-identical PoC:
+  * BOOLEAN membership (not integer multiplicity): a read is one molecule, so it contributes to a
+    (SNP, site) cell at most once. This DEDUPS the duplicate (read, site) rows that overlapping-gene
+    annotation injects into the mod table -- i.e. it FIXES the ~1% double-count bug that the
+    many-to-many merge (and the byte-identical PoC) reproduce. So results differ from the current
+    pipeline only on overlap-region pairs, and are the *correct* counts.
+  * Processed one chromosome at a time (shard_tsv_by_chrom), so peak RAM is one chromosome's data
+    and never the whole genome-wide table.
+
+Validation target: running the CURRENT test on a deduped input == running this engine on the raw
+input (both dedupe; identical logic otherwise).
+"""
 import argparse
 import json
 import os
-
+import shutil
+import tempfile
+import numpy as np
+from pyroaring import BitMap
 import pandas as pd
 
-from genotype_utils import (
-    benjamini_hochberg,
-    binary_rate_delta,
-    context_key_from_row,
-    context_key_from_snp_row,
-    load_molecule_mods_for_pairing,
-    read_keys_of,
-    run_contingency_test,
-    stream_filter_by_read_keys,
-    tsv_header,
-)
+from genotype_utils import (benjamini_hochberg, binary_rate_delta, context_key_from_row,
+                            context_key_from_snp_row, load_molecule_mods_for_pairing,
+                            run_contingency_test, shard_tsv_by_chrom, tsv_header)
+
+SNP_USECOLS = ["sample", "qname", "snp_id", "chrom", "pos1", "start0", "end0",
+               "allele_class", "gene_names", "metagene_indices"]
+OUT_COLS = [
+    "snp_id", "mod_site_id", "chrom", "pos1", "mod_start0", "mod_end0", "target_mod_code",
+    "gene_names", "metagene_indices", "n_reads", "n_ref_reads", "n_alt_reads", "n_modified",
+    "n_not_target", "test_name", "stat_name", "stat_value", "p_value",
+    "effect_abs_delta_mod_frac", "per_state_json", "p_adj_bh",
+]
 
 
 def parse_args():
-    ap = argparse.ArgumentParser(description="Test SNP allele to mod-site associations on the same molecules.")
+    ap = argparse.ArgumentParser()
     ap.add_argument("--molecule-snps", required=True)
     ap.add_argument("--molecule-mods", required=True)
     ap.add_argument("--out-tsv", required=True)
@@ -30,118 +47,115 @@ def parse_args():
     ap.add_argument("--pseudocount", type=float, default=0.5)
     return ap.parse_args()
 
-SNP_USECOLS = [
-    # Every column the merge/row-builder touches. chrom/start0/end0 are kept even though the SNP
-    # side does not use them directly, because they must still COLLIDE with the mod side so pandas
-    # emits the "_snp"/"_mod" suffixes the row builder reads (e.g. start0_mod, chrom_snp).
-    "sample", "qname", "snp_id", "chrom", "pos1", "start0", "end0",
-    "allele_class", "gene_names", "metagene_indices",
-]
+
+def _rk(df):
+    return (df["sample"].astype(str) + "\x00" + df["qname"].astype(str))
+
+
+def _pairs_for_one_chrom(mod_path, snp_path, args):
+    """Boolean-bitset SNP x mod pairing for ONE chromosome's shard. Returns list of row dicts.
+    Loads only this chromosome, groups by metagene, and for each metagene builds boolean membership
+    vectors over its reads -- a cell count is then a vector AND + popcount (dedup by construction)."""
+    mod_df = load_molecule_mods_for_pairing(mod_path)
+    if mod_df.empty:
+        return []
+    snp_uc = [c for c in SNP_USECOLS if c in tsv_header(snp_path)]
+    snp_df = pd.read_csv(snp_path, sep="\t", usecols=snp_uc, low_memory=False)
+    snp_df = snp_df[snp_df["allele_class"].isin(["ref", "alt"])]
+    if snp_df.empty:
+        return []
+    mod_df["context_key"] = mod_df.apply(context_key_from_row, axis=1)
+    snp_df["context_key"] = snp_df.apply(context_key_from_snp_row, axis=1)
+    snp_by_ctx = {k: v for k, v in snp_df.groupby("context_key", sort=False)}
+
+    rows = []
+    for ck, mod_meta in mod_df.groupby("context_key", sort=False):
+        snp_meta = snp_by_ctx.get(ck)
+        if snp_meta is None:
+            continue
+        mk = _rk(mod_meta)
+        ridx = {k: i for i, k in enumerate(pd.unique(mk))}
+        R = len(ridx)
+
+        mm = mod_meta.assign(_ri=mk.map(ridx).to_numpy())
+        site_bits = {}
+        for site, g in mm.groupby("mod_site_id", sort=False):
+            ri = g["_ri"].to_numpy(); ts = g["target_state"].to_numpy()
+            ma = BitMap(ri[ts == 1].astype(np.uint32))          # roaring set of read-ids (dedups)
+            ua = BitMap(ri[ts == 0].astype(np.uint32))
+            f = g.iloc[0]
+            site_bits[site] = (ma, ua, int(f["start0"]), int(f.get("end0", f["start0"] + 1)),
+                               f.get("target_mod_code", ""))
+
+        sk = _rk(snp_meta)
+        sm = snp_meta.assign(_ri=sk.map(ridx).to_numpy())
+        sm = sm[sm["_ri"].notna()]
+        if sm.empty:
+            continue
+        sm = sm.assign(_ri=sm["_ri"].astype(int))
+        snp_bits = {}
+        for s, g in sm.groupby("snp_id", sort=False):
+            ri = g["_ri"].to_numpy(); ac = g["allele_class"].to_numpy()
+            ra = BitMap(ri[ac == "ref"].astype(np.uint32))
+            aa = BitMap(ri[ac == "alt"].astype(np.uint32))
+            f = g.iloc[0]
+            snp_bits[s] = (ra, aa, f.get("chrom", ""), int(f.get("pos1", 0)),
+                           f.get("gene_names", ""), f.get("metagene_indices", ""))
+
+        for s, (ra, aa, chrom, pos1, genes, metas) in snp_bits.items():
+            for m, (ma, ua, s0, e0, code) in site_bits.items():
+                ref_mod = ra.intersection_cardinality(ma)      # |A ∩ B| via SIMD, no materialisation
+                ref_unmod = ra.intersection_cardinality(ua)
+                alt_mod = aa.intersection_cardinality(ma)
+                alt_unmod = aa.intersection_cardinality(ua)
+                n_ref = ref_mod + ref_unmod
+                n_alt = alt_mod + alt_unmod
+                if n_ref < int(args.min_allele_reads) or n_alt < int(args.min_allele_reads):
+                    continue
+                if (n_ref + n_alt) < int(args.min_total_reads):
+                    continue
+                tt = np.array([[ref_mod, ref_unmod], [alt_mod, alt_unmod]], dtype=float)
+                test_name, stat_name, stat_value, p_value = run_contingency_test(
+                    tt, test=args.test, pseudocount=args.pseudocount)
+                rows.append({
+                    "snp_id": s, "mod_site_id": m, "chrom": chrom, "pos1": pos1,
+                    "mod_start0": s0, "mod_end0": e0, "target_mod_code": code,
+                    "gene_names": genes, "metagene_indices": metas,
+                    "n_reads": int(tt.sum()), "n_ref_reads": n_ref, "n_alt_reads": n_alt,
+                    "n_modified": ref_mod + alt_mod, "n_not_target": ref_unmod + alt_unmod,
+                    "test_name": test_name, "stat_name": stat_name, "stat_value": stat_value,
+                    "p_value": p_value, "effect_abs_delta_mod_frac": binary_rate_delta(tt),
+                    "per_state_json": json.dumps({
+                        "ref_modified": ref_mod, "ref_not_target": ref_unmod,
+                        "alt_modified": alt_mod, "alt_not_target": alt_unmod,
+                    }, separators=(",", ":")),
+                })
+    return rows
 
 
 def main():
     args = parse_args()
-
-    # Load the SMALL mod table first, filter it, and take its read keys. The merge below is an
-    # inner join on (sample, qname), so a SNP row whose read has no usable mod call can never
-    # survive it -- streaming molecule_snps and keeping only matching reads is therefore exactly
-    # lossless, and avoids materializing the whole (multi-GB, 7.5M-row) SNP table.
-    mod_df = load_molecule_mods_for_pairing(args.molecule_mods)
-    mod_keys = read_keys_of(mod_df)
-
-    snp_usecols = [c for c in SNP_USECOLS if c in tsv_header(args.molecule_snps)]
-    snp_df = stream_filter_by_read_keys(
-        args.molecule_snps, snp_usecols, mod_keys,
-        row_filter=lambda ch: ch["allele_class"].isin(["ref", "alt"]),
-    )
-
-    if snp_df.empty or mod_df.empty:
-        out = pd.DataFrame(columns=[
-            "snp_id", "mod_site_id", "chrom", "pos1", "mod_start0", "mod_end0", "target_mod_code",
-            "n_reads", "n_ref_reads", "n_alt_reads", "n_modified", "n_not_target",
-            "test_name", "stat_name", "stat_value", "p_value", "effect_abs_delta_mod_frac",
-            "per_state_json", "p_adj_bh"
-        ])
-        os.makedirs(os.path.dirname(args.out_tsv) or ".", exist_ok=True)
-        out.to_csv(args.out_tsv, sep="\t", index=False)
-        return
-
-    snp_df["context_key"] = snp_df.apply(context_key_from_snp_row, axis=1)
-    mod_df["context_key"] = mod_df.apply(context_key_from_row, axis=1)
-
-    merged = snp_df.merge(
-        mod_df,
-        on=["sample", "qname"],
-        how="inner",
-        suffixes=("_snp", "_mod"),
-    )
-    merged = merged[(merged["chrom_snp"] == merged["chrom_mod"]) & (merged["context_key_snp"] == merged["context_key_mod"])].copy()
-    if merged.empty:
-        out = pd.DataFrame(columns=[
-            "snp_id", "mod_site_id", "chrom", "pos1", "mod_start0", "mod_end0", "target_mod_code",
-            "n_reads", "n_ref_reads", "n_alt_reads", "n_modified", "n_not_target",
-            "test_name", "stat_name", "stat_value", "p_value", "effect_abs_delta_mod_frac",
-            "per_state_json", "p_adj_bh"
-        ])
-        os.makedirs(os.path.dirname(args.out_tsv) or ".", exist_ok=True)
-        out.to_csv(args.out_tsv, sep="\t", index=False)
-        return
-
+    for p in (args.molecule_mods, args.molecule_snps):
+        if not (os.path.exists(p) and os.path.getsize(p)):
+            pd.DataFrame(columns=OUT_COLS).to_csv(args.out_tsv, sep="\t", index=False)
+            return
+    tmp = tempfile.mkdtemp(prefix=".bitset_shards_", dir=os.path.dirname(args.out_tsv) or ".")
     rows = []
-    for (snp_id, mod_site_id), sub in merged.groupby(["snp_id", "mod_site_id"], sort=False):
-        grp = sub.groupby(["allele_class", "target_state"], as_index=False).size()
-        table = grp.pivot_table(index="allele_class", columns="target_state", values="size", fill_value=0, aggfunc="sum")
-        table = table.reindex(index=["ref", "alt"], fill_value=0).reindex(columns=[1, 0], fill_value=0)
-        allele_totals = table.sum(axis=1)
-        if allele_totals.get("ref", 0) < int(args.min_allele_reads):
-            continue
-        if allele_totals.get("alt", 0) < int(args.min_allele_reads):
-            continue
-        if int(table.to_numpy().sum()) < int(args.min_total_reads):
-            continue
-        tt = table.to_numpy(dtype=float)
-        test_name, stat_name, stat_value, p_value = run_contingency_test(tt, test=args.test, pseudocount=args.pseudocount)
-        first = sub.iloc[0]
-        rows.append({
-            "snp_id": snp_id,
-            "mod_site_id": mod_site_id,
-            "chrom": first.get("chrom_snp", ""),
-            "pos1": int(first.get("pos1", 0)),
-            "mod_start0": int(first.get("start0_mod", 0)),
-            "mod_end0": int(first.get("end0_mod", 0)),
-            "target_mod_code": first.get("target_mod_code", ""),
-            "gene_names": first.get("gene_names", first.get("gene_name_mod", "")),
-            "metagene_indices": first.get("metagene_indices", first.get("metagene_index_mod", "")),
-            "n_reads": int(tt.sum()),
-            "n_ref_reads": int(allele_totals.get("ref", 0)),
-            "n_alt_reads": int(allele_totals.get("alt", 0)),
-            "n_modified": int(table[1].sum()),
-            "n_not_target": int(table[0].sum()),
-            "test_name": test_name,
-            "stat_name": stat_name,
-            "stat_value": stat_value,
-            "p_value": p_value,
-            "effect_abs_delta_mod_frac": binary_rate_delta(tt),
-            "per_state_json": json.dumps({
-                "ref_modified": int(table.loc["ref", 1]),
-                "ref_not_target": int(table.loc["ref", 0]),
-                "alt_modified": int(table.loc["alt", 1]),
-                "alt_not_target": int(table.loc["alt", 0]),
-            }, separators=(",", ":")),
-        })
+    try:
+        mod_shards = shard_tsv_by_chrom(args.molecule_mods, os.path.join(tmp, "mod"))
+        snp_shards = shard_tsv_by_chrom(args.molecule_snps, os.path.join(tmp, "snp"))
+        for chrom in sorted(set(mod_shards) & set(snp_shards)):
+            rows.extend(_pairs_for_one_chrom(mod_shards[chrom], snp_shards[chrom], args))
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
 
     out = pd.DataFrame(rows)
     if not out.empty:
         out["p_adj_bh"] = benjamini_hochberg(out["p_value"].values)
-        out = out.sort_values(["p_adj_bh", "effect_abs_delta_mod_frac"], ascending=[True, False]).reset_index(drop=True)
+        out = out.sort_values(["p_adj_bh", "effect_abs_delta_mod_frac"],
+                              ascending=[True, False]).reset_index(drop=True)
     else:
-        out = pd.DataFrame(columns=[
-            "snp_id", "mod_site_id", "chrom", "pos1", "mod_start0", "mod_end0", "target_mod_code",
-            "gene_names", "metagene_indices", "n_reads", "n_ref_reads", "n_alt_reads", "n_modified", "n_not_target",
-            "test_name", "stat_name", "stat_value", "p_value", "effect_abs_delta_mod_frac",
-            "per_state_json", "p_adj_bh"
-        ])
-
+        out = pd.DataFrame(columns=OUT_COLS)
     os.makedirs(os.path.dirname(args.out_tsv) or ".", exist_ok=True)
     out.to_csv(args.out_tsv, sep="\t", index=False)
 

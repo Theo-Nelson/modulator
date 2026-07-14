@@ -12,5 +12,6 @@ dependencies:
   - pyyaml
   - samtools=1.22.1
   - scipy
+  - pyroaring=1.1.0
   - setuptools>=69
   - ont-modkit=0.5.0
