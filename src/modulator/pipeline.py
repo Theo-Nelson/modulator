@@ -627,6 +627,40 @@ class ModulatorPipeline:
     def _stage_done(self, stage: str) -> bool:
         return self._stage_marker(stage).exists() or self._outputs_present(stage)
 
+    def _merge_stage_table(self, path: Path, value_header: str,
+                           new_rows: list[tuple[str, float]], fmt: str,
+                           summary_label: str, summary_fn) -> None:
+        """Write a per-stage TSV, MERGING with any existing file so a partial
+        ``--stages`` run updates only the stages it actually ran instead of
+        clobbering the rows of the stages it skipped. The summary row
+        (TOTAL/MAX) is recomputed over the merged set."""
+        merged: dict[str, float] = {}
+        if path.exists():
+            try:
+                for i, line in enumerate(path.read_text().splitlines()):
+                    if i == 0 or not line.strip():
+                        continue
+                    stg, _, val = line.partition("\t")
+                    if stg == summary_label or not stg or not val:
+                        continue
+                    try:
+                        merged[stg] = float(val)
+                    except ValueError:
+                        continue
+            except OSError:
+                pass
+        for stg, val in new_rows:
+            merged[stg] = val
+        ordered = ([s for s in STAGE_ORDER if s in merged]
+                   + [s for s in merged if s not in STAGE_ORDER])
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with open(path, "w") as fh:
+            fh.write(f"stage\t{value_header}\n")
+            for stg in ordered:
+                fh.write(f"{stg}\t{format(merged[stg], fmt)}\n")
+            if merged:
+                fh.write(f"{summary_label}\t{format(summary_fn(list(merged.values())), fmt)}\n")
+
     def run(self, stages: list[str] | None = None) -> None:
         selected = STAGE_ORDER if not stages else [stage for stage in STAGE_ORDER if stage in stages]
         timings: list[tuple[str, float]] = []
@@ -660,24 +694,14 @@ class ModulatorPipeline:
         if timings:
             try:
                 tpath = self.paths.results / "stage_timings.tsv"
-                tpath.parent.mkdir(parents=True, exist_ok=True)
-                with open(tpath, "w") as fh:
-                    fh.write("stage\tseconds\n")
-                    for stg, secs in timings:
-                        fh.write(f"{stg}\t{secs:.2f}\n")
-                    fh.write(f"TOTAL\t{sum(s for _, s in timings):.2f}\n")
+                self._merge_stage_table(tpath, "seconds", timings, ".2f", "TOTAL", sum)
                 print(f"[modulator] stage timings -> {tpath}", flush=True)
             except OSError:
                 pass
         if mem_peaks:
             try:
                 mpath = self.paths.results / "stage_memory.tsv"
-                mpath.parent.mkdir(parents=True, exist_ok=True)
-                with open(mpath, "w") as fh:
-                    fh.write("stage\tpeak_rss_gib\n")
-                    for stg, gib in mem_peaks:
-                        fh.write(f"{stg}\t{gib:.3f}\n")
-                    fh.write(f"MAX\t{max(g for _, g in mem_peaks):.3f}\n")
+                self._merge_stage_table(mpath, "peak_rss_gib", mem_peaks, ".3f", "MAX", max)
                 print(f"[modulator] stage memory -> {mpath}", flush=True)
             except OSError:
                 pass
