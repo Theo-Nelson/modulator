@@ -1,0 +1,31 @@
+#!/usr/bin/env bash
+# End-to-end regression suite for modulator, driven by the synthetic fixture.
+#   1. repo smoke checks (assembler + genotype unit logic)
+#   2. classify_diffs taxonomy unit test (all 13 structural categories)
+#   3. full 15-stage pipeline on the synthetic dataset
+#   4. validate_outputs.py -- 30 ground-truth assertions
+# Exits non-zero if anything fails. Run from the repo root.
+set -uo pipefail
+ENV=/home/fs01/thn4005/.local/share/mamba/envs/modulator
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
+cd "$ROOT"
+PY="$ENV/bin/python"
+HERE=resources/synthetic_3exon
+rc=0
+
+echo "### 1/4 repo smoke checks"
+"$PY" workflow/scripts/regression_smoke_checks.py || rc=1
+"$PY" workflow/scripts/genotype_regression_smoke_checks.py || rc=1
+
+echo "### 2/4 classify_diffs taxonomy unit test"
+"$PY" "$HERE/test_classify_categories.py" || rc=1
+
+echo "### 3/4 full pipeline on the synthetic dataset"
+bash "$HERE/run_pipeline.sh" || rc=1
+
+echo "### 4/4 validate outputs against ground truth"
+"$PY" "$HERE/validate_outputs.py" --results results --prefix syn3exon || rc=1
+
+echo
+if [ "$rc" -eq 0 ]; then echo "ALL REGRESSION CHECKS PASSED"; else echo "REGRESSION FAILURES (rc=$rc)"; fi
+exit "$rc"

@@ -1,0 +1,30 @@
+feature	entity	expectation
+assemble	GENE_A	2 fragmentforms (A1=e1e2e3, A2=e1e3), EXACT
+assemble	GENE_B	2 fragmentforms (tandem APA: distal 8480, proximal 8000)
+assemble	GENE_C	1 fragmentform on MINUS strand
+assemble	GENE_OV1/OV2	two OVERLAPPING genes assembled separately
+assemble	GENE_TR	TR_L (e1e2e3e4) + TR_S (e1e3e4, cassette skip)
+assemble	GENE_TA	2 fragmentforms (tandem APA prox 10999 / dist 11499)
+splice_junctions	all genes	ALL_CANONICAL (incl. minus-strand GENE_C)
+apa_motifs	GENE_B prox 8000	PAS_NONE_INTERNAL_PRIMING
+apa_motifs	GENE_B distal 8480	PAS_CANONICAL
+multigene_filter	GENE_OV1/OV2 reads	multi_gene_kept_by_zt > 0 (reads overlap both genes, resolved by ZT)
+test_diffs	GENE_A D@3050	SIGNIFICANT between-isoform (A1 hi ~90% vs A2 lo ~10%)
+classify_diffs	GENE_A D@3050	SHARED_TERMINAL_EXON (A1/A2 co-terminal)
+classify_diffs	GENE_TA @10800	TANDEM_APA (prox vs dist, distal favored)
+classify_diffs	taxonomy	all 13 categories -> test_classify_categories.py
+genotype.snp	SNP1 chrSyn:3202 C>G / SNP2 chrSyn:1251 A>T	both discovered (~50% alt)
+genotype.snp_mod	SNP1 x Msnp@3200	SIGNIFICANT (ref->mod ~90%, alt->mod ~10%)
+genotype.mechanism	SNP1 vs Msnp@3200	IN_MOTIF_CORE + MOTIF_DISRUPTED, CONCORDANT
+genotype.mod_mod	P@1080 x Q@1160	SIGNIFICANT CONCORDANT (co-dependent)
+genotype.mod_mod	R@1300 x S@1380	NOT significant, INDEPENDENT
+genotype.mod_mod	X@2100 x Y@2260	SIGNIFICANT MUTUALLY_EXCLUSIVE
+genotype.haplotype	SNP1+SNP2	one haplotype block (2 SNPs in LD)
+hierarchical_stoich	GENE_TR	reads_dropped_as_uninformative > 0 (5'-truncated reads dropped)
+polya	GENE_B B1 vs B2	SIGNIFICANT differential tail (B1~120-180 vs B2~50)
+polya.tail_x_mod	GENE_A D@3050	modified reads longer tail (~130 vs ~85)
+between_conditions.mod	COND@3450	SIGNIFICANT mock(hi~85%) vs zikv(lo~15%)
+between_conditions.isoform	GENE_A A1 vs A2	SIGNIFICANT usage shift (mock A1, zikv A2)
+between_conditions.tail	GENE_B B1	SIGNIFICANT longer tail in zikv
+calibration	ref_df	within-mock 2v2 null -> calibrate_between_conditions.py
+report	html + gene_browser	both HTML files produced

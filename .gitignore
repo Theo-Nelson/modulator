@@ -5,6 +5,12 @@ results/
 *.fa
 *.fai
 *.gtf.gz
+# ...but keep the small committed synthetic-test reference (a fixture, not the genome)
+!resources/synthetic_3exon/reference/*.fa
+!resources/synthetic_3exon/reference/*.fai
+
+# matplotlib config cache created at runtime
+.cache/
 
 # Logs
 *.log
