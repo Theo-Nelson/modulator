@@ -1070,6 +1070,28 @@ def main():
     if not kept_isoforms:
         sys.exit("No candidate isoforms found")
 
+    # De-duplicate fragmentforms emitted by more than one regionization core.
+    # Cores tile the contig with shared boundaries, and each core fetches its reads with
+    # +/- pad_fetch_bp of padding, so a fragmentform whose TES lands exactly on a core
+    # boundary (e.g. a shared 3' end at the edge of a coverage gap) is assembled by BOTH
+    # adjacent cores. Those copies are the SAME fragmentform -- identical
+    # (chrom, strand, tes, chain_tx) -- so collapse them, keeping the copy with the most
+    # members. The core that actually contains the locus always sees the full read set,
+    # while a padded neighbour may see only the reads within pad_fetch_bp of the boundary,
+    # so "max members" never drops reads. (Without this, a shared-3'-end isoform pair is
+    # double-emitted and its reads are double-counted in the metrics / tx_counts / usage
+    # tables; the ZN read tags are unaffected because each read is tagged once.)
+    _dedup: dict[tuple, dict] = {}
+    for iso in kept_isoforms:
+        key = (iso["chrom"], iso["strand"], iso["tes"], tuple(iso["chain_tx"]))
+        prev = _dedup.get(key)
+        if prev is None or len(iso["members"]) > len(prev["members"]):
+            _dedup[key] = iso
+    if len(_dedup) != len(kept_isoforms):
+        print(f"[INFO] collapsed {len(kept_isoforms) - len(_dedup)} duplicate fragmentform(s) "
+              f"straddling a regionization core boundary", file=sys.stderr)
+    kept_isoforms = list(_dedup.values())
+
     # Global filtering + metrics (same as single-pass)
     total_reads_used = sum(len(iso["members"]) for iso in kept_isoforms)
     final_kept = []
