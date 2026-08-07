@@ -575,6 +575,7 @@ def plot_locus_arch(rec, iso, genes, out_png):
     import matplotlib
     matplotlib.use("Agg")
     import matplotlib.pyplot as plt
+    from plot_utils import save_figure
     from matplotlib.patches import Rectangle
 
     gene = rec['gene']; chrom = rec['chrom']; pos = int(rec['start0'])
@@ -658,7 +659,7 @@ def plot_locus_arch(rec, iso, genes, out_png):
                  fontsize=9)
     fig.tight_layout()
     os.makedirs(os.path.dirname(out_png) or '.', exist_ok=True)
-    fig.savefig(out_png, dpi=140)
+    save_figure(fig, out_png, dpi=140)   # PNG + SVG
     plt.close(fig)
     return True
 

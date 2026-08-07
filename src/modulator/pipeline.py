@@ -21,12 +21,20 @@ from modulator.runtime import (
     run_command,
     run_parallel,
 )
+from modulator.samplesheet import (
+    read_samplesheet,
+    resolve_contrasts,
+    sample_metadata,
+    stage_bams,
+    write_metadata_tsv,
+)
 
 
 STAGE_ORDER = [
     "assemble",
     "read_stats",
     "splice_junctions",
+    "apa_motifs",
     "multigene_filter",
     "modkit_zn",
     "aggregate_zn",
@@ -34,6 +42,9 @@ STAGE_ORDER = [
     "test_diffs",
     "classify_diffs",
     "genotype",
+    "polya",
+    "hierarchical_stoich",
+    "between_conditions",
     "report",
 ]
 
@@ -124,6 +135,14 @@ class PipelinePaths:
         return self.assemble / f"{self.prefix}_gene_splice_summary.tsv"
 
     @property
+    def apa_motifs(self) -> Path:
+        return self.assemble / f"{self.prefix}_apa_motifs.tsv"
+
+    @property
+    def geno_snp_mod_mechanism(self) -> Path:
+        return self.genotype / f"{self.prefix}_snp_mod_mechanism.tsv"
+
+    @property
     def novel_loci_tsv(self) -> Path:
         return self.assemble / f"{self.prefix}_novel_loci.tsv"
 
@@ -182,6 +201,10 @@ class PipelinePaths:
     @property
     def report_html(self) -> Path:
         return self.report / f"{self.prefix}_report.html"
+
+    @property
+    def gene_browser_html(self) -> Path:
+        return self.report / f"{self.prefix}_gene_browser.html"
 
     @property
     def geno_read_assignments(self) -> Path:
@@ -254,6 +277,59 @@ class PipelinePaths:
     def geno_hap_mod(self) -> Path:
         return self.genotype / f"{self.prefix}_haplotype_mod_assoc.tsv"
 
+    @property
+    def sample_metadata(self) -> Path:
+        return self.results / f"{self.prefix}_sample_metadata.tsv"
+
+    @property
+    def staged_bams_dir(self) -> Path:
+        return self.results / "staged_bams"
+
+    @property
+    def hierarchical_stoich(self) -> Path:
+        return self.test_diffs / f"{self.prefix}_hierarchical_stoich.tsv"
+
+    @property
+    def between_conditions(self) -> Path:
+        return self.results / "between_conditions"
+
+    def cond_mod_diffs(self, contrast: str) -> Path:
+        return self.between_conditions / f"{self.prefix}_{contrast}_mod_diffs.tsv"
+
+    def cond_usage_diffs(self, contrast: str, feature: str) -> Path:
+        return self.between_conditions / f"{self.prefix}_{contrast}_{feature}_usage_diffs.tsv"
+
+    def cond_tail_diffs(self, contrast: str) -> Path:
+        return self.between_conditions / f"{self.prefix}_{contrast}_tail_diffs.tsv"
+
+    @property
+    def polya(self) -> Path:
+        return self.results / "polya"
+
+    @property
+    def polya_read_tails(self) -> Path:
+        return self.polya / f"{self.prefix}_read_tail_lengths.tsv"
+
+    @property
+    def polya_fragmentform(self) -> Path:
+        return self.polya / f"{self.prefix}_polya_fragmentform.tsv"
+
+    @property
+    def polya_taillength_diffs(self) -> Path:
+        return self.polya / f"{self.prefix}_taillength_diffs.tsv"
+
+    @property
+    def polya_taillength_mod(self) -> Path:
+        return self.polya / f"{self.prefix}_taillength_mod.tsv"
+
+    @property
+    def polya_diff_figs(self) -> Path:
+        return self.polya / f"{self.prefix}__taillength_diff_figs"
+
+    @property
+    def polya_mod_figs(self) -> Path:
+        return self.polya / f"{self.prefix}__taillength_mod_figs"
+
     def zt_tagged_bam(self, sample: str) -> Path:
         return self.zt_tagged_dir / f"{sample}.zt_tagged.bam"
 
@@ -289,11 +365,43 @@ class ModulatorPipeline:
         self._substep_mem: list[tuple[str, float]] | None = None
         self.prefix = str(config.get("prefix", "modulator_run"))
         self.paths = PipelinePaths(self.root, self.prefix)
+        # Samplesheet (optional) is the sample SOURCE + the condition metadata; it stages the BAMs
+        # and therefore must run before sample discovery.
+        self._staged_bams_dir: Path | None = None
+        self.sample_meta: dict[str, dict] = {}
+        self.contrasts: list[dict] = []
+        self._load_samplesheet()
         self.samples = self._discover_samples()
         self.reference_fa = self._resolve_reference("reference_fa", ("reference", "fasta"))
         self.reference_gtf = self._resolve_reference("reference_gtf", ("reference", "gtf"))
         self.top_threads = int(config.get("threads", 1))
         self._validate_config()
+
+    def _load_samplesheet(self) -> None:
+        """If a samplesheet is configured it becomes the sample source and the metadata.
+
+        Each BAM is symlinked to ``<results>/staged_bams/<sample>.bam`` so the sample id IS the BAM
+        stem for every downstream script (see samplesheet.py). Without a samplesheet the pipeline
+        keeps its original bams_dir + bam_glob behaviour.
+        """
+        ss = self.config.get("samplesheet")
+        if not is_set(ss):
+            return
+        rows = read_samplesheet(resolve_path(self.root, str(ss)))
+        stage_bams(rows, self.paths.staged_bams_dir, self._config_bams_dir)
+        self._staged_bams_dir = self.paths.staged_bams_dir
+        self.sample_meta = sample_metadata(rows)
+        self.contrasts = resolve_contrasts(self.config.get("contrasts"), rows)
+        write_metadata_tsv(rows, self.paths.sample_metadata)
+        if self.verbose:
+            groups: dict[str, list[str]] = {}
+            for r in rows:
+                groups.setdefault(r.get("condition") or "(no condition)", []).append(r["sample"])
+            print(f"[modulator] samplesheet: {len(rows)} sample(s) staged -> {self._staged_bams_dir}", flush=True)
+            for cond, names in groups.items():
+                print(f"[modulator]   {cond}: {', '.join(names)}", flush=True)
+            if self.contrasts:
+                print(f"[modulator]   contrasts: {', '.join(c['name'] for c in self.contrasts)}", flush=True)
 
     def _discover_samples(self) -> list[str]:
         bams_dir = self.bams_dir
@@ -305,11 +413,20 @@ class ModulatorPipeline:
         return samples
 
     @property
-    def bams_dir(self) -> Path:
+    def _config_bams_dir(self) -> Path:
+        """The bams_dir as configured -- samplesheet 'bam' values resolve relative to this."""
         return resolve_path(self.root, self.config.get("bams_dir", "resources/test_bams/ALCAM_NHSL1_SERAC1_MXD1_RIOK3_reads"))
 
     @property
+    def bams_dir(self) -> Path:
+        # With a samplesheet the staged symlink dir IS the bams dir, so every stage sees {sample}.bam.
+        return self._staged_bams_dir or self._config_bams_dir
+
+    @property
     def bam_glob(self) -> str:
+        # Staged BAMs are named <sample>.bam, so the configured glob no longer applies.
+        if self._staged_bams_dir is not None:
+            return "*.bam"
         return str(self.config.get("bam_glob", "*.bam"))
 
     def _resolve_reference(self, flat_key: str, nested_key: tuple[str, str]) -> Path | None:
@@ -456,6 +573,10 @@ class ModulatorPipeline:
             if not as_bool(cfg.get("splice_junctions", {}).get("enable", True), True):
                 return True
             return self._nonempty(p.gene_splice_summary)
+        if stage == "apa_motifs":
+            if not as_bool(cfg.get("apa_motifs", {}).get("enable", True), True):
+                return True
+            return self._nonempty(p.apa_motifs)
         if stage == "novel_loci":
             if not as_bool(cfg.get("novel_loci", {}).get("enable", True), True):
                 return True
@@ -484,6 +605,19 @@ class ModulatorPipeline:
             if not as_bool(cfg.get("genotype", {}).get("enable", False), False):
                 return True
             return self._nonempty(p.geno_hap_mod)
+        if stage == "polya":
+            if not as_bool(cfg.get("polya", {}).get("enable", True), True):
+                return True
+            return self._nonempty(p.polya_read_tails) and self._nonempty(p.polya_taillength_diffs)
+        if stage == "hierarchical_stoich":
+            if not as_bool(cfg.get("hierarchical_stoich", {}).get("enable", False), False):
+                return True
+            return self._nonempty(p.hierarchical_stoich)
+        if stage == "between_conditions":
+            # No samplesheet/contrasts -> the stage is a no-op, so count it as satisfied.
+            if not as_bool(cfg.get("between_conditions", {}).get("enable", True), True) or not self.contrasts:
+                return True
+            return all(self._nonempty(p.cond_mod_diffs(c["name"])) for c in self.contrasts)
         if stage == "report":
             if not as_bool(cfg.get("report", {}).get("enable", True), True):
                 return True
@@ -1220,6 +1354,23 @@ class ModulatorPipeline:
             ],
             label="test_snp_mod_assoc",
         )
+        # Why does a SNP change a modification? Positional ladder (at the modified base / inside the
+        # DRACH 5-mer / 9-mer / proximal / distal cis), m6A motif disruption, and whether the observed
+        # allelic direction matches the motif's prediction. Also flags SELF-REPORTING variants: SNPs are
+        # called from RNA reads, so A-to-I editing (reads as G) and pseudouridine (U-to-C basecall error)
+        # get called as variants at their own modified base, making those associations circular.
+        if as_bool(geno.get("snp_mod_mechanism", True), True):
+            self.run_python_script(
+                "classify_snp_mod_mechanism.py",
+                [
+                    "--snp-mod-assoc", str(self.paths.geno_snp_mod),
+                    "--reference-fa", str(self._require_reference_fa()),
+                    "--out-tsv", str(self.paths.geno_snp_mod_mechanism),
+                    "--proximal-bp", str(int(geno.get("mechanism_proximal_bp", 50))),
+                    "--verbose",
+                ],
+                label="classify_snp_mod_mechanism",
+            )
         self.run_python_script(
             "test_snp_tx_mod_dependency.py",
             [
@@ -1280,6 +1431,203 @@ class ModulatorPipeline:
                 label="test_mod_mod_assoc",
             )
 
+    def stage_apa_motifs(self) -> None:
+        """Polyadenylation-signal check for every APA site (each fragmentform's TES): canonical
+        AATAAA / variant hexamer and its distance, downstream U/GU-richness, and an internal-priming
+        flag (no PAS + genomic A-rich downstream = a likely oligo-dT artifact rather than a real site)."""
+        cfg = self.config.get("apa_motifs", {})
+        if not as_bool(cfg.get("enable", True), True):
+            return
+        if not self._nonempty(self.paths.classification_summary):
+            if self.verbose:
+                print("[modulator] apa_motifs: no classification summary (needs assemble), skipping", flush=True)
+            return
+        self.run_python_script("check_apa_motifs.py", [
+            "--classification-summary", str(self.paths.classification_summary),
+            "--reference-fa", str(self._require_reference_fa()),
+            "--out-tsv", str(self.paths.apa_motifs),
+            "--upstream", str(int(cfg.get("upstream", 60))),
+            "--downstream", str(int(cfg.get("downstream", 40))),
+            "--pas-max-distance", str(int(cfg.get("pas_max_distance", 40))),
+            "--internal-priming-a-frac", str(float(cfg.get("internal_priming_a_frac", 0.65))),
+            "--internal-priming-window", str(int(cfg.get("internal_priming_window", 20))),
+            "--verbose",
+        ], label="check_apa_motifs")
+
+    def stage_polya(self) -> None:
+        """Poly(A) tail length as a first-class readout: per-read dorado pt:i tail length ->
+        per-fragmentform distributions, differential tail length between fragmentforms of a gene,
+        and tail length x modification. Reads the ZT-tagged BAMs (which retain pt:i); tail x mod
+        also needs the genotype molecule_mod_calls table."""
+        cfg = self.config.get("polya", {})
+        if not as_bool(cfg.get("enable", True), True):
+            return
+        # Prefer the multigene-cleaned tagged BAMs (final assignment set); fall back to the tagged BAMs.
+        bams = [self.paths.clean_bam(s) for s in self.samples]
+        if not all(self._nonempty(b) for b in bams):
+            bams = [self.paths.zt_tagged_bam(s) for s in self.samples]
+        bams = [b for b in bams if self._nonempty(b)]
+        if not bams:
+            if self.verbose:
+                print("[modulator] polya: no ZT-tagged BAMs found (needs the assemble stage), skipping", flush=True)
+            return
+        pjobs = int(cfg.get("jobs", 0)) or self.top_threads or 1  # 0 -> use `threads`
+        # 1) per-read tail table (pt:i joined to fragmentform / gene / metagene)
+        args = ["--bams", *[str(b) for b in bams],
+                "--out-tsv", str(self.paths.polya_read_tails),
+                "--jobs", str(pjobs)]
+        if self._nonempty(self.paths.classification_summary):
+            args += ["--summary-tsv", str(self.paths.classification_summary)]
+        if as_bool(self.config.get("assembler", {}).get("primary_only", True), True):
+            args.append("--primary-only")
+        self.run_python_script("build_read_polya_table.py", args, label="build_read_polya_table")
+        # 2) per-fragmentform distributions + between-fragmentform differential tail length
+        top_figs = int(cfg.get("top_figures", 10))
+        self.run_python_script("test_taillength_diffs.py", [
+            "--in-tsv", str(self.paths.polya_read_tails),
+            "--out-prefix", str(self.paths.polya / self.prefix),
+            "--min-reads", str(int(cfg.get("min_fragmentform_reads", 10))),
+            "--min-total-reads", str(int(cfg.get("min_total_reads", 20))),
+            "--min-tail", str(int(cfg.get("min_tail", 1))),
+            "--figs-dir", str(self.paths.polya_diff_figs),
+            "--top-k", str(top_figs),
+        ], label="test_taillength_diffs")
+        # 3) tail length x modification (needs the genotype per-read mod-call table)
+        if self._nonempty(self.paths.geno_molecule_mod_calls):
+            self.run_python_script("test_taillength_mod.py", [
+                "--tail-tsv", str(self.paths.polya_read_tails),
+                "--mod-tsv", str(self.paths.geno_molecule_mod_calls),
+                "--out-tsv", str(self.paths.polya_taillength_mod),
+                "--min-state-reads", str(int(cfg.get("min_state_reads", 10))),
+                "--min-tail", str(int(cfg.get("min_tail", 1))),
+                "--figs-dir", str(self.paths.polya_mod_figs),
+                "--top-k", str(top_figs),
+            ], label="test_taillength_mod")
+        elif self.verbose:
+            print("[modulator] polya: no molecule_mod_calls (genotype disabled/not run); "
+                  "skipping tail x modification", flush=True)
+
+    def stage_hierarchical_stoich(self) -> None:
+        """Truncation-aware differential stoichiometry between fragmentforms -- the 5' complement to
+        test_diffs, NOT a replacement.
+
+        Direct-RNA reads truncate at the 5' end, so a read assigned to a fragmentform it never
+        reached carries no evidence about features there. This restricts each fragmentform pair to
+        the reads that demonstrably span their divergence point. Measured genome-wide (3,086 genes,
+        304k tests): pairs diverging <1kb from the 3' end lose reads in 0.2% of tests and change
+        ZERO calls -- test_diffs already answers those correctly and far more cheaply -- while pairs
+        diverging >20kb lose reads in ~55% of tests. Hence `min_divergence_from_3p`: run the
+        expensive engine only where it can actually change the answer.
+
+        Off by default: it needs the genotype stage's per-read tables and costs ~15 min genome-wide.
+        """
+        cfg = self.config.get("hierarchical_stoich", {})
+        if not as_bool(cfg.get("enable", False), False):
+            return
+        ra = self.paths.geno_read_assignments_regions
+        if not self._nonempty(ra):
+            ra = self.paths.geno_read_assignments
+        for path, what in ((ra, "read-assignment table"),
+                           (self.paths.geno_molecule_mod_calls, "molecule mod-call table"),
+                           (self.paths.out_gtf, "assembled GTF")):
+            if not self._nonempty(path):
+                if self.verbose:
+                    print(f"[modulator] hierarchical_stoich: missing {what} (needs the genotype stage); skipping",
+                          flush=True)
+                return
+        args = [
+            "--read-assignments", str(ra),
+            "--molecule-mods", str(self.paths.geno_molecule_mod_calls),
+            "--gtf", str(self.paths.out_gtf),
+            "--out-tsv", str(self.paths.hierarchical_stoich),
+            "--min-informative-reads", str(int(cfg.get("min_informative_reads", 10))),
+            "--min-state-reads", str(int(cfg.get("min_state_reads", 3))),
+            "--max-fragmentforms-per-gene", str(int(cfg.get("max_fragmentforms_per_gene", 12))),
+            "--min-divergence-from-3p", str(int(cfg.get("min_divergence_from_3p", 0))),
+            "--test", str(self.config.get("genotype", {}).get("test", "auto")),
+            "--pseudocount", str(float(self.config.get("genotype", {}).get("pseudocount", 0.5))),
+            "--verbose",
+        ]
+        # Preselected sites keep this cheap -- default to the sites test_diffs already flagged.
+        sites = cfg.get("sites", "auto")
+        if is_set(sites) and str(sites) != "auto":
+            args += ["--sites", str(resolve_path(self.root, str(sites)))]
+        elif str(sites) == "auto" and self._nonempty(self.paths.zn_diff_results):
+            args += ["--sites", str(self.paths.zn_diff_results)]
+        if as_bool(cfg.get("also_naive", True), True):
+            args.append("--also-naive")
+        self.run_python_script("test_hierarchical_stoich.py", args, label="test_hierarchical_stoich")
+
+    def stage_between_conditions(self) -> None:
+        """Replicate-aware BETWEEN-CONDITION comparisons, for every configured contrast.
+
+        Needs a samplesheet (it supplies sample -> condition) with >=2 levels. The count-based
+        analyses -- modification, and isoform / APA / junction usage -- all share the beta-binomial
+        LRT with dispersion shrinkage in diffstats.py; poly(A) tail length is continuous and is
+        compared across replicate summaries with Welch. NOTHING here pools reads across replicates:
+        with millions of reads and n=3 per group that is pseudoreplication (measured 62% false
+        positives on simulated nulls). See diffstats.py for the model and its calibration.
+        """
+        cfg = self.config.get("between_conditions", {})
+        if not as_bool(cfg.get("enable", True), True):
+            return
+        if not self.contrasts:
+            if self.verbose:
+                print("[modulator] between_conditions: no contrasts — needs a samplesheet with a "
+                      "'condition' column and >=2 levels; skipping", flush=True)
+            return
+        if not self._nonempty(self.paths.sample_metadata):
+            return
+        min_grp = str(int(cfg.get("min_samples_per_group", 2)))
+        common_stat = ["--prior-weight", str(float(cfg.get("prior_weight", 20.0))),
+                       "--ref-df", str(int(cfg.get("ref_df", 10))),
+                       "--min-samples-per-group", min_grp]
+        mod_filter = [str(m) for m in (cfg.get("mod_filter") or [])]
+        for c in self.contrasts:
+            name = c["name"]
+            common = ["--sample-metadata", str(self.paths.sample_metadata), "--column", c["column"],
+                      "--test", c["test"], "--reference", c["reference"],
+                      "--contrast-name", name, "--verbose"]
+            # 1) differential modification (per-sample site counts from the ZN long table)
+            if as_bool(cfg.get("mod_diffs", True), True) and self._nonempty(self.paths.zn_filtered_long):
+                args = ["--in-tsv", str(self.paths.zn_filtered_long),
+                        "--out-tsv", str(self.paths.cond_mod_diffs(name)),
+                        "--min-cov", str(int(cfg.get("min_cov", 20))), *common, *common_stat]
+                if mod_filter:
+                    args += ["--mod-filter", *mod_filter]
+                self.run_python_script("test_condition_mod_diffs.py", args,
+                                       label=f"condition_mod_diffs:{name}")
+            # 2) differential usage: isoform / APA site / splice junction (one engine, three maps)
+            for feature in ("isoform", "apa", "junction"):
+                if not as_bool(cfg.get(f"{feature}_usage", True), True):
+                    continue
+                if not self._nonempty(self.paths.tx_counts):
+                    break
+                args = ["--tx-counts", str(self.paths.tx_counts),
+                        "--out-tsv", str(self.paths.cond_usage_diffs(name, feature)),
+                        "--feature", feature,
+                        "--min-gene-reads", str(int(cfg.get("min_gene_reads", 20))), *common, *common_stat]
+                if feature == "apa":
+                    if not self._nonempty(self.paths.classification_summary):
+                        continue
+                    args += ["--classification-summary", str(self.paths.classification_summary)]
+                if feature == "junction":
+                    if not self._nonempty(self.paths.splice_junctions):
+                        continue
+                    args += ["--splice-junctions", str(self.paths.splice_junctions)]
+                self.run_python_script("test_condition_usage_diffs.py", args,
+                                       label=f"condition_{feature}_usage:{name}")
+            # 3) differential poly(A) tail length (continuous -> Welch across replicates)
+            if as_bool(cfg.get("tail_diffs", True), True) and self._nonempty(self.paths.polya_read_tails):
+                self.run_python_script("test_condition_tail_diffs.py", [
+                    "--tail-tsv", str(self.paths.polya_read_tails),
+                    "--out-tsv", str(self.paths.cond_tail_diffs(name)),
+                    "--level", str(cfg.get("tail_level", "fragmentform")),
+                    "--min-reads-per-sample", str(int(cfg.get("min_tail_reads_per_sample", 10))),
+                    "--min-samples-per-group", min_grp,
+                    *common,
+                ], label=f"condition_tail_diffs:{name}")
+
     def stage_report(self) -> None:
         report_cfg = self.config.get("report", {})
         if not as_bool(report_cfg.get("enable", True), True):
@@ -1330,7 +1678,42 @@ class ModulatorPipeline:
             "--hap-blocks", str(self.paths.geno_hap_blocks) if self.paths.geno_hap_blocks.exists() else "",
             "--hap-tx-assoc", str(self.paths.geno_hap_tx) if self.paths.geno_hap_tx.exists() else "",
             "--hap-mod-assoc", str(self.paths.geno_hap_mod) if self.paths.geno_hap_mod.exists() else "",
+            "--between-conditions-dir", str(self.paths.between_conditions) if self.paths.between_conditions.is_dir() else "",
+            "--apa-motifs", str(self.paths.apa_motifs) if self.paths.apa_motifs.exists() else "",
+            "--snp-mod-mechanism", str(self.paths.geno_snp_mod_mechanism) if self.paths.geno_snp_mod_mechanism.exists() else "",
+            "--polya-fragmentform", str(self.paths.polya_fragmentform) if self.paths.polya_fragmentform.exists() else "",
+            "--taillength-diffs", str(self.paths.polya_taillength_diffs) if self.paths.polya_taillength_diffs.exists() else "",
+            "--taillength-mod", str(self.paths.polya_taillength_mod) if self.paths.polya_taillength_mod.exists() else "",
+            "--taillength-diff-figs", str(self.paths.polya_diff_figs) if self.paths.polya_diff_figs.is_dir() else "",
+            "--taillength-mod-figs", str(self.paths.polya_mod_figs) if self.paths.polya_mod_figs.is_dir() else "",
             "--snp-figs-dir", str(self.paths.genotype / f"{self.prefix}__snp_figs"),
             "--max-snp-figs", str(int(report_cfg.get("max_snp_figs", 12))),
         ]
         self.run_python_script("generate_html_report.py", args, label="generate_html_report")
+
+        # Companion interactive browser: search a gene/fragmentform, click an exon to filter its
+        # modification sites and differential results. Self-contained HTML, built from the same tables.
+        if as_bool(report_cfg.get("gene_browser", True), True):
+            gb = [
+                "--gtf", str(self.paths.out_gtf),
+                "--out-html", str(self.paths.gene_browser_html),
+                "--title", f"{self.prefix} — gene browser",
+                "--max-genes", str(int(report_cfg.get("browser_max_genes", 4000))),
+                "--verbose",
+            ]
+            for flag, path in (
+                ("--sites-long", self.paths.zn_filtered_long),
+                ("--diff-results", self.paths.zn_diff_results),
+                ("--classification-summary", self.paths.classification_summary),
+                ("--apa-motifs", self.paths.apa_motifs),
+                ("--polya-fragmentform", self.paths.polya_fragmentform),
+                ("--hierarchical-stoich", self.paths.hierarchical_stoich),
+            ):
+                if self._nonempty(path):
+                    gb += [flag, str(path)]
+            cm = sorted(self.paths.between_conditions.glob(f"{self.prefix}_*_mod_diffs.tsv")) \
+                if self.paths.between_conditions.is_dir() else []
+            if cm:
+                gb += ["--condition-mod-diffs", str(cm[0])]
+            if self._nonempty(self.paths.out_gtf):
+                self.run_python_script("build_gene_browser.py", gb, label="build_gene_browser")

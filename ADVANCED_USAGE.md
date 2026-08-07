@@ -14,6 +14,7 @@ For installation and a quick start, see [README.md](README.md).
 
 - [Command-line interface](#command-line-interface)
 - [Configuration file](#configuration-file)
+- [Samplesheet & between-condition comparisons](#samplesheet--between-condition-comparisons)
 - [Stages & parameters](#stages--parameters)
   - [1. Assembly](#1-assembly)
   - [2. Multigene filter](#2-multigene-filter)
@@ -22,7 +23,11 @@ For installation and a quick start, see [README.md](README.md).
   - [5. Differential test (test_diffs)](#5-differential-test-test_diffs)
   - [6. Classification (classify_diffs)](#6-classification-classify_diffs)
   - [7. Genotype (optional)](#7-genotype-optional)
-  - [8. Report](#8-report)
+  - [8. APA motifs (apa_motifs)](#8-apa-motifs-apa_motifs)
+  - [9. Poly(A) tail length (polya)](#9-polya-tail-length-polya)
+  - [10. Truncation-aware stoichiometry (hierarchical_stoich)](#10-truncation-aware-stoichiometry-hierarchical_stoich)
+  - [11. Between-condition comparisons (between_conditions)](#11-between-condition-comparisons-between_conditions)
+  - [12. Report & gene browser](#12-report--gene-browser)
 - [Outputs](#outputs)
 - [Running on an HPC cluster (Slurm)](#running-on-an-hpc-cluster-slurm)
 - [Performance & troubleshooting](#performance--troubleshooting)
@@ -67,6 +72,44 @@ Top-level keys (usually set with `--set`): `reference_fa`, `reference_gtf`,
 `multigene`, `modkit` (`common` / `zn` / `zt`), `aggregation` (`zn` / `zt`),
 `test_diffs`, `classify_diffs`, `genotype`, `report`. Override anything with
 `--set nested.key=value`.
+
+---
+
+## Samplesheet & between-condition comparisons
+
+By default samples are discovered by globbing `bams_dir`/`bam_glob`, the sample id
+is the **BAM stem**, and every "differential" stage compares *transcripts within a
+pooled population* — there is no condition concept.
+
+Setting `samplesheet:` changes that. It becomes the **sample source** (replacing
+`bam_glob`) and supplies the metadata:
+
+```tsv
+sample	bam	condition	replicate
+M1	HornerLab_M1pA_*.bam	mock	1
+M2	HornerLab_M2pA_*.bam	mock	2
+Z1	HornerLab_Z1pA_*.bam	zikv	1
+```
+
+- `sample` — **required**; a short id with no spaces or path separators (it becomes a filename).
+- `bam` — **required**; absolute, relative to `bams_dir`, or a glob matching **exactly one** file.
+- `condition` — required for any between-condition test.
+- Any other column (e.g. `replicate`, `batch`) rides along as a covariate.
+
+Each BAM is **symlinked** to `<results>/staged_bams/<sample>.bam` (never copied) and
+`bams_dir`/`bam_glob` are pointed there. Because modulator names samples by the BAM
+stem, your short ids then appear in *every* output table — no 60-character stems.
+The resolved metadata is written to `results/<prefix>_sample_metadata.tsv`.
+
+```yaml
+samplesheet: config/samples.tsv
+contrasts:                     # omit/empty => every pairwise contrast of `condition`
+  - {name: zikv_vs_mock, column: condition, test: zikv, reference: mock}
+```
+
+`test` and `reference` are validated against the samplesheet, so a typo fails
+immediately (listing the valid levels) rather than silently producing an empty
+comparison. `delta` is reported as `test − reference`.
 
 ---
 
@@ -260,6 +303,8 @@ association layers. Enable with `--set genotype.enable=true`.
 | `min_mod_site_cov` | int | `1` | Minimum aggregated mod-site coverage for SNP-mod testing. |
 | `min_group_reads` | int | `4` | Minimum group support for association/dependency tests. |
 | `min_haplotype_reads` | int | `4` | Minimum read support for a haplotype to be tested vs collapsed into `OTHER`. |
+| `snp_mod_mechanism` | bool | `true` | Explain *why* each SNP changes a modification: positional ladder (at the modified base / inside the DRACH 5-mer / 9-mer / proximal / distal cis), whether the alt allele disrupts or creates the m6A consensus, and whether the observed allelic direction matches that prediction. Also flags **self-reporting** variants (A-to-I reads as G; pseudouridine causes a U-to-C error), whose association with their own modification is circular. Needs the reference FASTA. |
+| `mechanism_proximal_bp` | int | `50` | Outer boundary for `PROXIMAL_CIS` before `DISTAL_CIS`. The nearer tiers are fixed by motif geometry (0 = the modified base, ≤2 = the DRACH 5-mer, ≤4 = the 9-mer). |
 | `max_haplotype_snps` | int | `4` | Maximum SNPs per local haplotype block before chunking. |
 | `test` | str | `"auto"` | `auto`/`fisher`/`chi2`. |
 | `pseudocount` | float | `0.5` | Pseudocount for non-2×2 chi-square. |
@@ -269,15 +314,177 @@ parallelism beyond the sample count, and producer tables are written in a
 deterministic order so the haplotype blocks and dependency outputs are
 reproducible run-to-run.
 
-### 8. Report
+### 8. APA motifs (apa_motifs)
 
-`results/report/<prefix>_report.html` is self-contained. Relevant knobs:
+Every fragmentform's TES is a cleavage/polyadenylation site. This reads the genome
+around it **in transcript orientation** and looks for a polyadenylation signal —
+canonical `AATAAA` or one of the 11 known variants, normally 10–30 nt upstream —
+plus the downstream U/GU-rich element. Needs the reference FASTA.
+
+It doubles as an **artifact filter**: a site with *no* PAS whose downstream genome
+is **A-rich** was most likely produced by the oligo-dT priming on an internal
+A-stretch (internal priming), not by real cleavage. Cross-check against the `polya`
+stage — a genuine site carries a real dorado tail; an internally-primed one should not.
+
+Each site is classified `PAS_CANONICAL` / `PAS_VARIANT` / `PAS_NONE_INTERNAL_PRIMING` / `PAS_NONE`.
+
+| Key | Default | Description |
+|-----|--------:|-------------|
+| `apa_motifs.enable` | `true` | Run the PAS check. |
+| `apa_motifs.upstream` | `60` | nt upstream of the cleavage site scanned for a hexamer. |
+| `apa_motifs.downstream` | `40` | nt downstream scored for U/GU-richness. |
+| `apa_motifs.pas_max_distance` | `40` | Max nt from hexamer end to the cleavage site to count as that site's PAS. |
+| `apa_motifs.internal_priming_a_frac` | `0.65` | Downstream A-fraction above which a PAS-less site is called internal priming. |
+| `apa_motifs.internal_priming_window` | `20` | nt downstream used for the A-richness test. |
+
+### 9. Poly(A) tail length (polya)
+
+Reads the **dorado poly(A) estimate** (the `pt:i` BAM tag) for every assigned read.
+Requires basecalling with `dorado --estimate-poly-a`; reads with no estimate carry
+`pt:i:0`. This is distinct from the assembler's 3'-softclip heuristic
+(`assembler.min_polya_length` / `min_polya_purity`), which is a *support* metric,
+not a length measurement.
+
+Produces: per-read tail lengths joined to fragmentform, per-fragmentform tail
+distributions, differential tail length **between the fragmentforms of a gene**
+(Mann-Whitney for 2, Kruskal-Wallis for >2 — the first continuous tests in the
+pipeline), and **tail × modification** (per site, tail of modified vs unmodified
+reads). Tail × modification needs `genotype.enable=true` for the mod-call table.
+
+| Key | Default | Description |
+|-----|--------:|-------------|
+| `polya.enable` | `true` | Run the stage. |
+| `polya.jobs` | `0` | BAM × chrom shards in parallel; `0` = use `threads`. |
+| `polya.min_tail` | `1` | Drop reads with `tail_len` below this (`pt:i:0` = no estimate). |
+| `polya.min_fragmentform_reads` | `10` | Min reads for a fragmentform to enter the differential. |
+| `polya.min_total_reads` | `20` | Min total reads across a gene's tested fragmentforms. |
+| `polya.min_state_reads` | `10` | tail × mod: min reads per state (modified/unmodified) per site. |
+| `polya.top_figures` | `10` | Per-example tail-distribution figures rendered for the report. |
+
+### 10. Truncation-aware stoichiometry (hierarchical_stoich)
+
+The 5′ **complement** to `test_diffs`, not a replacement. Off by default.
+
+**The problem it solves.** Direct-RNA reads are sequenced 3′→5′ and truncate at the 5′ end, so a
+read assigned to a fragmentform it never reached carries **no evidence** about features there — yet
+its modification calls still count toward that fragmentform. Measured on real data: ~35% of assigned
+reads fall >500 nt short of their fragmentform's 5′ end, ~22% fall >1 kb short. Any differential test
+between fragmentforms that diverge 5′-ward inherits those guessed assignments.
+
+**What it does.** For each pair of fragmentforms it finds their **divergence point** — the position
+closest to the 3′ end where their exon structures differ — and restricts the comparison to reads
+that demonstrably span it, so assignment is *observed* rather than inferred. Every row carries
+`n_informative`, `divergence_from_3p_nt` and `reads_dropped_as_uninformative`, so an underpowered 5′
+feature reads as underpowered rather than as "no effect".
+
+**Why it is cheap.** Because all reads share the 3′ end and differ only in 5′ reach, the informative
+sets are *nested*: "reads spanning position p" is a prefix of the reads sorted by reach. The whole
+hierarchy collapses to roaring prefix bitmaps + `intersection_cardinality` — one sort per gene, then
+four intersections per (pair, site).
+
+**When it is worth running.** Measured genome-wide (3,086 genes / 304k tests), the confound scales
+with 5′ distance:
+
+| divergence from the 3′ end | tests losing reads | calls changed |
+|---|--:|--:|
+| <1 kb | 0.2% | 0.0% |
+| 1–5 kb | 11.5% | 0.2% |
+| 5–20 kb | 36.1% | 0.8% |
+| >20 kb | ~55% | ~1.3% |
+
+So `test_diffs` already answers 3′-proximal pairs correctly and much more cheaply; this engine earns
+its ~15 min genome-wide cost only for 5′-divergent pairs. Overall only 0.3% of calls change — but
+12,967 tests dropped >25% of their reads and 222 shifted by >0.10, and those are exactly the 5′-exon
+effects the naive test gets wrong. Use `min_divergence_from_3p` to run it only where it can matter.
+
+| Key | Default | Description |
+|-----|--------:|-------------|
+| `hierarchical_stoich.enable` | `false` | Run the stage (needs the genotype stage's per-read tables). |
+| `hierarchical_stoich.min_divergence_from_3p` | `0` | Only test pairs diverging at least this far (nt) from the 3′ end. `5000` skips ~42% of pairs and keeps essentially all of the correction. |
+| `hierarchical_stoich.sites` | `auto` | `auto` = restrict to the sites `test_diffs` flagged (the fast path); a path to any TSV with a `mod_site_id` column; or `""` for all sites. |
+| `hierarchical_stoich.min_informative_reads` | `10` | Min reads per fragmentform that actually span the divergence point. |
+| `hierarchical_stoich.min_state_reads` | `3` | Min reads per modification state per fragmentform. |
+| `hierarchical_stoich.max_fragmentforms_per_gene` | `12` | Cap pairs on highly fragmented genes (keeps the best-supported). |
+| `hierarchical_stoich.also_naive` | `true` | Also emit the unrestricted result per row, so the confound is measurable per site rather than assumed. |
+
+Output: `test_diffs/<prefix>_hierarchical_stoich.tsv`, one row per (fragmentform-pair, site).
+
+### 11. Between-condition comparisons (between_conditions)
+
+**Requires a [samplesheet](#samplesheet--between-condition-comparisons)** with a
+`condition` column and ≥2 levels; otherwise the stage is a no-op. Runs once per
+contrast and writes `between_conditions/<prefix>_<contrast>_*.tsv`.
+
+Five differentials, all replicate-aware:
+
+| analysis | unit | test |
+|---|---|---|
+| modification | per site | beta-binomial LRT + dispersion shrinkage |
+| isoform usage | per fragmentform / gene reads | same engine |
+| APA usage | per TES / gene reads | same engine |
+| junction usage | per intron / gene reads | same engine |
+| poly(A) tail | per fragmentform (or gene) | Welch across per-replicate medians |
+
+**Reads are never pooled across replicates.** With millions of reads but n=3 per
+group, the biological unit is the *replicate*; pooling is pseudoreplication and
+returns p≈1e-300 for trivial differences (measured: **62% of simulated NULL sites
+reach p<0.05**). Counts therefore use a beta-binomial LRT that separates binomial
+sampling noise (which scales with coverage) from beta biological noise, with the
+dispersion shrunk across features.
+
+> **Read the effect size, not just the FDR.** On tightly reproducible replicates
+> (the reference data has a biological SD of ~1 percentage point) a ~2 pp shift
+> already clears FDR. Rank by `|delta|`.
+
+| Key | Default | Description |
+|-----|--------:|-------------|
+| `between_conditions.enable` | `true` | Run the stage (no-op without a samplesheet/contrasts). |
+| `between_conditions.mod_diffs` | `true` | Differential modification (needs `aggregate_zn`). |
+| `between_conditions.isoform_usage` | `true` | Differential isoform usage (needs `assemble`). |
+| `between_conditions.apa_usage` | `true` | Differential APA-site usage. |
+| `between_conditions.junction_usage` | `true` | Differential junction usage (needs `splice_junctions`). |
+| `between_conditions.tail_diffs` | `true` | Differential tail length (needs the `polya` stage). |
+| `between_conditions.min_cov` | `20` | Differential modification: min per-sample coverage at a site. |
+| `between_conditions.min_gene_reads` | `20` | Differential usage: min per-sample gene reads (the denominator). |
+| `between_conditions.min_tail_reads_per_sample` | `10` | Differential tail: min reads per sample for a feature's median. |
+| `between_conditions.min_samples_per_group` | `2` | Min replicates per condition (2 is the floor for any variance estimate). |
+| `between_conditions.tail_level` | `fragmentform` | `fragmentform` or `gene`. |
+| `between_conditions.mod_filter` | `[]` | Restrict differential modification to these mod codes, e.g. `["a"]` for m6A only. |
+| `between_conditions.prior_weight` | `20.0` | Dispersion-shrinkage strength. |
+| `between_conditions.ref_df` | `10` | `F(1, df)` reference for the LRT — **dispersion-dependent, see below**. |
+
+**Calibrating `ref_df` on new data.** `chi2(1)` is invalid at n=3v3 — not because
+of the small sample per se (with the *true* dispersion the LRT is already
+calibrated at n=3), but because the dispersion is *estimated*. The `F(1, ref_df)`
+reference absorbs that uncertainty, so the right `ref_df` depends on how
+reproducible your replicates are. `10` was calibrated against near-binomial
+replicates (biological φ≈0.0007), giving a null `p<0.05` of 0.06 and ~60%
+sensitivity at Δ=0.10. **Genuinely overdispersed replicates need a lower value
+(~4).** To check: run a within-condition (null) contrast and confirm `p<0.05`
+lands near 0.05.
+
+### 12. Report & gene browser
+
+The report stage produces **two** self-contained HTML files:
+
+- `results/report/<prefix>_report.html` — the narrative report (images externalised to a sidecar
+  `<prefix>_report_files/` folder so the HTML stays small).
+- `results/report/<prefix>_gene_browser.html` — an **interactive browser**. Search by gene *or*
+  fragmentform id; each fragmentform's exon structure is drawn to scale; **click an exon** and every
+  table below filters to the modification sites inside it — pooled stoichiometry, between-transcript
+  differentials, between-condition results, and the truncation-aware fragmentform comparison (which
+  shows `n informative` so you can see how much power survived). Built from the same TSVs, no CDN or
+  framework, works offline, and follows the viewer's light/dark theme.
+
+Relevant knobs:
 
 | Key | Default | Description |
 |-----|--------:|-------------|
 | `report.enable` | `true` | Generate the HTML report. |
 | `report.top_transcripts` / `report.top_genes` | `20` | Rows shown in the various tables. |
 | `report.max_diff_figs` | `6` | Differential-site figures embedded. |
+| `report.gene_browser` | `true` | Also build the interactive gene browser. |
+| `report.browser_max_genes` | `4000` | Genes embedded in the browser payload (largest by read support first), keeping the file responsive. |
 | `report.max_class_figs_per_category` | `10` | Per-category classification figures embedded. |
 | `report.max_snp_figs` | `12` | Per-example SNP/haplotype figures per genotype section. |
 
@@ -389,6 +596,31 @@ Recommendations:
 
 ## Recent changes
 
+- **Truncation-aware stoichiometry** (new `hierarchical_stoich` stage): fragmentform pairs are
+  compared using only reads that demonstrably span their divergence point, so 5'-divergent
+  comparisons stop inheriting inferred read assignments. Nested read sets make it a prefix-bitmap
+  sweep. Off by default; `min_divergence_from_3p` targets it at the pairs where it can change the answer.
+- **Interactive gene browser**: `report/<prefix>_gene_browser.html` — search a gene or fragmentform,
+  click an exon, and every site/differential table filters to it.
+- **Report redesign**: cool-neutral design system with real dark-mode support, tabular numerals,
+  sticky table headers and refined cards (replacing the previous serif/cream theme).
+
+- **Between-condition comparisons** (new `between_conditions` stage + `samplesheet`):
+  replicate-aware differential modification / isoform / APA / junction usage
+  (beta-binomial LRT with dispersion shrinkage) and tail length (Welch across
+  replicates). Reads are never pooled across replicates. The samplesheet is now the
+  sample source, so short sample ids propagate everywhere via BAM symlink staging.
+- **Poly(A) tail length** (new `polya` stage): the dorado `pt:i` estimate becomes a
+  first-class readout — per-fragmentform distributions, differential tail between a
+  gene's isoforms, and tail × modification.
+- **APA motifs** (new `apa_motifs` stage): PAS hexamer + distance per APA site, and
+  an internal-priming artifact flag (no PAS + A-rich downstream genome).
+- **Genotype**: `classify_snp_mod_mechanism` explains *why* a SNP changes a
+  modification (positional ladder / DRACH disruption / direction concordance) and
+  flags **self-reporting** variants — A-to-I and pseudouridine alter the basecall,
+  so they are called as SNPs at their own site and the association is circular.
+  Association engines rewritten as roaring-bitmap engines (~10x less memory).
+- **Figures**: every graph is now written as **PNG and SVG** (`plot_utils.save_figure`).
 - **Report**: one structural-category graph **per modification** (not a single
   hard-labeled chart); images **externalized** to a sidecar folder + lightbox
   (small HTML that opens in Chrome); haplotype blocks annotated with gene names

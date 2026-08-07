@@ -37,6 +37,7 @@ import pandas as pd
 from scipy.stats import chi2_contingency, fisher_exact
 import matplotlib.pyplot as plt
 from matplotlib.ticker import MaxNLocator
+from plot_utils import save_figure
 
 
 # ------------------------------ CLI ------------------------------
@@ -336,7 +337,7 @@ def make_plot(df_site, per_tx, title, out_png):
 
     fig.suptitle(title, y=0.98, fontsize=12)
     fig.tight_layout(rect=[0, 0.05, 1, 0.95])
-    fig.savefig(out_png, dpi=300, bbox_inches="tight")
+    save_figure(fig, out_png, dpi=300, bbox_inches="tight")   # PNG + SVG
     plt.close(fig)
 
 

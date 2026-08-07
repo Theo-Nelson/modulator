@@ -242,6 +242,12 @@ def _gallery(df, kind, figs_dir, max_figs, min_reads):
         fig, caption = built
         buf = BytesIO()
         fig.savefig(buf, format="png", dpi=160, bbox_inches="tight")
+        if out_dir:  # vector SVG companion, written from the live figure before it is closed
+            try:
+                fig.savefig(os.path.join(out_dir, f"rank{rank:02d}__{_safe(caption)}.svg"),
+                            format="svg", bbox_inches="tight")
+            except Exception:
+                pass
         plt.close(fig)
         png = buf.getvalue()
         if out_dir:

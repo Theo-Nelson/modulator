@@ -211,6 +211,14 @@ def parse_args():
     ap.add_argument("--hap-blocks", default="")
     ap.add_argument("--hap-tx-assoc", default="")
     ap.add_argument("--hap-mod-assoc", default="")
+    ap.add_argument("--between-conditions-dir", default="", help="results/between_conditions dir (per-contrast differential TSVs)")
+    ap.add_argument("--apa-motifs", default="", help="*_apa_motifs.tsv (PAS motif check per APA site)")
+    ap.add_argument("--snp-mod-mechanism", default="", help="*_snp_mod_mechanism.tsv (why a SNP changes a modification)")
+    ap.add_argument("--polya-fragmentform", default="", help="*_polya_fragmentform.tsv (per-fragmentform tail-length distributions)")
+    ap.add_argument("--taillength-diffs", default="", help="*_taillength_diffs.tsv (differential tail length between fragmentforms of a gene)")
+    ap.add_argument("--taillength-mod", default="", help="*_taillength_mod.tsv (tail length vs modification state)")
+    ap.add_argument("--taillength-diff-figs", default="", help="Directory of top-K per-gene tail-distribution PNGs")
+    ap.add_argument("--taillength-mod-figs", default="", help="Directory of top-K per-site tail-vs-modification PNGs")
     ap.add_argument("--snp-figs-dir", default="", help="Directory to write per-example SNP/haplotype figures into (also embedded inline).")
     ap.add_argument("--max-snp-figs", type=int, default=12, help="Max per-example figures per SNP/haplotype section.")
     ap.add_argument("--max-diff-figs", type=int, default=6)
@@ -257,6 +265,20 @@ def embed_png(path):
     return f"data:image/png;base64,{encoded}"
 
 
+from plot_utils import save_figure
+
+_REPORT_FIGS_DIR = None  # set by main(); when set, inline summary charts also write PNG + SVG files here
+
+
+def _save_report_chart(fig, name):
+    """Persist an inline report summary chart to disk as PNG + SVG (alongside its inline embed)."""
+    if _REPORT_FIGS_DIR:
+        try:
+            save_figure(fig, os.path.join(_REPORT_FIGS_DIR, name + ".png"), dpi=200, bbox_inches="tight")
+        except Exception:
+            pass
+
+
 def category_distribution_png(counts, mod_label=None):
     """Horizontal bar chart of classified-site counts per category. Returns a
     base64 data URI (or "" if matplotlib/data unavailable). ``mod_label`` names the
@@ -297,6 +319,7 @@ def category_distribution_png(counts, mod_label=None):
     for spine in ("top", "right"):
         ax.spines[spine].set_visible(False)
     fig.tight_layout()
+    _save_report_chart(fig, "site_classification_distribution")
     buf = BytesIO()
     fig.savefig(buf, format="png", dpi=200, bbox_inches="tight")
     plt.close(fig)
@@ -361,6 +384,7 @@ def mod_mod_concordance_png(df, top_n=12):
     fig.suptitle("Co-localized modifications: observed vs expected 2x2 (red = enriched over independence)",
                  fontsize=10, y=1.0)
     fig.tight_layout(rect=(0, 0, 1, 0.97))
+    _save_report_chart(fig, "mod_mod_concordance")
     buf = BytesIO()
     fig.savefig(buf, format="png", dpi=170, bbox_inches="tight")
     plt.close(fig)
@@ -460,6 +484,315 @@ def category_figure_gallery(figs_dir, category, max_figs,
         f"<details class='definitions'{open_attr}>"
         f"<summary>Top {len(pieces)} {summary_label}</summary>"
         f"{gallery}</details>"
+    )
+
+
+def polya_distribution_png(frag_df):
+    """Two-panel poly(A) overview: (left) histogram of per-fragmentform median tail length;
+    (right) median tail length by fragmentform classification. base64 data URI or ""."""
+    if frag_df is None or frag_df.empty or "median_tail" not in frag_df.columns:
+        return ""
+    try:
+        import matplotlib
+        matplotlib.use("Agg")
+        import matplotlib.pyplot as plt
+        from io import BytesIO
+    except Exception:
+        return ""
+    med = pd.to_numeric(frag_df["median_tail"], errors="coerce").dropna()
+    if med.empty:
+        return ""
+    has_cls = "classification" in frag_df.columns and frag_df["classification"].notna().any()
+    fig, axes = plt.subplots(1, 2 if has_cls else 1, figsize=(11.5 if has_cls else 6.5, 3.6))
+    axes = axes if has_cls else [axes]
+    axes[0].hist(med.values, bins=40, color="#3b6ea5", edgecolor="white", linewidth=0.4)
+    axes[0].axvline(float(med.median()), color="#c1121f", ls="--", lw=1.2,
+                    label=f"median {med.median():.0f} nt")
+    axes[0].set_xlabel("fragmentform median poly(A) tail (nt)")
+    axes[0].set_ylabel("fragmentforms")
+    axes[0].legend(frameon=False, fontsize=8)
+    if has_cls:
+        order = [c for c in ["EXACT", "NOVEL_APA", "NOVEL_CHAIN", "NOVEL_LOCUS"]
+                 if c in set(frag_df["classification"])]
+        order += [c for c in frag_df["classification"].dropna().unique() if c not in order]
+        data = [pd.to_numeric(frag_df.loc[frag_df["classification"] == c, "median_tail"],
+                              errors="coerce").dropna().values for c in order]
+        axes[1].boxplot(data, labels=order, showfliers=False)
+        axes[1].set_ylabel("fragmentform median tail (nt)")
+        axes[1].set_xlabel("fragmentform class")
+        for t in axes[1].get_xticklabels():
+            t.set_rotation(20); t.set_ha("right"); t.set_fontsize(8)
+    fig.tight_layout()
+    _save_report_chart(fig, "polya_tail_distribution")
+    buf = BytesIO()
+    fig.savefig(buf, format="png", dpi=130, bbox_inches="tight")
+    plt.close(fig)
+    import base64 as _b64
+    return "data:image/png;base64," + _b64.b64encode(buf.getvalue()).decode("ascii")
+
+
+def build_between_conditions_section(bc_dir, top_n):
+    """Replicate-aware between-condition results, one subsection per contrast."""
+    if not bc_dir or not os.path.isdir(bc_dir):
+        return ""
+    kinds = [("mod_diffs", "Differential modification", ["gene_name", "chrom", "start0", "strand", "mod_code",
+                                                         "mu_reference", "mu_test", "delta", "p_adj_bh"], "delta"),
+             ("isoform_usage_diffs", "Differential isoform usage", ["gene_name", "feature", "mu_reference",
+                                                                    "mu_test", "delta", "p_adj_bh"], "delta"),
+             ("apa_usage_diffs", "Differential APA-site usage", ["gene_name", "feature", "mu_reference",
+                                                                 "mu_test", "delta", "p_adj_bh"], "delta"),
+             ("junction_usage_diffs", "Differential junction usage", ["gene_name", "feature", "mu_reference",
+                                                                      "mu_test", "delta", "p_adj_bh"], "delta"),
+             ("tail_diffs", "Differential poly(A) tail length", ["gene_name", "feature", "median_tail_reference",
+                                                                 "median_tail_test", "delta_nt", "p_adj_bh"], "delta_nt")]
+    found = {}
+    for path in sorted(glob.glob(os.path.join(bc_dir, "*.tsv"))):
+        base = os.path.basename(path)
+        for suffix, _, _, _ in kinds:
+            if base.endswith(f"_{suffix}.tsv"):
+                df = read_tsv(path)
+                if df.empty or "contrast" not in df.columns:
+                    continue
+                found.setdefault(str(df["contrast"].iloc[0]), {})[suffix] = df
+                break
+    if not found:
+        return ""
+    parts = []
+    for contrast, by_kind in found.items():
+        summary, blocks = [], []
+        for suffix, title, cols, eff in kinds:
+            df = by_kind.get(suffix)
+            if df is None or df.empty:
+                continue
+            padj = pd.to_numeric(df.get("p_adj_bh"), errors="coerce")
+            e = pd.to_numeric(df.get(eff), errors="coerce").abs()
+            # Effect thresholds differ by units, so name the column consistently and report the
+            # threshold in its own column (otherwise each analysis makes its own NaN-filled column).
+            thr = 10.0 if eff == "delta_nt" else 0.10     # 10 nt of tail, or 10 percentage points
+            summary.append({"analysis": title, "tested": len(df),
+                            "FDR<0.05": int((padj < 0.05).sum()),
+                            "effect_threshold": f"|{eff}| >= {thr:g}" + (" nt" if eff == "delta_nt" else ""),
+                            "FDR<0.05 & above threshold": int(((padj < 0.05) & (e >= thr)).sum())})
+            sig = df[(padj < 0.05)].copy()
+            if not sig.empty:
+                sig["_e"] = pd.to_numeric(sig[eff], errors="coerce").abs()
+                sig = sig.sort_values("_e", ascending=False).drop(columns="_e")
+                blocks.append(subsection(f"{title} — top by effect size",
+                                         df_to_html(sig[[c for c in cols if c in sig.columns]], max_rows=top_n)))
+        if summary:
+            parts.append(subsection(f"Contrast: {contrast}",
+                                    df_to_html(pd.DataFrame(summary), max_rows=10) + "".join(blocks)))
+    return section(
+        "Between-Condition Comparisons",
+        "".join(parts),
+        intro="Replicate-aware comparisons between conditions, from the samplesheet's `condition` column. "
+              "Counts (modification and isoform/APA/junction usage) use a beta-binomial likelihood-ratio "
+              "test with dispersion shrinkage across features; poly(A) tail length is continuous and is "
+              "compared with Welch's t-test across per-replicate medians. Reads are never pooled across "
+              "replicates -- the biological unit is the replicate, and pooling would make trivial "
+              "differences look overwhelmingly significant.",
+        definitions=definitions_html([
+            ("mu_reference / mu_test", "Fitted modified (or usage) fraction in the reference and test condition."),
+            ("delta", "mu_test - mu_reference: the effect size, in fraction units (delta_nt = nucleotides of tail)."),
+            ("p_adj_bh", "Benjamini-Hochberg FDR over all features in that analysis."),
+            ("Read this carefully", "These replicates are tightly reproducible, so significance is cheap: a ~2 "
+                                    "percentage-point shift can clear FDR. Rank by |delta|, not by p-value alone."),
+        ], summary="Column definitions"),
+    )
+
+
+def build_apa_motif_section(apa_df, top_n):
+    """PAS motif support for every APA site, and the internal-priming artifact flag."""
+    if apa_df is None or apa_df.empty or "apa_motif_class" not in apa_df.columns:
+        return section("APA Motifs (Polyadenylation Signals)",
+                       "<p class='muted'>No APA motif results available.</p>",
+                       intro="Polyadenylation-signal support for each detected APA site.")
+    counts = apa_df["apa_motif_class"].value_counts().to_dict()
+    total = int(sum(counts.values())) or 1
+    parts = []
+    fig = category_distribution_png(counts)
+    if fig:
+        parts.append(clickable_image_html(fig, "APA PAS class distribution",
+                                          caption="Polyadenylation-signal class per APA site."))
+    n_pas = counts.get("PAS_CANONICAL", 0) + counts.get("PAS_VARIANT", 0)
+    n_ip = counts.get("PAS_NONE_INTERNAL_PRIMING", 0)
+    parts.append(
+        "<ul>"
+        f"<li><b>{total:,}</b> APA sites checked — <b>{n_pas:,} ({100.0 * n_pas / total:.1f}%)</b> carry a polyadenylation signal</li>"
+        f"<li><b>{counts.get('PAS_CANONICAL', 0):,}</b> canonical <code>AATAAA</code>; "
+        f"<b>{counts.get('PAS_VARIANT', 0):,}</b> a variant hexamer</li>"
+        f"<li><b>{n_ip:,}</b> flagged <b>likely internal priming</b> (no PAS + A-rich downstream genome)</li>"
+        "</ul>"
+    )
+    summ = pd.DataFrame({"apa_motif_class": list(counts.keys()), "n_sites": list(counts.values())})
+    summ["pct"] = (100.0 * summ["n_sites"] / total).round(2)
+    parts.append(subsection("PAS class summary", df_to_html(summ.sort_values("n_sites", ascending=False), max_rows=10)))
+    hx = apa_df[apa_df["pas_motif"].astype(str).ne("") & apa_df["pas_motif"].notna()]
+    if not hx.empty:
+        hu = hx["pas_motif"].value_counts().reset_index()
+        hu.columns = ["pas_motif", "n_sites"]
+        med = hx.groupby("pas_motif")["pas_distance_nt"].median()
+        hu["median_distance_upstream_nt"] = hu["pas_motif"].map(med)
+        parts.append(subsection("PAS hexamer usage (and distance upstream of the cleavage site)",
+                                df_to_html(hu, max_rows=12)))
+    ip = apa_df[apa_df["apa_motif_class"].eq("PAS_NONE_INTERNAL_PRIMING")]
+    if not ip.empty:
+        cols = [c for c in ["gene_name", "zt_label", "chrom", "strand", "tes", "downstream_a_frac",
+                            "fragmentform_class", "read_support"] if c in ip.columns]
+        parts.append(subsection("Sites flagged as likely internal priming", df_to_html(ip[cols], max_rows=top_n)))
+    return section(
+        "APA Motifs (Polyadenylation Signals)",
+        "".join(parts),
+        intro="Each fragmentform's TES is a cleavage/polyadenylation site. For every one, the genomic "
+              "sequence around it is read in transcript orientation and scanned for a polyadenylation "
+              "signal (canonical AATAAA or a known variant hexamer, normally 10-30 nt upstream) plus a "
+              "downstream U/GU-rich element. This both annotates the site and filters artifacts: a site "
+              "with no PAS whose downstream genome is A-rich was most likely produced by an oligo-dT "
+              "primer annealing to an internal A-stretch (internal priming), not by real cleavage.",
+        definitions=definitions_html([
+            ("PAS_CANONICAL", "Canonical AATAAA hexamer found upstream — the textbook signal."),
+            ("PAS_VARIANT", "One of the 11 known variant hexamers (ATTAAA, TATAAA, AGTAAA, ...)."),
+            ("PAS_NONE_INTERNAL_PRIMING", "No PAS AND A-rich downstream genome — likely an oligo-dT internal-priming artifact, not a real APA site."),
+            ("PAS_NONE", "No PAS but not A-rich — a non-canonical or novel site worth inspecting."),
+            ("downstream_a_frac", "A fraction of the genomic sequence just downstream of the cleavage site; high values are the internal-priming signature."),
+        ], summary="Category definitions"),
+    )
+
+
+def build_snp_mechanism_section(mech_df, top_n):
+    """Why a SNP changes a modification: positional ladder, m6A motif effect, direction concordance."""
+    if mech_df is None or mech_df.empty or "positional_class" not in mech_df.columns:
+        return section("SNP to Modification Mechanism",
+                       "<p class='muted'>No SNP-to-modification mechanism results available.</p>",
+                       intro="Positional and motif-level explanation of each SNP x modification association.")
+    parts = []
+    counts = mech_df["positional_class"].value_counts().to_dict()
+    fig = category_distribution_png(counts)
+    if fig:
+        parts.append(clickable_image_html(fig, "SNP positional class distribution",
+                                          caption="Where each SNP sits relative to the modified base."))
+    padj = pd.to_numeric(mech_df.get("p_adj_bh"), errors="coerce")
+    sig = mech_df[padj < 0.05]
+    n_art_sig = int(sig["artifact_flag"].ne("NONE").sum()) if "artifact_flag" in sig.columns else 0
+    clean = mech_df[mech_df["artifact_flag"].eq("NONE")] if "artifact_flag" in mech_df.columns else mech_df
+    conc = clean[clean["direction_concordance"].isin(["CONCORDANT", "DISCORDANT"])]
+    rate = (100.0 * conc["direction_concordance"].eq("CONCORDANT").mean()) if len(conc) else float("nan")
+    parts.append(
+        "<ul>"
+        f"<li><b>{len(mech_df):,}</b> SNP x modification pairs classified</li>"
+        f"<li><b>{n_art_sig:,}</b> of the <b>{len(sig):,}</b> significant (FDR&lt;0.05) pairs are "
+        f"<b>self-reporting artifacts</b> — the variant and the modification are the same physical event</li>"
+        + (f"<li>Motif prediction matches the observed allelic direction in <b>{rate:.1f}%</b> of "
+           f"testable m6A pairs (n={len(conc)}) — the mechanism is internally consistent</li>" if len(conc) else "")
+        + "</ul>"
+    )
+    if "artifact_flag" in mech_df.columns:
+        af = mech_df["artifact_flag"].value_counts().reset_index()
+        af.columns = ["artifact_flag", "n_pairs"]
+        parts.append(subsection("Self-reporting / definitional artifacts", df_to_html(af, max_rows=8)))
+    me = mech_df[mech_df["motif_effect"].ne("NOT_APPLICABLE")] if "motif_effect" in mech_df.columns else pd.DataFrame()
+    if not me.empty:
+        mt = me["motif_effect"].value_counts().reset_index()
+        mt.columns = ["motif_effect", "n_pairs"]
+        parts.append(subsection("m6A DRACH motif effect (SNPs inside the 5-mer)", df_to_html(mt, max_rows=8)))
+    causal = clean[clean["motif_effect"].eq("MOTIF_DISRUPTED") & clean["direction_concordance"].eq("CONCORDANT")] \
+        if "motif_effect" in clean.columns else pd.DataFrame()
+    if not causal.empty:
+        cols = [c for c in ["snp_id", "gene_names", "mod_site_id", "distance_bp", "ref_5mer", "alt_5mer",
+                            "ref_mod_rate", "alt_mod_rate", "p_adj_bh"] if c in causal.columns]
+        causal = causal.assign(_p=pd.to_numeric(causal["p_adj_bh"], errors="coerce")).sort_values("_p")
+        parts.append(subsection("Top causal cis m6A variants (DRACH disrupted, direction concordant)",
+                                df_to_html(causal[cols], max_rows=top_n)))
+    return section(
+        "SNP to Modification Mechanism",
+        "".join(parts),
+        intro="A SNP whose alleles carry different modification rates gets explained on three axes: WHERE "
+              "it sits relative to the modified base (at it / inside the DRACH 5-mer / inside the 9-mer / "
+              "proximal / distal cis), whether it DISRUPTS or CREATES the m6A DRACH consensus, and whether "
+              "the observed allelic direction matches what the motif predicts. DRACH is only applied to m6A "
+              "— pseudouridine and inosine have no comparable 5-mer consensus, so they get positional "
+              "context only.",
+        definitions=definitions_html([
+            ("AT_MOD_BASE", "The SNP is the modified base itself."),
+            ("IN_MOTIF_CORE / IN_MOTIF_EXTENDED", "Inside the DRACH 5-mer (<=2 nt) / the 9-mer (<=4 nt) around the modified base."),
+            ("PROXIMAL_CIS / DISTAL_CIS", "Near (default <=50 nt) vs far from the modified base, same locus."),
+            ("MOTIF_DISRUPTED / MOTIF_CREATED", "The alt allele breaks / creates the DRACH consensus — predicting less / more modification on alt."),
+            ("MOTIF_ABSENT_BOTH", "Neither allele is DRACH, which makes the m6A call itself suspect."),
+            ("EDITING_SELF_REPORT / PSEU_SELF_REPORT", "The 'SNP' IS the modification: A-to-I editing basecalls as G, and pseudouridine causes a U-to-C error, so each gets called as a variant at its own site. The association is circular, not regulatory."),
+            ("MOD_BASE_ABLATED", "SNP at an m6A base whose alt allele is not an A — there is no substrate to methylate, so the association is definitional."),
+            ("direction_concordance", "Does the observed allelic direction match the motif's prediction? CONCORDANT = coherent causal cis variant."),
+        ], summary="Category definitions"),
+    )
+
+
+def _flat_figure_gallery(figs_dir, max_figs, summary_label):
+    """Collapsible gallery of figs_dir/*.png (flat, rank-sorted). For the poly(A) top-K figures."""
+    if not figs_dir or max_figs <= 0 or not os.path.isdir(figs_dir):
+        return ""
+    fig_paths = sorted(glob.glob(os.path.join(figs_dir, "*.png")))[:max_figs]
+    pieces = []
+    for path in fig_paths:
+        img = embed_png(path)
+        if img:
+            pieces.append(clickable_image_html(img, os.path.basename(path), caption=os.path.basename(path)))
+    if not pieces:
+        return ""
+    return (f"<details class='definitions' open><summary>Top {len(pieces)} {summary_label}</summary>"
+            f"<div class='gallery'>{''.join(pieces)}</div></details>")
+
+
+def build_polya_section(frag_df, diffs_df, mod_df, top_n, diff_figs_dir="", mod_figs_dir="", max_figs=10):
+    """Poly(A) tail length as a first-class readout: distribution across fragmentforms,
+    differential tail length between the fragmentforms of a gene, and tail x modification."""
+    if (frag_df is None or frag_df.empty) and (diffs_df is None or diffs_df.empty) and (mod_df is None or mod_df.empty):
+        return section("Poly(A) Tail Length",
+                       "<p class='muted'>No poly(A) tail-length data. Requires reads basecalled with "
+                       "dorado <code>--estimate-poly-a</code> (the <code>pt:i</code> tag).</p>",
+                       intro="Per-read dorado poly(A) tail-length estimates, grouped by fragmentform.")
+    parts = []
+    fig = polya_distribution_png(frag_df)
+    if fig:
+        parts.append(clickable_image_html(fig, "poly(A) tail-length distribution",
+                                          caption="Left: per-fragmentform median tail length. "
+                                                  "Right: median tail by fragmentform class."))
+    if frag_df is not None and not frag_df.empty:
+        med_all = pd.to_numeric(frag_df["median_tail"], errors="coerce").dropna()
+        n_sig_diff = int((pd.to_numeric(diffs_df.get("p_adj_bh"), errors="coerce") < 0.05).sum()) if diffs_df is not None and not diffs_df.empty else 0
+        n_sig_mod = int((pd.to_numeric(mod_df.get("p_adj_bh"), errors="coerce") < 0.05).sum()) if mod_df is not None and not mod_df.empty else 0
+        parts.append(
+            "<ul>"
+            f"<li><b>{len(frag_df):,}</b> fragmentforms with a tail-length distribution; "
+            f"overall median <b>{med_all.median():.0f} nt</b></li>"
+            f"<li><b>{n_sig_diff:,}</b> genes with differential tail length between their fragmentforms (FDR&lt;0.05)</li>"
+            f"<li><b>{n_sig_mod:,}</b> modification sites where tail length differs by modification state (FDR&lt;0.05)</li>"
+            "</ul>"
+        )
+    if diffs_df is not None and not diffs_df.empty:
+        cols = [c for c in ["gene_name", "n_fragmentforms_tested", "n_reads", "effect_median_range_nt",
+                            "min_median_tail", "max_median_tail", "test_name", "p_value", "p_adj_bh"] if c in diffs_df.columns]
+        gallery = _flat_figure_gallery(diff_figs_dir, max_figs, "per-gene tail-distribution figure(s) — tail length by fragmentform")
+        parts.append(subsection("Differential tail length between fragmentforms of a gene",
+                                df_to_html(diffs_df[cols], max_rows=top_n) + gallery))
+    if mod_df is not None and not mod_df.empty:
+        cols = [c for c in ["gene_name", "mod_site_id", "target_mod_code", "n_modified", "n_unmodified",
+                            "median_tail_modified", "median_tail_unmodified", "effect_median_diff_nt",
+                            "p_value", "p_adj_bh"] if c in mod_df.columns]
+        gallery = _flat_figure_gallery(mod_figs_dir, max_figs, "per-site figure(s) — modified vs unmodified tail length")
+        parts.append(subsection("Poly(A) tail length vs modification state",
+                                df_to_html(mod_df[cols], max_rows=top_n) + gallery))
+    return section(
+        "Poly(A) Tail Length",
+        "".join(parts),
+        intro="Direct per-read poly(A) tail-length estimates from the dorado basecaller (pt:i tag), "
+              "grouped by fragmentform (isoform). Tail length is mechanistically tied to m6A, RNA "
+              "stability, and translation, so it is reported as a first-class readout: its distribution "
+              "across fragmentforms, whether the fragmentforms of a gene differ in tail length, and "
+              "whether modification at a site tracks with a read's tail length.",
+        definitions=definitions_html([
+            ("effect_median_range_nt", "Spread (nt) of per-fragmentform median tail lengths within a gene — how differently its isoforms are tailed."),
+            ("effect_median_diff_nt", "Median tail length of modified reads minus unmodified reads at a site (negative = modification associates with shorter tails)."),
+            ("test", "Mann-Whitney U (2 groups) or Kruskal-Wallis (>2) on tail-length distributions; p_adj_bh is BH-FDR."),
+        ], summary="Column definitions"),
     )
 
 
@@ -648,6 +981,14 @@ def externalize_data_uris(html_doc, out_html):
 
 def main():
     args = parse_args()
+
+    # Persist the report's inline summary charts as PNG + SVG files next to the report.
+    global _REPORT_FIGS_DIR
+    _REPORT_FIGS_DIR = os.path.join(os.path.dirname(os.path.abspath(args.out_html)) or ".", "figures")
+    try:
+        os.makedirs(_REPORT_FIGS_DIR, exist_ok=True)
+    except OSError:
+        _REPORT_FIGS_DIR = None
 
     class_df = read_tsv(args.classification)
     metrics_df = read_tsv(args.metrics)
@@ -978,6 +1319,23 @@ def main():
             )
         )
 
+    # --- Between-condition comparisons (samplesheet-driven; one subsection per contrast) ---
+    if args.between_conditions_dir:
+        body.append(build_between_conditions_section(args.between_conditions_dir, args.top_genes))
+
+    # --- APA motifs: polyadenylation-signal support for every APA site ---
+    if args.apa_motifs:
+        body.append(build_apa_motif_section(read_tsv(args.apa_motifs), args.top_genes))
+
+    # --- Poly(A) tail length (dorado pt:i), grouped by fragmentform ---
+    polya_frag_df = read_tsv(args.polya_fragmentform) if args.polya_fragmentform else pd.DataFrame()
+    taillength_diffs_df = read_tsv(args.taillength_diffs) if args.taillength_diffs else pd.DataFrame()
+    taillength_mod_df = read_tsv(args.taillength_mod) if args.taillength_mod else pd.DataFrame()
+    if args.polya_fragmentform or args.taillength_diffs or args.taillength_mod:
+        body.append(build_polya_section(polya_frag_df, taillength_diffs_df, taillength_mod_df, args.top_genes,
+                                        diff_figs_dir=args.taillength_diff_figs, mod_figs_dir=args.taillength_mod_figs,
+                                        max_figs=int(getattr(args, "max_snp_figs", 12))))
+
     body.append(
         section(
             "Segregating SNP Candidates",
@@ -1002,6 +1360,10 @@ def main():
             definitions=definitions_html(column_definitions(list(snp_mod_df_view.columns)), summary="Column definitions") if not snp_mod_df_view.empty else "",
         )
     )
+    # --- Why those SNP x modification associations exist (positional + motif mechanism) ---
+    if args.snp_mod_mechanism:
+        body.append(build_snp_mechanism_section(read_tsv(args.snp_mod_mechanism), args.top_genes))
+
     # --- Co-localized modifications (mod x mod dependency on shared molecules) ---
     mod_mod_df = read_tsv(args.mod_mod_assoc) if args.mod_mod_assoc else pd.DataFrame()
     if args.mod_mod_assoc:
@@ -1089,260 +1451,110 @@ def main():
   <title>{html.escape(args.title)}</title>
   <style>
     :root {{
-      --bg: #f4efe7;
-      --ink: #1d1b19;
-      --card: #fffaf2;
-      --line: #d8c9b3;
-      --accent: #7d3c1f;
-      --accent-soft: #f1dcc5;
-      --panel: #fffdf8;
+      --bg:#f7f9fb; --panel:#ffffff; --raised:#fdfefe;
+      --ink:#131a22; --ink-soft:#3d4b5a; --muted:#65778a;
+      --line:#e2e8ef; --line-soft:#eef2f6;
+      --accent:#1f6feb; --accent-soft:#e8f0fd; --accent-ink:#0d4ba0;
+      --pos:#1a7f52; --neg:#c0392b; --warn:#b7791f;
+      --stripe:#f6f9fb; --shadow:0 1px 2px rgba(16,24,40,.04),0 1px 3px rgba(16,24,40,.06);
+      --mono:ui-monospace,SFMono-Regular,"SF Mono",Menlo,Consolas,monospace;
     }}
+    @media (prefers-color-scheme: dark) {{
+      :root {{
+        --bg:#0d1117; --panel:#151b23; --raised:#1a222c;
+        --ink:#e6edf3; --ink-soft:#c2cdd8; --muted:#8b98a5;
+        --line:#232c37; --line-soft:#1c242e;
+        --accent:#58a6ff; --accent-soft:#132132; --accent-ink:#79b8ff;
+        --pos:#3fb950; --neg:#f85149; --warn:#d29922;
+        --stripe:#131a22; --shadow:0 1px 2px rgba(0,0,0,.3);
+      }}
+    }}
+    * {{ box-sizing:border-box; }}
     body {{
-      margin: 0;
-      font-family: Georgia, "Times New Roman", serif;
-      background: linear-gradient(180deg, #efe5d8 0%, var(--bg) 100%);
-      color: var(--ink);
+      margin:0; background:var(--bg); color:var(--ink);
+      font:15px/1.6 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,"Helvetica Neue",Arial,sans-serif;
+      -webkit-font-smoothing:antialiased; text-rendering:optimizeLegibility;
     }}
-    main {{
-      max-width: 1380px;
-      margin: 0 auto;
-      padding: 24px;
+    main {{ max-width:1240px; margin:0 auto; padding:28px 26px 80px; }}
+    header {{ margin:8px 0 26px; padding-bottom:20px; border-bottom:1px solid var(--line); }}
+    h1 {{
+      font-size:clamp(26px,3.4vw,36px); line-height:1.1; margin:0 0 6px;
+      font-weight:680; letter-spacing:-.022em; text-wrap:balance;
     }}
-    h1, h2, h3 {{
-      font-weight: 700;
-      letter-spacing: 0.01em;
-      margin-top: 0;
+    h2 {{
+      font-size:19px; font-weight:660; letter-spacing:-.012em; margin:0 0 4px;
+      padding-bottom:10px; border-bottom:1px solid var(--line-soft);
     }}
-    header {{
-      margin-bottom: 20px;
-    }}
+    h3 {{ font-size:14.5px; font-weight:640; margin:22px 0 8px; color:var(--ink-soft); }}
+    a {{ color:var(--accent); text-decoration:none; }}
+    a:hover {{ text-decoration:underline; }}
     section {{
-      background: var(--card);
-      border: 1px solid var(--line);
-      border-radius: 18px;
-      padding: 20px;
-      margin-bottom: 20px;
-      box-shadow: 0 10px 30px rgba(70, 44, 20, 0.08);
-      overflow: hidden;
+      background:var(--panel); border:1px solid var(--line); border-radius:12px;
+      padding:20px 22px; margin:0 0 18px; box-shadow:var(--shadow);
     }}
-    .section-intro {{
-      margin: 0 0 14px 0;
-      color: #4f453a;
-      line-height: 1.45;
-    }}
-    .overview-layout {{
-      display: grid;
-      grid-template-columns: minmax(0, 1.2fr) minmax(320px, 1fr);
-      gap: 20px;
-      align-items: start;
-    }}
-    .cards {{
-      display: grid;
-      grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));
-      gap: 12px;
-      margin-bottom: 16px;
+    .section-intro {{ color:var(--muted); font-size:14px; max-width:74ch; margin:10px 0 16px; }}
+    .muted {{ color:var(--muted); font-style:normal; }}
+    .subsection {{ margin-top:20px; padding-top:4px; }}
+    /* ---- cards / stat tiles ---- */
+    .cards, .overview {{
+      display:grid; grid-template-columns:repeat(auto-fit,minmax(168px,1fr));
+      gap:12px; margin:16px 0;
     }}
     .card {{
-      background: var(--accent-soft);
-      border-radius: 14px;
-      padding: 14px;
-      min-height: 92px;
+      background:var(--raised); border:1px solid var(--line); border-radius:10px; padding:13px 15px;
     }}
-    .label {{
-      font-size: 0.85rem;
-      color: #5c4d3d;
-      margin-bottom: 6px;
-      line-height: 1.3;
+    .card .value, .card b {{
+      display:block; font-size:23px; font-weight:670; letter-spacing:-.02em;
+      font-variant-numeric:tabular-nums; line-height:1.15;
     }}
-    .value {{
-      font-size: 1.5rem;
-      color: var(--accent);
-      font-weight: 700;
-    }}
-    .hero {{
-      background: var(--panel);
-      border: 1px solid var(--line);
-      border-radius: 16px;
-      padding: 14px;
-    }}
-    .hero-figure, .image-card {{
-      margin: 0;
-    }}
-    .image-link {{
-      position: relative;
-      display: block;
-      text-decoration: none;
-      color: inherit;
-      cursor: zoom-in;
-    }}
-    img {{
-      max-width: 100%;
-      border-radius: 12px;
-      border: 1px solid var(--line);
-      background: white;
-      display: block;
-    }}
-    .image-link img {{
-      transition: transform 0.16s ease, box-shadow 0.16s ease;
-    }}
-    .image-link:hover img,
-    .image-link:focus-visible img {{
-      transform: translateY(-2px);
-      box-shadow: 0 14px 28px rgba(45, 29, 16, 0.16);
-    }}
-    .expand-badge {{
-      position: absolute;
-      top: 12px;
-      right: 12px;
-      width: 34px;
-      height: 34px;
-      border-radius: 999px;
-      display: grid;
-      place-items: center;
-      background: rgba(29, 27, 25, 0.78);
-      color: white;
-      font-size: 1rem;
-      font-weight: 700;
-      opacity: 0;
-      transform: scale(0.92);
-      transition: opacity 0.16s ease, transform 0.16s ease;
-      pointer-events: none;
-    }}
-    .image-link:hover .expand-badge,
-    .image-link:focus-visible .expand-badge {{
-      opacity: 1;
-      transform: scale(1);
-    }}
-    .definitions {{
-      margin: 0 0 14px 0;
-      border: 1px solid var(--line);
-      border-radius: 12px;
-      background: rgba(255, 255, 255, 0.72);
-    }}
-    .definitions summary {{
-      cursor: pointer;
-      padding: 10px 14px;
-      font-weight: 600;
-    }}
-    .definitions dl {{
-      margin: 0;
-      padding: 0 14px 14px 14px;
-      display: grid;
-      grid-template-columns: minmax(180px, 240px) minmax(0, 1fr);
-      gap: 8px 16px;
-    }}
-    .definitions dt {{
-      font-weight: 700;
-      color: #4a2e1d;
-    }}
-    .definitions dd {{
-      margin: 0;
-      color: #4f453a;
-      line-height: 1.4;
-    }}
+    .card .label, .card small {{ display:block; color:var(--muted); font-size:12px; margin-top:5px; }}
+    /* ---- tables ---- */
     .table-wrap {{
-      overflow: auto;
-      max-height: 28rem;
-      border: 1px solid var(--line);
-      border-radius: 14px;
-      background: white;
+      overflow-x:auto; border:1px solid var(--line); border-radius:10px; margin:12px 0; background:var(--panel);
     }}
-    .datatable {{
-      width: 100%;
-      min-width: 760px;
-      border-collapse: collapse;
-      font-size: 0.88rem;
+    table {{ border-collapse:separate; border-spacing:0; width:100%; font-size:13px; }}
+    table.datatable {{ font-variant-numeric:tabular-nums; }}
+    th {{
+      position:sticky; top:0; z-index:1; background:var(--accent-soft); color:var(--accent-ink);
+      text-align:left; font-weight:640; font-size:11.5px; letter-spacing:.03em; text-transform:uppercase;
+      padding:9px 12px; white-space:nowrap; border-bottom:1px solid var(--line);
     }}
-    .datatable th, .datatable td {{
-      border-bottom: 1px solid var(--line);
-      padding: 8px 10px;
-      text-align: left;
-      vertical-align: top;
-      white-space: normal;
-      word-break: break-word;
+    td {{
+      padding:8px 12px; border-bottom:1px solid var(--line-soft); white-space:nowrap;
+      font-family:var(--mono); font-size:12px; color:var(--ink-soft);
     }}
-    .datatable th {{
-      background: #f7eddc;
-      position: sticky;
-      top: 0;
-      z-index: 1;
-    }}
-    .muted {{
-      color: #6d6255;
-    }}
+    tbody tr:nth-child(even) td {{ background:var(--stripe); }}
+    tbody tr:hover td {{ background:var(--accent-soft); }}
+    tbody tr:last-child td {{ border-bottom:none; }}
+    /* ---- figures ---- */
+    figure {{ margin:16px 0; }}
+    img {{ max-width:100%; height:auto; border:1px solid var(--line); border-radius:9px; background:var(--panel); }}
+    figcaption {{ color:var(--muted); font-size:12px; margin-top:7px; }}
     .gallery {{
-      display: grid;
-      grid-template-columns: repeat(auto-fit, minmax(320px, 1fr));
-      gap: 16px;
-      margin-top: 16px;
+      display:grid; grid-template-columns:repeat(auto-fit,minmax(290px,1fr)); gap:14px; margin:12px 0;
     }}
-    figure {{
-      margin: 0;
+    .gallery figure {{ margin:0; }}
+    /* ---- collapsible definitions ---- */
+    details.definitions {{
+      margin:14px 0; border:1px solid var(--line); border-radius:10px; background:var(--raised); overflow:hidden;
     }}
-    figcaption {{
-      margin-top: 8px;
-      font-size: 0.82rem;
-      color: #5c4d3d;
-      word-break: break-word;
+    details.definitions > summary {{
+      cursor:pointer; padding:10px 15px; font-weight:600; font-size:13px; color:var(--accent);
+      list-style:none; user-select:none;
     }}
-    .subsection + .subsection {{
-      margin-top: 18px;
-    }}
-    @media (max-width: 980px) {{
-      main {{
-        padding: 16px;
-      }}
-      .overview-layout {{
-        grid-template-columns: 1fr;
-      }}
-      .definitions dl {{
-        grid-template-columns: 1fr;
-      }}
-      .datatable {{
-        min-width: 620px;
-      }}
-    }}
-    #img-lightbox {{
-      position: fixed;
-      inset: 0;
-      z-index: 1000;
-      display: none;
-      align-items: center;
-      justify-content: center;
-      background: rgba(20, 14, 8, 0.88);
-      padding: 28px;
-    }}
-    #img-lightbox.open {{ display: flex; }}
-    #img-lightbox img {{
-      max-width: 95vw;
-      max-height: 88vh;
-      width: auto;
-      height: auto;
-      border-radius: 10px;
-      border: 1px solid var(--line);
-      box-shadow: 0 18px 60px rgba(0, 0, 0, 0.5);
-      background: white;
-    }}
-    #img-lightbox .lightbox-bar {{
-      position: fixed;
-      top: 14px;
-      right: 18px;
-      display: flex;
-      gap: 12px;
-      align-items: center;
-    }}
-    #img-lightbox .lightbox-bar a,
-    #img-lightbox .lightbox-bar button {{
-      color: #fdf6ec;
-      background: rgba(0, 0, 0, 0.45);
-      border: 1px solid rgba(255, 255, 255, 0.4);
-      border-radius: 999px;
-      padding: 6px 14px;
-      font: inherit;
-      font-size: 0.92rem;
-      cursor: pointer;
-      text-decoration: none;
-    }}
+    details.definitions > summary::-webkit-details-marker {{ display:none; }}
+    details.definitions > summary::before {{ content:"▸ "; color:var(--muted); }}
+    details.definitions[open] > summary::before {{ content:"▾ "; }}
+    details.definitions[open] > summary {{ border-bottom:1px solid var(--line); }}
+    details.definitions dl {{ margin:0; padding:12px 16px 15px; }}
+    details.definitions dt {{ font-weight:640; font-size:12.5px; margin-top:11px; font-family:var(--mono); color:var(--ink); }}
+    details.definitions dt:first-child {{ margin-top:0; }}
+    details.definitions dd {{ margin:3px 0 0; color:var(--muted); font-size:13px; line-height:1.5; }}
+    ul {{ padding-left:20px; }} li {{ margin:5px 0; }}
+    li b {{ font-variant-numeric:tabular-nums; }}
+    code {{ font-family:var(--mono); font-size:12.5px; background:var(--accent-soft); padding:1px 6px; border-radius:4px; }}
+    footer {{ margin-top:36px; padding-top:16px; border-top:1px solid var(--line); color:var(--muted); font-size:12.5px; }}
+    @media (max-width:720px) {{ main {{ padding:18px 14px 60px; }} section {{ padding:16px; }} }}
   </style>
 </head>
 <body>

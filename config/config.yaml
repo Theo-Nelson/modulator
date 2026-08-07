@@ -5,6 +5,23 @@
 bams_dir: "resources/test_bams/ALCAM_NHSL1_SERAC1_MXD1_RIOK3_reads"
 bam_glob: "*.bam"
 
+# Samplesheet (optional): the SAMPLE SOURCE + the metadata for between-condition comparisons.
+# When set it REPLACES bams_dir/bam_glob discovery -- each row's `bam` is staged as a symlink named
+# <sample>.bam, so your short ids become the sample names in every output (no 60-char BAM stems):
+#
+#   sample   bam                      condition   replicate
+#   M1       HornerLab_M1pA_*.bam     mock        1
+#   Z1       HornerLab_Z1pA_*.bam     zikv        1
+#
+# `sample` and `bam` are required; `condition` is required for any between-condition test; any other
+# columns ride along as covariates. `bam` may be absolute, relative to bams_dir, or a glob matching
+# exactly one file. Symlinks only -- BAMs are never copied.
+samplesheet: ""            # e.g. config/samples.tsv
+
+# Which comparisons to run. Omit/empty -> every pairwise contrast of `condition` is derived.
+contrasts: []
+#   - {name: zikv_vs_mock, column: condition, test: zikv, reference: mock}
+
 reference:
   fasta: nonexistant_genome.fa
   gtf:   nonexistant_annotation.gtf
@@ -217,6 +234,15 @@ genotype:
   max_haplotype_snps: 4
   test: auto
   pseudocount: 0.5
+  # Why does a SNP change a modification? classify_snp_mod_mechanism runs right after
+  # test_snp_mod_assoc and adds the positional/motif/concordance axes -- and, importantly, flags
+  # SELF-REPORTING variants (A-to-I and pseU change the basecall, so they get called as SNPs at their
+  # own modified base; ~12% of significant snp_mod hits are that circularity). Needs the reference FASTA.
+  snp_mod_mechanism: true
+  # Max distance (nt) from the modified base for a SNP to count as PROXIMAL_CIS before DISTAL_CIS.
+  # The nearer tiers are fixed by the motif geometry (0 = at the modified base, <=2 = inside the
+  # DRACH 5-mer, <=4 = inside the 9-mer), so only this outer boundary is tunable.
+  mechanism_proximal_bp: 50
   # Co-localized modifications (mod x mod dependency): do two nearby modification sites co-occur
   # on the same molecule? The modification analogue of snp_mod_assoc. Reuses molecule_mod_calls,
   # so it costs no extra BAM/modkit work. Pairs are accumulated per-read (never a global
@@ -227,3 +253,92 @@ genotype:
     min_pair_reads: 8       # min shared reads covering BOTH sites
     min_state_reads: 4      # min reads in each state of site A (modified / not)
     max_sites_per_read: 200 # safety cap: skip pairing on reads with more usable calls than this
+
+# Truncation-aware differential stoichiometry between fragmentforms -- the 5' COMPLEMENT to
+# test_diffs, not a replacement.
+#
+# Direct-RNA reads are sequenced 3'->5' and truncate at the 5' end, so a read assigned to a
+# fragmentform it never reached carries no evidence about features there. This engine restricts each
+# fragmentform pair to reads that demonstrably span their structural divergence point, so the
+# comparison rests on observed assignment rather than inferred assignment.
+#
+# MEASURED genome-wide (3,086 genes / 304k tests): the confound scales with 5' distance --
+#   divergence <1kb from the 3' end : reads dropped in  0.2% of tests, 0.0% of calls change
+#   1-5kb                           : 11.5% / 0.2%
+#   5-20kb                          : 36.1% / 0.8%
+#   >20kb                           : ~55%  / ~1.3%
+# So test_diffs is already correct (and far cheaper) for 3'-proximal pairs; this earns its ~15min
+# genome-wide cost only for 5'-divergent ones. Set min_divergence_from_3p to skip the rest.
+# Needs the genotype stage (per-read assignment + mod-call tables). Off by default.
+hierarchical_stoich:
+  enable: false
+  min_divergence_from_3p: 0    # nt; e.g. 5000 skips ~42% of pairs (the <1kb bulk) and keeps
+                               # essentially all of the correction. 0 = test every pair.
+  sites: auto                  # `auto` = restrict to the sites test_diffs already flagged (the fast
+                               # path); or a path to any TSV with a mod_site_id column; or "" for all.
+  min_informative_reads: 10    # min reads per fragmentform that actually span the divergence point
+  min_state_reads: 3           # min reads per modification state per fragmentform
+  max_fragmentforms_per_gene: 12  # cap pairs on highly-fragmented genes (keeps the best-supported)
+  also_naive: true             # also emit the unrestricted result per row, so the confound is
+                               # measurable per site rather than assumed
+
+# Replicate-aware BETWEEN-CONDITION comparisons. Requires `samplesheet` above with a `condition`
+# column and >=2 levels; otherwise this stage is a no-op.
+#
+# Counts (modification, isoform/APA/junction usage) -> beta-binomial LRT with dispersion shrinkage.
+# Poly(A) tail length is continuous -> Welch across per-replicate medians.
+# Reads are NEVER pooled across replicates: with millions of reads and n=3/group that is
+# pseudoreplication (measured: 62% of simulated NULL sites reach p<0.05). See diffstats.py.
+#
+# NOTE ON POWER: these data's replicates are near-binomially reproducible (biological SD ~1 pp), so
+# statistical significance is cheap -- a ~2 pp shift can clear FDR. Filter on |delta| for biological
+# relevance, not on FDR alone.
+between_conditions:
+  enable: true
+  # Which of the five differentials to run (each writes its own per-contrast TSV).
+  mod_diffs: true              # differential modification (needs aggregate_zn)
+  isoform_usage: true          # which isoform the gene uses      (needs assemble)
+  apa_usage: true              # which 3' end / APA site it uses   (needs assemble)
+  junction_usage: true         # which junctions it splices        (needs splice_junctions)
+  tail_diffs: true             # poly(A) tail length               (needs the polya stage)
+  min_cov: 20                  # differential modification: min per-sample coverage at a site
+  min_gene_reads: 20           # differential usage: min per-sample reads for the gene (the denominator)
+  min_tail_reads_per_sample: 10  # differential tail: min reads per sample for a feature's median
+  min_samples_per_group: 2     # min replicates per condition (2 is the floor for any variance estimate)
+  tail_level: fragmentform     # fragmentform | gene
+  mod_filter: []               # restrict differential modification to these mod codes, e.g. ["a"] for
+                               # m6A only. Empty = all. (a=m6A, m=5mC, 17596=inosine, 17802=pseudouridine)
+  prior_weight: 20.0           # dispersion shrinkage strength (diffstats.py)
+  ref_df: 10                   # F(1,df) reference for the LRT. Calibrated for near-binomial
+                               # replicates (this data: phi~0.0007 -> null p<0.05 = 0.06, delta=0.10
+                               # -> 60% sensitivity @ ~3.5% FDR). Genuinely overdispersed replicates
+                               # need ~4; re-check on new data with a within-condition null contrast
+                               # and confirm p<0.05 lands near 0.05.
+
+# Polyadenylation-signal (PAS) motif check for every APA site (each fragmentform's TES). Scans the
+# upstream window for the canonical AATAAA and the 11 known variant hexamers, scores the downstream
+# U/GU-rich element, and flags likely INTERNAL PRIMING: no PAS + genomic A-rich downstream means the
+# oligo-dT probably annealed to an internal A-stretch, giving a false 3' end rather than a real APA
+# site. Cross-check against the measured poly(A) tail (polya stage): a genuine site carries a tail.
+# Needs the reference FASTA.
+apa_motifs:
+  enable: true
+  upstream: 60                  # nt upstream of the cleavage site scanned for a PAS hexamer
+  downstream: 40                # nt downstream scored for U/GU-richness
+  pas_max_distance: 40          # max nt from hexamer end to cleavage site to count as that site's PAS
+  internal_priming_a_frac: 0.65 # downstream A-fraction above which a PAS-less site is called internal priming
+  internal_priming_window: 20   # nt downstream used for the A-richness test
+
+# Poly(A) tail length as a first-class readout. Reads the dorado poly(A) estimate (pt:i tag) per
+# assigned read from the ZT-tagged BAMs, then: (1) per-fragmentform tail-length distributions;
+# (2) differential tail length between the fragmentforms (isoforms) of a gene (Kruskal/Mann-Whitney);
+# (3) tail length x modification (per site, tail of modified vs unmodified reads). Requires reads
+# basecalled with dorado --estimate-poly-a (the pt:i tag). Tail x mod also needs genotype.enable.
+polya:
+  enable: true
+  jobs: 0                      # 0 = use `threads`; BAM x chrom shards scanned in parallel
+  min_tail: 1                  # drop reads with tail_len < this (dorado writes pt:i:0 when no tail is estimated)
+  min_fragmentform_reads: 10   # min reads for a fragmentform to enter the between-fragmentform differential
+  min_total_reads: 20          # min total reads across a gene's tested fragmentforms
+  min_state_reads: 10          # tail x mod: min reads in each state (modified / unmodified) per site
+  top_figures: 10              # per-example tail-distribution PNGs to render for the report (top genes / top sites by p_adj)

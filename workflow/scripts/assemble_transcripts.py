@@ -1251,6 +1251,7 @@ def main():
     import matplotlib
     matplotlib.use("Agg")
     import matplotlib.pyplot as plt
+    from plot_utils import save_figure
 
     all_samples = sorted({s for iso in final_kept for s in iso["sample_ct"].keys()})
     tx_ids = [iso["zt_label"] for iso in final_kept]
@@ -1313,13 +1314,13 @@ def main():
             )
 
         fig.tight_layout(rect=[0, 0.08, 1, 1])
-        fig.savefig(pca_png, dpi=300, bbox_inches="tight")
+        save_figure(fig, pca_png, dpi=300, bbox_inches="tight")   # PNG + SVG
         plt.close(fig)
     else:
         fig, ax = plt.subplots(figsize=(8.6, 6.8))
         ax.set_title("Sample PCA (no data)")
         ax.axis("off")
-        fig.savefig(pca_png, dpi=300, bbox_inches="tight")
+        save_figure(fig, pca_png, dpi=300, bbox_inches="tight")   # PNG + SVG
         plt.close(fig)
 
     rows = []
