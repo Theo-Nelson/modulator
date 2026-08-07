@@ -12,6 +12,9 @@ dependencies:
   - pyyaml
   - samtools=1.22.1
   - scipy
-  - pyroaring=1.1.0
   - setuptools>=69
   - ont-modkit=0.5.0
+  # pyroaring 1.1.0 is PyPI-only (conda-forge stops at 0.3.5), so install it from pip
+  # during env creation rather than as a conda dependency (which is unsatisfiable).
+  - pip:
+    - pyroaring==1.1.0
