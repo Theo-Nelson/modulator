@@ -178,6 +178,15 @@ def main():
     check("GENE_A co-terminal isoform site classified SHARED_TERMINAL_EXON",
           len(ga) and (ga["structural_category"] == "SHARED_TERMINAL_EXON").any())
 
+    print("== SEQUENCE ELEMENTS (unbiased element x modification) ==")
+    se = rd(f"assemble/{P}_sequence_elements.tsv")
+    check("sequence_elements produced with PAS detected (synthetic AATAAA)",
+          len(se) and (se["element_type"] == "PAS").any(),
+          f"element types: {sorted(se['element_type'].unique())}")
+    ss = rd(f"assemble/{P}_sequence_elements_summary.tsv")
+    check("sequence_elements summary has an unbiased mod-code column",
+          "mod_codes_seen" in ss.columns)
+
     print("== REPORT ==")
     check("HTML report produced", (R / f"report/{P}_report.html").exists())
     check("interactive gene browser produced", (R / f"report/{P}_gene_browser.html").exists())

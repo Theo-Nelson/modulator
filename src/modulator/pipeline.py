@@ -39,6 +39,7 @@ STAGE_ORDER = [
     "modkit_zn",
     "aggregate_zn",
     "novel_loci",
+    "sequence_elements",
     "test_diffs",
     "classify_diffs",
     "genotype",
@@ -149,6 +150,14 @@ class PipelinePaths:
     @property
     def novel_fragmentforms(self) -> Path:
         return self.assemble / f"{self.prefix}_novel_fragmentforms.tsv"
+
+    @property
+    def sequence_elements(self) -> Path:
+        return self.assemble / f"{self.prefix}_sequence_elements.tsv"
+
+    @property
+    def sequence_elements_summary(self) -> Path:
+        return self.assemble / f"{self.prefix}_sequence_elements_summary.tsv"
 
     @property
     def geno_mod_mod(self) -> Path:
@@ -581,6 +590,10 @@ class ModulatorPipeline:
             if not as_bool(cfg.get("novel_loci", {}).get("enable", True), True):
                 return True
             return self._nonempty(p.novel_loci_tsv)
+        if stage == "sequence_elements":
+            if not as_bool(cfg.get("sequence_elements", {}).get("enable", True), True):
+                return True
+            return self._nonempty(p.sequence_elements)
         if stage == "multigene_filter":
             if not as_bool(cfg.get("multigene_filter", {}).get("enable", True), True):
                 return True
@@ -816,6 +829,32 @@ class ModulatorPipeline:
         if self.paths.gene_splice_summary.exists():
             args.extend(["--splice-genes", str(self.paths.gene_splice_summary)])
         self.run_python_script("summarize_novel_loci.py", args, label="summarize_novel_loci")
+
+    def stage_sequence_elements(self) -> None:
+        """Annotate sequence-based cis-elements (PAS, ARE, CPE, GRE, rG4, Kozak, uORF,
+        5'TOP, stop context, m6Am) on each fragmentform's mature mRNA and report EVERY
+        overlapping modification, unbiased across mod codes. Needs the assembled GTF, the
+        reference FASTA+GTF (for start/stop codons), and the ZN modification table."""
+        cfg = self.config.get("sequence_elements", {})
+        if not as_bool(cfg.get("enable", True), True):
+            return
+        if not self._nonempty(self.paths.zn_filtered_long):
+            if self.verbose:
+                print("[modulator] sequence_elements: no ZN modification table (needs aggregate_zn); skipping",
+                      flush=True)
+            return
+        self._require_existing_file(self.paths.out_gtf, "assembled GTF")
+        self.run_python_script("annotate_sequence_elements.py", [
+            "--assembled-gtf", str(self.paths.out_gtf),
+            "--reference-fa", str(self._require_reference_fa()),
+            "--reference-gtf", str(self._require_reference_gtf()),
+            "--mod-sites", str(self.paths.zn_filtered_long),
+            "--out-tsv", str(self.paths.sequence_elements),
+            "--out-summary", str(self.paths.sequence_elements_summary),
+            "--pas-window", str(int(cfg.get("pas_window", 60))),
+            "--utr3-window", str(int(cfg.get("utr3_window", 400))),
+            "--verbose",
+        ], label="annotate_sequence_elements")
 
     def stage_multigene_filter(self) -> None:
         cfg = self.config.get("multigene_filter", {})

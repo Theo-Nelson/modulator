@@ -61,6 +61,7 @@ modification (≈130 vs ≈85) for a tail×mod signal.
 | **polya** | GENE_B B1 vs B2 tail sig; tail×mod at D sig | matches |
 | **between-cond mod** | COND sig (mock hi vs zikv lo) | delta −0.74, p_adj 7e-8 |
 | **between-cond isoform / tail** | GENE_A A1↔A2 usage sig; GENE_B tail sig | matches |
+| **sequence_elements** | PAS/ARE/CPE/GRE/M6AM detected on synthetic; unbiased mod-code join | produced (Kozak/stop/uORF + mod-join validated on the real 5-gene demo, which has CDS) |
 | **calibration** | within-mock 2v2 null → ref_df grid report | runs (see README) |
 | **report + gene browser** | both HTML files | produced |
 

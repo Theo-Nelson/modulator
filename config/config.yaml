@@ -321,6 +321,21 @@ between_conditions:
 # oligo-dT probably annealed to an internal A-stretch, giving a false 3' end rather than a real APA
 # site. Cross-check against the measured poly(A) tail (polya stage): a genuine site carries a tail.
 # Needs the reference FASTA.
+# Sequence-based cis-element annotation on each fragmentform's MATURE mRNA, with an
+# UNBIASED join to every overlapping modification (any mod code -- m6A, 5mC, pseudouridine,
+# inosine, ...). Generalizes the PAS check to a family of sequence motifs anchored to the
+# transcript's 3' end (PAS, AU-rich element, CPE, GU-rich element, rG4), start codon (Kozak,
+# uORF, 5'TOP, m6Am) and stop codon (readthrough context). Only mature-mRNA (exonic) elements
+# are scanned -- introns carry no modification signal. Needs the reference FASTA + GTF (for
+# start/stop codons) and the aggregate_zn modification table. NOTE: 5'-anchored elements
+# (Kozak/uORF/TOP/m6Am) sit where direct-RNA read coverage is sparsest, so their modification
+# calls are coverage-limited (each row carries the overlapping mod-site coverage).
+sequence_elements:
+  enable: true
+  pas_window: 60                # nt upstream of the 3' end scanned for a PAS hexamer
+  utr3_window: 400              # if a transcript has no annotated stop codon, scan 3'UTR-type
+                                # motifs (ARE/CPE/GRE) in the last N nt of the mRNA instead
+
 apa_motifs:
   enable: true
   upstream: 60                  # nt upstream of the cleavage site scanned for a PAS hexamer
