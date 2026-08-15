@@ -6,6 +6,7 @@ import glob
 import hashlib
 import html
 import itertools
+import json
 import os
 import re
 import sys
@@ -213,6 +214,8 @@ def parse_args():
     ap.add_argument("--hap-mod-assoc", default="")
     ap.add_argument("--between-conditions-dir", default="", help="results/between_conditions dir (per-contrast differential TSVs)")
     ap.add_argument("--apa-motifs", default="", help="*_apa_motifs.tsv (PAS motif check per APA site)")
+    ap.add_argument("--sequence-elements", default="", help="*_sequence_elements.tsv (cis-elements x modifications, per instance)")
+    ap.add_argument("--sequence-elements-summary", default="", help="*_sequence_elements_summary.tsv (per element-type counts)")
     ap.add_argument("--snp-mod-mechanism", default="", help="*_snp_mod_mechanism.tsv (why a SNP changes a modification)")
     ap.add_argument("--polya-fragmentform", default="", help="*_polya_fragmentform.tsv (per-fragmentform tail-length distributions)")
     ap.add_argument("--taillength-diffs", default="", help="*_taillength_diffs.tsv (differential tail length between fragmentforms of a gene)")
@@ -657,6 +660,67 @@ def build_apa_motif_section(apa_df, top_n):
             ("downstream_a_frac", "A fraction of the genomic sequence just downstream of the cleavage site; high values are the internal-priming signature."),
         ], summary="Category definitions"),
     )
+
+
+def _elem_mods_string(mods_json):
+    """Compact 'code@pos frac' summary from a sequence_elements mods_json cell."""
+    try:
+        ms = json.loads(mods_json) if isinstance(mods_json, str) and mods_json.strip() else []
+    except (ValueError, TypeError):
+        return ""
+    return "; ".join(f"{m.get('code')}@{m.get('gpos')} ({m.get('frac')})" for m in ms)
+
+
+def build_sequence_elements_section(se_df, summ_df, top_n):
+    """Sequence-based cis-elements on each fragmentform's mature mRNA, and every
+    overlapping modification -- unbiased across mod codes (m6A, 5mC, pseudouridine, …)."""
+    intro = ("Every fragmentform's mature (spliced) mRNA is scanned for sequence-defined cis-elements "
+             "anchored to its 3' end (PAS, AU-rich element, CPE, GU-rich element, rG4), start codon "
+             "(Kozak, uORF, 5'TOP, m6Am) and stop codon (readthrough context). Each element is then "
+             "joined to EVERY overlapping modification with no mod-code bias. Only mature-mRNA (exonic) "
+             "elements are scanned; 5'-anchored elements (Kozak/uORF/TOP/m6Am) sit where direct-RNA read "
+             "coverage is sparsest, so their modification calls are coverage-limited.")
+    if se_df is None or se_df.empty or "element_type" not in se_df.columns:
+        return section("Sequence Elements (cis-elements × modifications)",
+                       "<p class='muted'>No sequence-element results available.</p>", intro=intro)
+    parts = []
+    n_inst = len(se_df)
+    with_mod = se_df[se_df["n_mod_sites"].astype(int) > 0] if "n_mod_sites" in se_df.columns else se_df.iloc[0:0]
+    codes = sorted({c for cell in with_mod.get("mod_codes", pd.Series(dtype=str)).dropna()
+                    for c in str(cell).split(",") if c})
+    parts.append(
+        "<ul>"
+        f"<li><b>{n_inst:,}</b> element instances across <b>{se_df['element_type'].nunique()}</b> element types</li>"
+        f"<li><b>{len(with_mod):,}</b> carry ≥1 modification — mod codes seen: "
+        f"<code>{', '.join(codes) if codes else '—'}</code> (no code is filtered out)</li>"
+        "</ul>"
+    )
+    # per element-type summary (prefer the precomputed summary table)
+    if summ_df is not None and not summ_df.empty:
+        parts.append(subsection("Elements by type (and how many carry a modification)",
+                                df_to_html(summ_df, max_rows=20)))
+    # the modification-carrying elements themselves (deduped across repeated fragmentforms)
+    if not with_mod.empty:
+        w = with_mod.copy()
+        w["modifications"] = w["mods_json"].map(_elem_mods_string) if "mods_json" in w.columns else ""
+        cols = [c for c in ["gene_name", "element_type", "element_subclass", "chrom", "strand",
+                            "matched_seq", "mod_codes", "modifications"] if c in w.columns]
+        w = w[cols].drop_duplicates()
+        parts.append(subsection("Elements carrying a modification (any code)",
+                                df_to_html(w, max_rows=max(top_n, 25))))
+    return section("Sequence Elements (cis-elements × modifications)", "".join(parts), intro=intro,
+                   definitions=definitions_html([
+                       ("PAS", "Polyadenylation signal hexamer (AATAAA + variants) upstream of the 3' end."),
+                       ("ARE", "AU-rich element (AUUUA), a 3'UTR stability determinant."),
+                       ("CPE", "Cytoplasmic polyadenylation element (UUUUAU)."),
+                       ("GRE", "GU-rich element (GU repeats)."),
+                       ("G4", "RNA G-quadruplex sequence motif (G≥3 runs)."),
+                       ("KOZAK", "Translation-initiation context around the start codon (−3 purine / +4 G)."),
+                       ("UORF", "Upstream ORF (AUG…stop) in the 5'UTR."),
+                       ("TOP", "5' terminal oligopyrimidine tract."),
+                       ("STOP_CONTEXT", "Stop codon + downstream base (readthrough-prone UGA-C, …)."),
+                       ("M6AM", "Cap-adjacent first transcribed A (potential m6Am)."),
+                   ], summary="Element definitions"))
 
 
 def build_snp_mechanism_section(mech_df, top_n):
@@ -1326,6 +1390,13 @@ def main():
     # --- APA motifs: polyadenylation-signal support for every APA site ---
     if args.apa_motifs:
         body.append(build_apa_motif_section(read_tsv(args.apa_motifs), args.top_genes))
+
+    # --- Sequence elements: cis-elements x modifications (unbiased across mod codes) ---
+    if args.sequence_elements:
+        body.append(build_sequence_elements_section(
+            read_tsv(args.sequence_elements),
+            read_tsv(args.sequence_elements_summary) if args.sequence_elements_summary else pd.DataFrame(),
+            args.top_genes))
 
     # --- Poly(A) tail length (dorado pt:i), grouped by fragmentform ---
     polya_frag_df = read_tsv(args.polya_fragmentform) if args.polya_fragmentform else pd.DataFrame()

@@ -1743,6 +1743,8 @@ class ModulatorPipeline:
             "--hap-mod-assoc", str(self.paths.geno_hap_mod) if self.paths.geno_hap_mod.exists() else "",
             "--between-conditions-dir", str(self.paths.between_conditions) if self.paths.between_conditions.is_dir() else "",
             "--apa-motifs", str(self.paths.apa_motifs) if self.paths.apa_motifs.exists() else "",
+            "--sequence-elements", str(self.paths.sequence_elements) if self.paths.sequence_elements.exists() else "",
+            "--sequence-elements-summary", str(self.paths.sequence_elements_summary) if self.paths.sequence_elements_summary.exists() else "",
             "--snp-mod-mechanism", str(self.paths.geno_snp_mod_mechanism) if self.paths.geno_snp_mod_mechanism.exists() else "",
             "--polya-fragmentform", str(self.paths.polya_fragmentform) if self.paths.polya_fragmentform.exists() else "",
             "--taillength-diffs", str(self.paths.polya_taillength_diffs) if self.paths.polya_taillength_diffs.exists() else "",
