@@ -330,6 +330,49 @@ def category_distribution_png(counts, mod_label=None):
     return f"data:image/png;base64,{encoded}"
 
 
+def sequence_elements_png(summ_df):
+    """Stacked horizontal bar per element type: instances carrying a modification
+    (dark) vs. not (light). base64 data URI, or '' if unavailable."""
+    if summ_df is None or summ_df.empty or "element_type" not in summ_df.columns:
+        return ""
+    try:
+        import matplotlib
+        matplotlib.use("Agg")
+        import matplotlib.pyplot as plt
+        from io import BytesIO
+    except Exception:
+        return ""
+    df = summ_df.copy()
+    df["n_instances"] = pd.to_numeric(df["n_instances"], errors="coerce").fillna(0).astype(int)
+    df["n_with_modification"] = pd.to_numeric(df["n_with_modification"], errors="coerce").fillna(0).astype(int)
+    df = df.sort_values("n_instances")  # largest on top
+    labels = df["element_type"].tolist()
+    total = df["n_instances"].tolist()
+    withmod = df["n_with_modification"].tolist()
+    rest = [t - w for t, w in zip(total, withmod)]
+    height = max(2.4, 0.42 * len(labels) + 1.1)
+    fig, ax = plt.subplots(figsize=(8.6, height))
+    ypos = list(range(len(labels)))
+    ax.barh(ypos, withmod, color="#c98a5e", edgecolor="#7d3c1f", linewidth=0.9, label="with a modification")
+    ax.barh(ypos, rest, left=withmod, color="#ecdccf", edgecolor="#c9b7a6", linewidth=0.7, label="no modification")
+    ax.set_yticks(ypos); ax.set_yticklabels(labels, fontsize=9)
+    ax.set_xlabel("Element instances")
+    ax.set_title("Sequence elements: instances carrying a modification (any code)")
+    for y, (w, t) in enumerate(zip(withmod, total)):
+        ax.text(t + max(total) * 0.01, y, f"{w:,}/{t:,}", va="center", ha="left", fontsize=8, color="#4a3f35")
+    ax.set_xlim(0, max(total) * 1.20 if total else 1)
+    ax.grid(True, axis="x", linestyle="--", linewidth=0.6, alpha=0.4)
+    for spine in ("top", "right"):
+        ax.spines[spine].set_visible(False)
+    ax.legend(loc="lower right", fontsize=8, frameon=False)
+    fig.tight_layout()
+    _save_report_chart(fig, "sequence_elements_distribution")
+    buf = BytesIO()
+    fig.savefig(buf, format="png", dpi=200, bbox_inches="tight")
+    plt.close(fig)
+    return f"data:image/png;base64,{base64.b64encode(buf.getvalue()).decode('ascii')}"
+
+
 def mod_mod_concordance_png(df, top_n=12):
     """Panel of 2x2 co-modification tables for the top pairs (by BH-FDR). Each panel is the
     observed 2x2 (rows = site A modified/unmodified, cols = site B modified/unmodified), coloured
@@ -685,9 +728,15 @@ def build_sequence_elements_section(se_df, summ_df, top_n):
                        "<p class='muted'>No sequence-element results available.</p>", intro=intro)
     parts = []
     n_inst = len(se_df)
-    with_mod = se_df[se_df["n_mod_sites"].astype(int) > 0] if "n_mod_sites" in se_df.columns else se_df.iloc[0:0]
+    se_df = se_df.copy()
+    se_df["n_mod_sites"] = pd.to_numeric(se_df.get("n_mod_sites", 0), errors="coerce").fillna(0).astype(int)
+    with_mod = se_df[se_df["n_mod_sites"] > 0]
     codes = sorted({c for cell in with_mod.get("mod_codes", pd.Series(dtype=str)).dropna()
                     for c in str(cell).split(",") if c})
+    fig = sequence_elements_png(summ_df)
+    if fig:
+        parts.append(clickable_image_html(fig, "Sequence elements: modification-carrying instances per type",
+                                          caption="Per element type, how many instances overlap a modification (any code)."))
     parts.append(
         "<ul>"
         f"<li><b>{n_inst:,}</b> element instances across <b>{se_df['element_type'].nunique()}</b> element types</li>"
@@ -699,6 +748,18 @@ def build_sequence_elements_section(se_df, summ_df, top_n):
     if summ_df is not None and not summ_df.empty:
         parts.append(subsection("Elements by type (and how many carry a modification)",
                                 df_to_html(summ_df, max_rows=20)))
+    # per-gene rollup: how many of each gene's transcripts have a MODIFIED element of each type
+    if not with_mod.empty and "gene_name" in with_mod.columns:
+        tx_col = "zt_label" if "zt_label" in with_mod.columns else None
+        if tx_col:
+            piv = (with_mod.groupby(["gene_name", "element_type"])[tx_col]
+                   .nunique().unstack(fill_value=0))
+        else:
+            piv = with_mod.groupby(["gene_name", "element_type"]).size().unstack(fill_value=0)
+        piv = piv.reset_index()
+        parts.append(subsection(
+            "Per-gene rollup — transcripts with a MODIFIED element of each type",
+            df_to_html(piv, max_rows=max(top_n, 25))))
     # the modification-carrying elements themselves (deduped across repeated fragmentforms)
     if not with_mod.empty:
         w = with_mod.copy()
