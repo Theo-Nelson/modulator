@@ -662,7 +662,15 @@ def _process_core(core_args):
             if not (s <= rep_pos <= e):
                 continue
 
-            members = [r for r in rlist if abs(r["tes"] - rep_pos) <= apa_window]
+            # Assign every read whose TES falls in THIS cluster's span, not just those within
+            # apa_window of the mode. cluster_positions() single-linkage-chains positions, so a
+            # cluster can be wider than apa_window; selecting by |tes-rep_pos|<=apa_window would
+            # silently drop the tail of such a cluster (those reads then match no other cluster
+            # either, since inter-cluster gaps exceed the window) -- losing reads and, if the tail
+            # is a real distinct 3' end, an entire APA isoform. Clusters are non-overlapping, so a
+            # read's TES belongs to exactly one span.
+            cl_lo, cl_hi = min(cl["positions"]), max(cl["positions"])
+            members = [r for r in rlist if cl_lo <= r["tes"] <= cl_hi]
             if not members:
                 continue
 
@@ -726,12 +734,15 @@ def _process_core(core_args):
                 rep_exons = list(rep["exons"])
                 tes = rep_pos
 
-                # enforce TES boundary
+                # enforce TES boundary -- but never past the terminal exon's OTHER end, or we
+                # would emit an inverted (start > end) exon. rep_pos (the cluster mode) can be up
+                # to apa_window from the rep read's own TES, so a terminal exon shorter than the
+                # window could otherwise be flipped. Clamp so the exon stays non-empty.
                 if strand == "+":
-                    if rep_exons[-1][1] != tes:
+                    if rep_exons[-1][1] != tes and tes > rep_exons[-1][0]:
                         rep_exons[-1] = (rep_exons[-1][0], tes)
                 else:
-                    if rep_exons[0][0] != tes:
+                    if rep_exons[0][0] != tes and tes < rep_exons[0][1]:
                         rep_exons[0] = (tes, rep_exons[0][1])
 
                 polya_ok = sum(

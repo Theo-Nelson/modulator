@@ -24,6 +24,8 @@ def read_snp_intervals(path):
         return out
     with open(path) as fh:
         header = fh.readline().rstrip("\n").split("\t")
+        if header:
+            header[0] = header[0].lstrip("#")   # tolerate a '#'-commented header (else all SNPs dropped)
         idx = {c: i for i, c in enumerate(header)}
         if "chrom" not in idx:
             return out

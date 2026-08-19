@@ -32,7 +32,13 @@ def main():
                 if not sample or not code:
                     continue
                 samples.add(sample)
-                counts_by_code[code][sample] = int(row.get("scrapped_assigned_reads", 0) or 0)
+                # Tolerate "12.0"/"NA"/"" (bare int() would crash the whole aggregation) and
+                # ACCUMULATE rather than overwrite if a (code, sample) appears more than once.
+                try:
+                    v = int(float(row.get("scrapped_assigned_reads", 0) or 0))
+                except (ValueError, TypeError):
+                    v = 0
+                counts_by_code[code][sample] = counts_by_code[code].get(sample, 0) + v
 
     sample_cols = sorted(samples)
     os.makedirs(os.path.dirname(args.out) or ".", exist_ok=True)

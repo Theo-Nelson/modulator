@@ -756,7 +756,10 @@ def main():
         gene = r['gene_name']; pos = int(r['start0']); cpos = pos + 1; strand = r['strand']
         n_considered += 1
 
-        per_tx = json.loads(r.get('per_transcript_json', '[]'))
+        try:
+            per_tx = json.loads(r.get('per_transcript_json', '[]') or '[]')
+        except (ValueError, TypeError):
+            per_tx = []   # malformed JSON on a row must not abort the whole stage
         cov_tx = [t for t in per_tx if int(t.get('Ncov', 0)) >= args.min_cov
                   and (gene, str(t['ZN'])) in iso]
         if len(cov_tx) < 2:

@@ -169,6 +169,18 @@ def main():
 
     fa = pysam.FastaFile(args.reference_fa)
 
+    # Preflight: if the assembled-GTF contigs are not in the FASTA index (e.g. GTF "1" vs FASTA
+    # "chr1"), every fa.fetch below fails silently and EVERY junction is mislabelled NONCANONICAL
+    # with exit 0. Warn loudly rather than emit a corrupt QC table.
+    fa_contigs = set(fa.references)
+    gtf_contigs = {d["chrom"] for d in iso.values()}
+    unknown = sorted(gtf_contigs - fa_contigs)
+    if unknown:
+        print(f"[sj][WARNING] {len(unknown)}/{len(gtf_contigs)} GTF contig(s) are NOT in the "
+              f"reference FASTA index (e.g. {unknown[:3]}); their splice junctions will all be "
+              f"classified NONCANONICAL. Check that the reference FASTA matches the alignment "
+              f"(contig naming).", file=sys.stderr)
+
     jrows = []
     # gene -> distinct junction (chrom,start,end,strand) -> class
     gene_junctions = defaultdict(dict)

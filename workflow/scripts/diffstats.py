@@ -189,6 +189,14 @@ def continuous_diff(values_a, values_b):
     if a.size < 2 or b.size < 2:
         return {"stat": np.nan, "p_value": np.nan, "mean_reference": np.nan,
                 "mean_test": np.nan, "delta": np.nan, "n_reference": int(a.size), "n_test": int(b.size)}
+    # Welch's t returns pvalue=0.0 (t=+/-inf) when BOTH groups have zero within-group variance but
+    # different means (e.g. per-replicate medians [50,50,50] vs [52,52,52]). 0.0 is finite, so the
+    # caller's isfinite guard would let it through as the #1 hit despite zero replicate variation.
+    # Treat exactly-zero pooled variance as non-significant.
+    if a.var(ddof=1) == 0.0 and b.var(ddof=1) == 0.0:
+        return {"stat": np.nan, "p_value": 1.0, "mean_reference": float(a.mean()),
+                "mean_test": float(b.mean()), "delta": float(b.mean() - a.mean()),
+                "n_reference": int(a.size), "n_test": int(b.size)}
     t, p = ttest_ind(b, a, equal_var=False)
     return {"stat": float(t), "p_value": float(p), "mean_reference": float(a.mean()),
             "mean_test": float(b.mean()), "delta": float(b.mean() - a.mean()),

@@ -86,18 +86,18 @@ def _site_rows_for_chrom(mod_path, tail_map, args):
     hdr = tsv_header(mod_path)
     mod = pd.read_csv(mod_path, sep="\t", low_memory=False, usecols=[c for c in _MOD_WANT if c in hdr])
     if mod.empty:
-        return []
+        return [], []
     if "usable" in mod.columns:
         mod = mod[mod["usable"].fillna(False)].copy()
     elif "fail" in mod.columns and "within_alignment" in mod.columns:
         mod = mod[(~mod["fail"].fillna(True)) & mod["within_alignment"].fillna(False)].copy()
     if mod.empty:
-        return []
+        return [], []
     key = mod["sample"].astype(str) + "\x00" + mod["qname"].astype(str)
     mod["tail_len"] = key.map(tail_map).to_numpy()
     mod = mod[mod["tail_len"].notna()]
     if mod.empty:
-        return []
+        return [], []
     mod["target_modified"] = pd.to_numeric(mod["target_modified"], errors="coerce").fillna(0).astype(int)
     collect = bool(args.figs_dir) and int(args.top_k) > 0
     rows, cands = [], []

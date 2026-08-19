@@ -371,6 +371,23 @@ def main():
     df["end0"] = df["end0"].astype(int)
     df["ZN_transcript_index"] = df["ZN_transcript_index"].astype(int)
 
+    # An empty input (0 data rows after filtering -- e.g. a gene set where no site passed the
+    # aggregation filter, or an aggressive gene/mod filter) must not reach df.apply below:
+    # on an empty frame df.apply(axis=1) returns an empty DataFrame (not a Series), which
+    # crashes the site_key assignment ("Cannot set a DataFrame with multiple columns...").
+    # Emit the empty result table + figs dir and exit 0 so the pipeline continues.
+    if df.empty:
+        out_tsv = f"{args.out_prefix}__ZN_site_diff_results.tsv"
+        os.makedirs(os.path.dirname(out_tsv) or ".", exist_ok=True)
+        pd.DataFrame(columns=[
+            "gene_name", "mod_code", "chrom", "start0", "end0", "strand",
+            "n_tx_tested", "test_name", "stat_name", "stat_value", "p_value",
+            "effect_max_abs_frac_diff", "per_transcript_json", "p_adj_bh",
+        ]).to_csv(out_tsv, sep="\t", index=False)
+        os.makedirs(f"{args.out_prefix}__figs", exist_ok=True)
+        print(f"[info] --in-tsv has no usable data rows; wrote empty {out_tsv} and continuing.")
+        return
+
     # Build keys (fix for "Cannot set a DataFrame with multiple columns...")
     df["site_key"] = df.apply(site_key_tuple, axis=1)
     df["site_key_str"] = df["site_key"].map(site_key_str_from_tuple)

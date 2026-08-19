@@ -153,7 +153,12 @@ def main():
             stat, p = mannwhitneyu(groups[0], groups[1], alternative="two-sided")
             test_name, stat_name = "mannwhitneyu", "U"
         else:
-            stat, p = kruskal(*groups)
+            # kruskal raises ValueError("All numbers are identical") when every read across all
+            # groups has the same tail length -- guard so a degenerate gene doesn't abort the run.
+            try:
+                stat, p = kruskal(*groups)
+            except ValueError:
+                stat, p = float("nan"), 1.0
             test_name, stat_name = "kruskal", "H"
         per_frag = []
         for zt, v in sorted(kept.items(), key=lambda kv: -np.median(kv[1])):
