@@ -610,8 +610,8 @@ def build_between_conditions_section(bc_dir, top_n):
             df = by_kind.get(suffix)
             if df is None or df.empty:
                 continue
-            padj = pd.to_numeric(df.get("p_adj_bh"), errors="coerce")
-            e = pd.to_numeric(df.get(eff), errors="coerce").abs()
+            padj = pd.to_numeric(df.get("p_adj_bh", pd.Series(dtype=float)), errors="coerce")
+            e = pd.to_numeric(df.get(eff, pd.Series(dtype=float)), errors="coerce").abs()
             # Effect thresholds differ by units, so name the column consistently and report the
             # threshold in its own column (otherwise each analysis makes its own NaN-filled column).
             thr = 10.0 if eff == "delta_nt" else 0.10     # 10 nt of tail, or 10 percentage points
@@ -673,8 +673,9 @@ def build_apa_motif_section(apa_df, top_n):
     summ = pd.DataFrame({"apa_motif_class": list(counts.keys()), "n_sites": list(counts.values())})
     summ["pct"] = (100.0 * summ["n_sites"] / total).round(2)
     parts.append(subsection("PAS class summary", df_to_html(summ.sort_values("n_sites", ascending=False), max_rows=10)))
-    hx = apa_df[apa_df["pas_motif"].astype(str).ne("") & apa_df["pas_motif"].notna()]
-    if not hx.empty:
+    hx = (apa_df[apa_df["pas_motif"].astype(str).ne("") & apa_df["pas_motif"].notna()]
+          if "pas_motif" in apa_df.columns else apa_df.iloc[0:0])
+    if not hx.empty and "pas_distance_nt" in hx.columns:
         hu = hx["pas_motif"].value_counts().reset_index()
         hu.columns = ["pas_motif", "n_sites"]
         med = hx.groupby("pas_motif")["pas_distance_nt"].median()
@@ -1400,7 +1401,8 @@ def main():
             f"<li><b>{html.escape(str(k))}</b>: {int(v):,} ({100.0 * int(v) / total_j:.2f}%)</li>"
             for k, v in cls_counts.items()
         ) + "</ul>"
-        noncanon_genes = splice_genes_df[splice_genes_df.get("has_noncanonical", 0).astype(int) == 1] \
+        noncanon_genes = splice_genes_df[pd.to_numeric(
+            splice_genes_df.get("has_noncanonical", 0), errors="coerce").fillna(0).astype(int) == 1] \
             if not splice_genes_df.empty and "has_noncanonical" in splice_genes_df.columns else pd.DataFrame()
         noncanon_html = (
             subsection("Genes carrying non-canonical junctions", df_to_html(noncanon_genes, max_rows=args.top_genes))
