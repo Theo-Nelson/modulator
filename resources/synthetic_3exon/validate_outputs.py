@@ -125,6 +125,9 @@ def main():
     hb = rd(f"genotype/{P}_haplotype_blocks.tsv")
     check("one haplotype block with 2 SNPs reconstructed",
           len(hb) == 1 and hb.iloc[0]["n_snps"] == 2)
+    check("snp_at_mod_base report produced + test_diffs carries the flag column",
+          (R / f"genotype/{P}_snp_at_mod_base.tsv").exists()
+          and "snp_at_mod_base" in rd(f"test_diffs/{P}__ZN_site_diff_results.tsv").columns)
 
     print("== CO-LOCALIZED MODIFICATIONS (mod x mod dependency) -- headline ==")
     mm = rd(f"genotype/{P}_mod_mod_assoc.tsv")

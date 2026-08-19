@@ -17,8 +17,9 @@ echo "### 1/4 repo smoke checks"
 "$PY" workflow/scripts/regression_smoke_checks.py || rc=1
 "$PY" workflow/scripts/genotype_regression_smoke_checks.py || rc=1
 
-echo "### 2/4 classify_diffs taxonomy unit test"
+echo "### 2/4 classify_diffs taxonomy + snp-at-mod-base unit tests"
 "$PY" "$HERE/test_classify_categories.py" || rc=1
+"$PY" "$HERE/test_snp_at_mod_base.py" || rc=1
 
 echo "### 3/4 full pipeline on the synthetic dataset"
 bash "$HERE/run_pipeline.sh" || rc=1

@@ -239,6 +239,13 @@ genotype:
   # SELF-REPORTING variants (A-to-I and pseU change the basecall, so they get called as SNPs at their
   # own modified base; ~12% of significant snp_mod hits are that circularity). Needs the reference FASTA.
   snp_mod_mechanism: true
+  # Find SNPs that sit EXACTLY on a modified base, report them separately
+  # (<prefix>_snp_at_mod_base.tsv: self-reporting A-to-I / pseudouridine, or modified-base
+  # ablation), and add a `snp_at_mod_base` flag column to the between-isoform and
+  # between-condition differential-modification tables. A segregating variant at the modified
+  # base confounds those (SNP-blind) tests -- this lets you scrutinise/exclude such sites
+  # rather than recalibrating the test. Reference allele only is counted at those sites.
+  snp_at_mod_base: true
   # Max distance (nt) from the modified base for a SNP to count as PROXIMAL_CIS before DISTAL_CIS.
   # The nearer tiers are fixed by the motif geometry (0 = at the modified base, <=2 = inside the
   # DRACH 5-mer, <=4 = inside the 9-mer), so only this outer boundary is tunable.

@@ -144,6 +144,10 @@ class PipelinePaths:
         return self.genotype / f"{self.prefix}_snp_mod_mechanism.tsv"
 
     @property
+    def geno_snp_at_mod_base(self) -> Path:
+        return self.genotype / f"{self.prefix}_snp_at_mod_base.tsv"
+
+    @property
     def novel_loci_tsv(self) -> Path:
         return self.assemble / f"{self.prefix}_novel_loci.tsv"
 
@@ -1494,6 +1498,22 @@ class ModulatorPipeline:
                 label="test_mod_mod_assoc",
             )
 
+        # SNPs at the modified base: enumerate every modified site that coincides with a
+        # candidate SNP, classify it (self-reporting A-to-I / pseU, or modified-base ablation),
+        # and FLAG those sites in the between-isoform differential table -- so a segregating
+        # variant at the modified base can be scrutinised/excluded rather than silently
+        # confounding the SNP-blind differential test. (No test recalibration.)
+        if as_bool(geno.get("snp_at_mod_base", True), True) and self._nonempty(self.paths.zn_filtered_long):
+            args = [
+                "--candidate-snps", str(self.paths.geno_candidate_snps),
+                "--mod-sites", str(self.paths.zn_filtered_long),
+                "--out-tsv", str(self.paths.geno_snp_at_mod_base),
+                "--verbose",
+            ]
+            if self._nonempty(self.paths.zn_diff_results):
+                args += ["--annotate", str(self.paths.zn_diff_results)]
+            self.run_python_script("find_snp_at_mod_base.py", args, label="find_snp_at_mod_base")
+
     def stage_apa_motifs(self) -> None:
         """Polyadenylation-signal check for every APA site (each fragmentform's TES): canonical
         AATAAA / variant hexamer and its distance, downstream U/GU-richness, and an internal-priming
@@ -1660,6 +1680,15 @@ class ModulatorPipeline:
                     args += ["--mod-filter", *mod_filter]
                 self.run_python_script("test_condition_mod_diffs.py", args,
                                        label=f"condition_mod_diffs:{name}")
+                # Flag between-condition sites that sit on a segregating SNP at the modified base
+                # (genotype confounder). Needs candidate SNPs from the genotype stage.
+                if self._nonempty(self.paths.geno_candidate_snps) and self._nonempty(self.paths.cond_mod_diffs(name)):
+                    self.run_python_script("find_snp_at_mod_base.py", [
+                        "--candidate-snps", str(self.paths.geno_candidate_snps),
+                        "--mod-sites", str(self.paths.zn_filtered_long),
+                        "--out-tsv", str(self.paths.geno_snp_at_mod_base),
+                        "--annotate", str(self.paths.cond_mod_diffs(name)),
+                    ], label=f"flag_snp_at_mod_base:{name}")
             # 2) differential usage: isoform / APA site / splice junction (one engine, three maps)
             for feature in ("isoform", "apa", "junction"):
                 if not as_bool(cfg.get(f"{feature}_usage", True), True):
