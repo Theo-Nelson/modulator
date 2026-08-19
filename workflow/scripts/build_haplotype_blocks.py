@@ -133,6 +133,13 @@ def main():
 
     for ctx, sub in df.groupby("context_key", sort=False):
         read_snps = defaultdict(dict)
+        # One-time (sample, qname) -> first row lookup for this context. Without it, the
+        # per-haplotype-member metadata fetch below did a full boolean scan of `sub`, making the
+        # step O(members * len(sub)) -- billions of comparisons (and effectively a hang) on a deep,
+        # polymorphic locus. Output is identical.
+        first_by_read = {}
+        for _rec in sub.to_dict("records"):
+            first_by_read.setdefault((_rec.get("sample"), _rec.get("qname")), _rec)
         for row in sub.itertuples(index=False):
             read_snps[(row.sample, row.qname)][row.snp_id] = row.observed_base
 
@@ -213,7 +220,7 @@ def main():
                 for sample, qname, hap in hap_members:
                     if hap not in keep_haps:
                         hap = "OTHER"
-                    first = sub[(sub["sample"] == sample) & (sub["qname"] == qname)].iloc[0]
+                    first = first_by_read.get((sample, qname), {})
                     molecule_rows.append({
                         "sample": sample,
                         "qname": qname,
