@@ -65,6 +65,23 @@ def as_bool(value, default: bool = False) -> bool:
     return bool(value)
 
 
+def normalize_pivot_mode(value, default: str = "auto") -> str:
+    """Resolve a pivot-output setting to one of 'auto' | 'on' | 'off'.
+
+    Accepts the tri-state strings directly, and maps legacy booleans / truthy-falsey strings
+    (True/False, "true"/"false", "yes"/"no", 1/0) onto 'on'/'off' so old configs keep working.
+    """
+    if value is None:
+        return default
+    if isinstance(value, str):
+        s = value.strip().lower()
+        if s in {"auto", "smart", "adaptive"}:
+            return "auto"
+        if s in {"", "none", "null", "na"}:
+            return default
+    return "on" if as_bool(value, default=(default == "on")) else "off"
+
+
 def ensure_parent(path: Path) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
 

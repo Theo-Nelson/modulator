@@ -18,6 +18,14 @@ bam_glob: "*.bam"
 # exactly one file. Symlinks only -- BAMs are never copied.
 samplesheet: ""            # e.g. config/samples.tsv
 
+# Preflight: validate the input BAMs BEFORE any stage runs, so mistakes fail fast with a clear
+# message instead of a cryptic mid-run modkit error or silently wrong statistics.
+preflight:
+  enable: true
+  check_duplicate_bams: true   # ERROR if two samples resolve to the same physical file (pseudo-replication); WARN on distinct same-size files (likely accidental copies)
+  check_bam_index: true        # ERROR if a BAM lacks a .bai/.csi index (modkit pileup + pysam require one)
+  auto_index: false            # if true, build missing indexes with `samtools index` instead of erroring
+
 # Which comparisons to run. Omit/empty -> every pairwise contrast of `condition` is derived.
 contrasts: []
 #   - {name: zikv_vs_mock, column: condition, test: zikv, reference: mock}
@@ -124,7 +132,8 @@ aggregation:
     emit_raw: false                    # RAW sites_long is huge (~all bedMethyl rows) and not consumed downstream; FILTERED is what test_diffs/genotype/report use. Set true only if you need the full pre-filter table and have disk/quota headroom.
     emit_filtered: true
     write_long: true
-    write_pivots: true
+    write_pivots: auto                 # auto | on | off. Per-gene pivots are 3 dense files per (gene x mod) group and are NOT read downstream (inspection only). 'auto' writes them unless the run exceeds pivot_max_groups (avoids a hundreds-of-thousands-of-tiny-files explosion on whole-transcriptome runs); 'on' forces them even at scale; 'off' never writes them.
+    pivot_max_groups: 2000             # auto-mode ceiling on (gene x mod) pivot groups; ~3x this many files. Raise it (or set write_pivots: on) to force pivots on a large run.
     write_raw_per_gene: false          # RAW per-gene tables (thousands of files) follow emit_raw
     write_filtered_per_gene: true      # (ZN only) FILTERED only -> small
 
@@ -133,7 +142,8 @@ aggregate_outputs:
   emit_raw: true
   emit_filtered: true
   write_long: true
-  write_pivots: true
+  write_pivots: auto        # auto | on | off (see aggregation.zn.write_pivots)
+  pivot_max_groups: 2000
   write_raw_per_gene_tables: true
   write_filtered_per_gene_tables: true
 

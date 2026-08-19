@@ -16,6 +16,7 @@ from modulator.runtime import (
     find_project_root,
     format_command,
     is_set,
+    normalize_pivot_mode,
     require_tools,
     resolve_path,
     run_command,
@@ -464,6 +465,105 @@ class ModulatorPipeline:
             assembler_cfg["write_zt_tagged_sample_bams"] = True
             if self.verbose:
                 print("[modulator] enabled assembler.write_zt_tagged_sample_bams because downstream stages require per-sample tagged BAMs.", flush=True)
+        self._preflight_bams()
+
+    @staticmethod
+    def _bam_has_index(bam_path: str) -> bool:
+        """True if a coordinate index (.bai/.csi) exists for this BAM, using every name modkit and
+        pysam will try: <bam>.bai, <bam>.csi, and the samtools <stem>.bai/.csi variant."""
+        p = str(bam_path)
+        cands = [p + ".bai", p + ".csi"]
+        if p.endswith(".bam"):
+            cands += [p[:-4] + ".bai", p[:-4] + ".csi"]
+        return any(os.path.exists(c) for c in cands)
+
+    def _preflight_bams(self) -> None:
+        """Fail fast, before any stage runs, on two input mistakes that otherwise surface as a
+        cryptic mid-run modkit error or (worse) silently wrong statistics:
+
+          * duplicate BAMs -- two samples resolving to the SAME physical file, which double-counts
+            one library as two replicates (pseudo-replication). Errors. Distinct files of identical
+            size are flagged as a warning (likely an accidental copy) but allowed.
+          * a missing .bai/.csi index -- modkit pileup and pysam both require one. Errors with the
+            exact `samtools index` command to fix, or builds them if preflight.auto_index is set.
+
+        Controlled by the `preflight` config block; set preflight.enable: false to skip entirely.
+        """
+        pf = self.config.get("preflight", {}) or {}
+        if not as_bool(pf.get("enable", True), True):
+            return
+        paths = sorted(glob.glob(str(self.bams_dir / self.bam_glob)))
+        if not paths:
+            return  # empty discovery is reported elsewhere (_discover_samples)
+
+        problems: list[str] = []
+        warnings: list[str] = []
+
+        if as_bool(pf.get("check_duplicate_bams", True), True):
+            by_inode: dict[tuple[int, int], str] = {}
+            by_size: dict[int, list[str]] = {}
+            for p in paths:
+                try:
+                    st = os.stat(os.path.realpath(p))
+                except OSError as exc:
+                    problems.append(f"cannot stat BAM '{Path(p).name}': {exc}")
+                    continue
+                key = (st.st_dev, st.st_ino)
+                if key in by_inode:
+                    problems.append(
+                        f"duplicate BAM: '{Path(p).name}' and '{Path(by_inode[key]).name}' are the "
+                        f"SAME physical file ({os.path.realpath(p)}); this double-counts one library "
+                        f"as two samples (pseudo-replication)."
+                    )
+                else:
+                    by_inode[key] = p
+                by_size.setdefault(st.st_size, []).append(p)
+            for sz, plist in by_size.items():
+                realpaths = {os.path.realpath(x) for x in plist}
+                if len(realpaths) > 1:
+                    names = ", ".join(sorted(Path(x).name for x in plist))
+                    warnings.append(
+                        f"{len(realpaths)} distinct BAMs share an identical size ({sz} bytes): "
+                        f"{names}; verify these are not accidental copies of one library."
+                    )
+
+        if as_bool(pf.get("check_bam_index", True), True):
+            missing = [p for p in paths if not self._bam_has_index(p)]
+            if missing and as_bool(pf.get("auto_index", False), False):
+                require_tools(["samtools"])
+                threads = str(max(1, self.top_threads))
+                still: list[str] = []
+                for p in missing:
+                    try:
+                        run_command(["samtools", "index", "-@", threads, p],
+                                    cwd=self.root, label=f"preflight_index[{Path(p).name}]",
+                                    verbose=self.verbose)
+                    except Exception as exc:  # noqa: BLE001
+                        warnings.append(f"auto-index failed for '{Path(p).name}': {exc}")
+                    if not self._bam_has_index(p):
+                        still.append(p)
+                missing = still
+            if missing:
+                listed = "\n".join(f"      - {Path(p).name}" for p in missing)
+                fix = "\n".join(f"      samtools index {os.path.realpath(p)}" for p in missing)
+                problems.append(
+                    "BAM(s) missing a .bai/.csi index (modkit pileup and pysam require one):\n"
+                    + listed
+                    + "\n    create them with:\n" + fix
+                    + "\n    or set preflight.auto_index: true to build them automatically."
+                )
+
+        for w in warnings:
+            print(f"[modulator] preflight WARNING: {w}", flush=True)
+        if problems:
+            raise ValueError(
+                "modulator preflight failed for the input BAMs:\n  - "
+                + "\n  - ".join(problems)
+                + "\n(If this is intentional, set preflight.enable: false in the config.)"
+            )
+        if self.verbose:
+            print(f"[modulator] preflight: {len(paths)} BAM(s) OK (unique files, indexes present).",
+                  flush=True)
 
     def _require_existing_file(self, path: Path | None, label: str) -> Path:
         if path is None:
@@ -1066,7 +1166,14 @@ class ModulatorPipeline:
         args.append("--emit-raw" if as_bool(agg_cfg.get("emit_raw", self.config.get("aggregate_outputs", {}).get("emit_raw", True)), True) else "--no-emit-raw")
         args.append("--emit-filtered" if as_bool(agg_cfg.get("emit_filtered", self.config.get("aggregate_outputs", {}).get("emit_filtered", True)), True) else "--no-emit-filtered")
         args.append("--write-long" if as_bool(agg_cfg.get("write_long", self.config.get("aggregate_outputs", {}).get("write_long", True)), True) else "--no-write-long")
-        args.append("--write-pivots" if as_bool(agg_cfg.get("write_pivots", self.config.get("aggregate_outputs", {}).get("write_pivots", True)), True) else "--no-write-pivots")
+        # Pivots are optional inspection outputs (3 dense files per gene x mod group; nothing
+        # downstream reads them). Tri-state: 'auto' (default) writes them unless the run exceeds
+        # pivot_max_groups, avoiding a hundreds-of-thousands-of-tiny-files explosion on whole-
+        # transcriptome runs; 'on'/true forces them even at scale; 'off'/false never writes them.
+        pivot_raw = agg_cfg.get("write_pivots", self.config.get("aggregate_outputs", {}).get("write_pivots", "auto"))
+        pivot_mode = normalize_pivot_mode(pivot_raw)
+        pivot_max_groups = int(agg_cfg.get("pivot_max_groups", self.config.get("aggregate_outputs", {}).get("pivot_max_groups", 2000)))
+        args.extend(["--pivot-mode", pivot_mode, "--pivot-max-groups", str(pivot_max_groups)])
         args.append("--write-raw-per-gene" if as_bool(agg_cfg.get("write_raw_per_gene", self.config.get("aggregate_outputs", {}).get("write_raw_per_gene", False)), False) else "--no-write-raw-per-gene")
         args.append("--write-filtered-per-gene" if as_bool(agg_cfg.get("write_filtered_per_gene", self.config.get("aggregate_outputs", {}).get("write_filtered_per_gene", True)), True) else "--no-write-filtered-per-gene")
         # Default to the streaming engine: it k-way-merges the already-sorted,

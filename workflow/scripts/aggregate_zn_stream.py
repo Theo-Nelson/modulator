@@ -207,11 +207,20 @@ def parse_args():
     ap.add_argument("--jobs", type=int, default=8, help="chromosomes processed in parallel")
     ap.add_argument("--verbose", action="store_true")
     ap.add_argument("--filter-enable", dest="filter_enable", action="store_true", default=False)
-    for flag in ("emit-raw", "emit-filtered", "write-long", "write-pivots",
+    for flag in ("emit-raw", "emit-filtered", "write-long",
                  "write-raw-per-gene", "write-filtered-per-gene"):
         dest = flag.replace("-", "_")
         ap.add_argument(f"--{flag}", dest=dest, action="store_true", default=True)
         ap.add_argument(f"--no-{flag}", dest=dest, action="store_false")
+    # Per-gene pivots are optional inspection outputs (3 dense files per gene x mod group);
+    # nothing downstream reads them. 'auto' skips them past --pivot-max-groups so a whole-
+    # transcriptome run does not explode into hundreds of thousands of tiny files; 'on' forces
+    # them even at scale; 'off' never writes them. Legacy --write-pivots/--no-write-pivots alias.
+    ap.add_argument("--pivot-mode", dest="pivot_mode", choices=["auto", "on", "off"],
+                    default="auto")
+    ap.add_argument("--pivot-max-groups", dest="pivot_max_groups", type=int, default=2000)
+    ap.add_argument("--write-pivots", dest="pivot_mode", action="store_const", const="on")
+    ap.add_argument("--no-write-pivots", dest="pivot_mode", action="store_const", const="off")
     return ap.parse_args()
 
 
@@ -277,13 +286,13 @@ def main():
     if args.emit_raw:
         agg.compute_per_sample_mod_stats_from_dedup(dedup_raw, base, "RAW", workdir, args.chunk_lines, args.verbose)
         agg.generate_per_gene_outputs_from_dedup(dedup_raw, base, "RAW", args.write_raw_per_gene,
-                                                 args.write_pivots, workdir, args.chunk_lines, args.verbose,
-                                                 jobs=args.jobs)
+                                                 args.pivot_mode, workdir, args.chunk_lines, args.verbose,
+                                                 jobs=args.jobs, pivot_max_groups=args.pivot_max_groups)
     if args.emit_filtered and args.filter_enable:
         agg.compute_per_sample_mod_stats_from_dedup(dedup_filt, base, "FILTERED", workdir, args.chunk_lines, args.verbose)
         agg.generate_per_gene_outputs_from_dedup(dedup_filt, base, "FILTERED", args.write_filtered_per_gene,
-                                                 args.write_pivots, workdir, args.chunk_lines, args.verbose,
-                                                 jobs=args.jobs)
+                                                 args.pivot_mode, workdir, args.chunk_lines, args.verbose,
+                                                 jobs=args.jobs, pivot_max_groups=args.pivot_max_groups)
 
     # success -> drop the (large) workdir
     shutil.rmtree(workdir, ignore_errors=True)

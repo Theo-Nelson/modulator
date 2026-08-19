@@ -207,9 +207,21 @@ def parse_args():
     ap.add_argument("--no-write-long", dest="write_long", action="store_false")
     ap.set_defaults(write_long=True)
 
-    ap.add_argument("--write-pivots", dest="write_pivots", action="store_true")
-    ap.add_argument("--no-write-pivots", dest="write_pivots", action="store_false")
-    ap.set_defaults(write_pivots=True)
+    # Per-gene pivots are optional inspection outputs (3 dense files per gene x mod group);
+    # nothing downstream reads them. 'auto' writes them unless the run would explode into too
+    # many tiny files (see --pivot-max-groups); 'on' always writes them (even at scale); 'off'
+    # never does. The legacy --write-pivots/--no-write-pivots map onto 'on'/'off'.
+    ap.add_argument("--pivot-mode", dest="pivot_mode", choices=["auto", "on", "off"],
+                    default="auto",
+                    help="auto (default): write per-gene pivots unless (gene x mod) groups exceed "
+                         "--pivot-max-groups; on: always write; off: never write.")
+    ap.add_argument("--pivot-max-groups", dest="pivot_max_groups", type=int, default=2000,
+                    help="auto-mode ceiling on the number of (gene x mod) pivot groups; each group "
+                         "writes 3 files, so this bounds the small-file count at ~3x this value.")
+    ap.add_argument("--write-pivots", dest="pivot_mode", action="store_const", const="on",
+                    help="(legacy alias for --pivot-mode on)")
+    ap.add_argument("--no-write-pivots", dest="pivot_mode", action="store_const", const="off",
+                    help="(legacy alias for --pivot-mode off)")
 
     ap.add_argument("--write-raw-per-gene", dest="write_raw_per_gene", action="store_true")
     ap.add_argument("--no-write-raw-per-gene", dest="write_raw_per_gene", action="store_false")
@@ -243,7 +255,6 @@ def parse_args():
     args.emit_raw = parse_bool(args.emit_raw, default=True)
     args.emit_filt = parse_bool(args.emit_filt, default=True)
     args.write_long = parse_bool(args.write_long, default=True)
-    args.write_pivots = parse_bool(args.write_pivots, default=True)
     args.write_raw_per_gene = parse_bool(args.write_raw_per_gene, default=False)
     args.write_filtered_per_gene = parse_bool(args.write_filtered_per_gene, default=True)
 
@@ -1187,11 +1198,12 @@ def generate_per_gene_outputs_from_dedup(
     out_prefix: str,
     tag: str,
     write_per_gene: bool,
-    write_pivots: bool,
-    workdir: str,
-    chunk_lines: int,
+    pivot_mode="auto",
+    workdir: str = None,
+    chunk_lines: int = 2_000_000,
     verbose: bool = False,
     jobs: int = 1,
+    pivot_max_groups: int = 2000,
 ):
     """
     Writes per-gene×mod tables and pivots under:
@@ -1206,8 +1218,14 @@ def generate_per_gene_outputs_from_dedup(
     identical to the serial path.
     """
     write_per_gene = parse_bool(write_per_gene, default=False)
-    write_pivots = parse_bool(write_pivots, default=True)
-    if not (write_per_gene or write_pivots):
+    # Normalize the pivot mode. Accept the tri-state strings plus legacy bools/"true"/"false".
+    mode = str(pivot_mode).strip().lower()
+    if mode not in ("auto", "on", "off"):
+        mode = "on" if parse_bool(pivot_mode, default=True) else "off"
+    # If pivots are explicitly off and no per-gene tables are requested, there is nothing to do --
+    # skip the (potentially large) external sort entirely. In 'auto' we cannot decide yet (the
+    # group count is only known after the sort), so we fall through.
+    if mode == "off" and not write_per_gene:
         return
 
     out_dir = f"{out_prefix}_{tag}__per_gene_mod"
@@ -1263,6 +1281,29 @@ def generate_per_gene_outputs_from_dedup(
                 groups.append((cur[0], cur[1], cur[2], start, off))
                 cur = gm
                 start = off
+
+    # Resolve the pivot decision now that the exact (gene x mod) group count is known.
+    n_groups = len(groups)
+    if mode == "on":
+        write_pivots = True
+    elif mode == "off":
+        write_pivots = False
+    else:  # auto
+        write_pivots = n_groups <= int(pivot_max_groups)
+        if verbose:
+            if write_pivots:
+                print(f"[per-gene {tag}] pivots: auto -> ON ({n_groups} gene x mod groups "
+                      f"<= pivot_max_groups={pivot_max_groups})", file=sys.stderr)
+            else:
+                print(f"[per-gene {tag}] pivots: auto -> OFF ({n_groups} gene x mod groups "
+                      f"> pivot_max_groups={pivot_max_groups}; would write ~{3 * n_groups} small "
+                      f"files). Long/per-gene tables are unaffected; set aggregation.zn.write_pivots"
+                      f"=on (or raise pivot_max_groups) to force pivots at this scale.",
+                      file=sys.stderr)
+
+    if not (write_per_gene or write_pivots):
+        # auto disabled pivots and no per-gene tables requested -> nothing left to emit.
+        return
 
     tasks = [
         (per_gene_sorted, s_off, e_off, gname, gid, mod, out_dir, prefix_base,
@@ -1327,7 +1368,7 @@ def main():
         print(
             "[cfg] "
             f"emit_raw={args.emit_raw} emit_filtered={args.emit_filt} "
-            f"write_long={args.write_long} write_pivots={args.write_pivots} "
+            f"write_long={args.write_long} pivot_mode={args.pivot_mode} "
             f"write_raw_per_gene={args.write_raw_per_gene} write_filtered_per_gene={args.write_filtered_per_gene} "
             f"filter_enable={args.filter_enable}",
             file=sys.stderr
@@ -1383,7 +1424,8 @@ def main():
                 out_prefix=base,
                 tag="RAW",
                 write_per_gene=args.write_raw_per_gene,
-                write_pivots=args.write_pivots,
+                pivot_mode=args.pivot_mode,
+                pivot_max_groups=args.pivot_max_groups,
                 workdir=workdir,
                 chunk_lines=args.chunk_lines,
                 verbose=args.verbose
@@ -1472,7 +1514,8 @@ def main():
                 out_prefix=base,
                 tag="FILTERED",
                 write_per_gene=args.write_filtered_per_gene,
-                write_pivots=args.write_pivots,
+                pivot_mode=args.pivot_mode,
+                pivot_max_groups=args.pivot_max_groups,
                 workdir=workdir,
                 chunk_lines=args.chunk_lines,
                 verbose=args.verbose
