@@ -45,6 +45,7 @@ def parse_args():
     ap.add_argument("--min-samples-per-group", type=int, default=2)
     ap.add_argument("--prior-weight", type=float, default=20.0)
     ap.add_argument("--ref-df", type=int, default=diffstats.REF_DF)
+    ap.add_argument("--site-weight", default="auto", help="dispersion-shrinkage per-site weight; 'auto'=N_site-2 (scales with cohort)")
     ap.add_argument("--verbose", action="store_true")
     return ap.parse_args()
 
@@ -85,7 +86,7 @@ def main():
     args = parse_args()
     name = args.contrast_name or f"{args.test}_vs_{args.reference}"
 
-    meta = pd.read_csv(args.sample_metadata, sep="\t", low_memory=False)
+    meta = pd.read_csv(args.sample_metadata, sep="\t", low_memory=False, keep_default_na=False)
     grp = dict(zip(meta["sample"].astype(str), meta[args.column].astype(str)))
     ref_s = [s for s, g in grp.items() if g == args.reference]
     test_s = [s for s, g in grp.items() if g == args.test]
@@ -137,7 +138,8 @@ def main():
     sites = [(i, K[i], tot[i], gidx) for i in range(K.shape[0])]
     res = diffstats.beta_binomial_diff(sites, prior_weight=args.prior_weight,
                                        min_group_samples=args.min_samples_per_group,
-                                       ref_df=args.ref_df, calibrate=False)
+                                       ref_df=args.ref_df, calibrate=False,
+                                       site_weight=diffstats.parse_site_weight(args.site_weight))
     rows = []
     for r in res:
         gene, feature = idx[r["key"]]

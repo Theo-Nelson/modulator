@@ -52,7 +52,7 @@ def main():
     args = parse_args()
     name = args.contrast_name or f"{args.test}_vs_{args.reference}"
 
-    meta = pd.read_csv(args.sample_metadata, sep="\t", low_memory=False)
+    meta = pd.read_csv(args.sample_metadata, sep="\t", low_memory=False, keep_default_na=False)
     if "sample" not in meta.columns or args.column not in meta.columns:
         pd.DataFrame(columns=OUT_COLS).to_csv(args.out_tsv, sep="\t", index=False)
         return

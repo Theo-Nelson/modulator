@@ -120,7 +120,19 @@ def _site_lrt(k, n, gidx, theta):
     return mu0, mu1, max(stat, 0.0)
 
 
-def beta_binomial_diff(sites, prior_weight=20.0, min_group_samples=2, ref_df=REF_DF, calibrate=False):
+def parse_site_weight(x):
+    """CLI '--site-weight' -> 'auto' or a float. Anything non-numeric (incl. 'auto'/'') -> 'auto'."""
+    s = str(x).strip().lower() if x is not None else "auto"
+    if s in ("auto", "", "none"):
+        return "auto"
+    try:
+        return float(s)
+    except ValueError:
+        return "auto"
+
+
+def beta_binomial_diff(sites, prior_weight=20.0, min_group_samples=2, ref_df=REF_DF,
+                       calibrate=False, site_weight="auto"):
     """Replicate-aware differential test for count data, with dispersion shrinkage across sites.
 
     ``sites``: list of (key, k, n, gidx) where k/n/gidx are equal-length arrays over samples and
@@ -148,13 +160,26 @@ def beta_binomial_diff(sites, prior_weight=20.0, min_group_samples=2, ref_df=REF
     if not prepared:
         return []
 
-    # Shrink log-theta toward the across-site median (the "trend"); this is what buys power at n=3.
+    # Shrink log-theta toward the across-site median (the "trend"); this buys power at small n.
+    # The per-site weight w in the shrinkage balance (w*logθ_s + prior_weight*log_prior)/(w+prior_weight)
+    # must SCALE WITH how well the site's own dispersion is determined -- i.e. with the number of
+    # replicates covering it. With w hardcoded to 1 against prior_weight=20, EVERY site (even in a
+    # 400-sample cohort) got only ~5% of its own dispersion and was forced ~95% onto the global
+    # median. That is fine when replicates are few and near-binomial (the site's θ ≈ the prior, so
+    # shrinkage is inert), but on a large or heterogeneous cohort it crushes genuinely overdispersed
+    # sites onto the near-binomial bulk and reads their replicate scatter as signal -> false positives.
+    # site_weight="auto" sets w = max(1, N_site - 2) (the residual df for dispersion at that site), so
+    # shrinkage automatically fades as the cohort grows; a numeric value forces a fixed w (w=1
+    # reproduces the legacy behaviour). Near-binomial null sites are unaffected either way.
     log_thetas = np.array([np.log(p[4]) for p in prepared])
     log_prior = float(np.median(log_thetas))
-    w = 1.0
+    auto_w = (site_weight == "auto")
+    fixed_w = None if auto_w else max(0.0, float(site_weight))
     out = []
     for key, k, n, gidx, theta_s in prepared:
-        log_shrunk = (w * np.log(theta_s) + prior_weight * log_prior) / (w + prior_weight)
+        w = max(1.0, float(len(k) - 2)) if auto_w else fixed_w
+        denom = w + prior_weight
+        log_shrunk = (w * np.log(theta_s) + prior_weight * log_prior) / denom if denom > 0 else np.log(theta_s)
         theta = float(np.exp(log_shrunk))
         mu0, mu1, stat = _site_lrt(k, n, gidx, theta)
         out.append({

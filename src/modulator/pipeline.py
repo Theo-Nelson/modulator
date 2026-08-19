@@ -1664,6 +1664,7 @@ class ModulatorPipeline:
         min_grp = str(int(cfg.get("min_samples_per_group", 2)))
         common_stat = ["--prior-weight", str(float(cfg.get("prior_weight", 20.0))),
                        "--ref-df", str(int(cfg.get("ref_df", 10))),
+                       "--site-weight", str(cfg.get("site_weight", "auto")),
                        "--min-samples-per-group", min_grp]
         mod_filter = [str(m) for m in (cfg.get("mod_filter") or [])]
         for c in self.contrasts:

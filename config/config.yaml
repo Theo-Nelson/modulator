@@ -317,6 +317,11 @@ between_conditions:
                                # m6A only. Empty = all. (a=m6A, m=5mC, 17596=inosine, 17802=pseudouridine)
   prior_weight: 20.0           # dispersion shrinkage strength (diffstats.py)
   ref_df: 10                   # F(1,df) reference for the LRT. Calibrated for near-binomial
+  site_weight: auto           # dispersion-shrinkage per-site weight. "auto" = N_site-2, so
+                              # shrinkage fades as the cohort grows (heterogeneous large cohorts
+                              # keep their true per-site dispersion instead of being crushed onto
+                              # the near-binomial bulk -> no inflated FPR at overdispersed sites).
+                              # A fixed number forces a constant weight (1 = legacy behaviour).
                                # replicates (this data: phi~0.0007 -> null p<0.05 = 0.06, delta=0.10
                                # -> 60% sensitivity @ ~3.5% FDR). Genuinely overdispersed replicates
                                # need ~4; re-check on new data with a within-condition null contrast
