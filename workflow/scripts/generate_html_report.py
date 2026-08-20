@@ -117,6 +117,14 @@ COLUMN_DEFINITIONS = {
     "frac_canonical": "Fraction of the gene's junctions that are canonical GT-AG.",
     "has_noncanonical": "1 if the gene carries at least one non-canonical junction, else 0.",
     "intron_category": "Overall call for the gene: ALL_CANONICAL, CANONICAL_WITH_GC_AG, or HAS_NONCANONICAL.",
+    # --- coverage-independent PRIVATE-scan table ---
+    "carry_ZN": "The fragmentform (ZN) that carries the modification at this private site (highest modified fraction among the forms that contain the base).",
+    "carry_arch": "3' architecture label of the carrying fragmentform (IPA / TANDEM_APA / FULL_LENGTH / REFERENCE / ...).",
+    "carry_frac": "Pooled modified fraction of the site in the carrying fragmentform.",
+    "carry_cov": "Pooled coverage of the site in the carrying fragmentform.",
+    "n_forms_present": "Number of the gene's fragmentforms whose model contains the base (exonic).",
+    "n_forms_absent": "Number of the gene's fragmentforms whose model LACKS the base (intronic/absent, not the 5' blind spot) — the private evidence.",
+    "absent_in_ZN": "The fragmentform (ZN) indices that lack the base entirely (comma-separated).",
     # --- sequence-element tables ---
     "element_type": "The cis-element class scanned (PAS, ARE, CPE, GRE, G4, KOZAK, UORF, TOP, STOP_CONTEXT, M6AM).",
     "element_subclass": "Finer subclass of the element (e.g. the specific PAS hexamer or ARE variant).",
@@ -272,6 +280,7 @@ def parse_args():
     ap.add_argument("--zt-long", default="")
     ap.add_argument("--diff-results", default="")
     ap.add_argument("--diff-figs-dir", default="")
+    ap.add_argument("--private-sites", default="", help="{prefix}__ZN_site_private.tsv from the coverage-independent PRIVATE scan.")
     ap.add_argument("--classified-sites", default="",
                     help="{prefix}__ZN_site_classified.tsv from classify_diff_sites.py")
     ap.add_argument("--class-figs-dir", default="",
@@ -1138,43 +1147,60 @@ EVENT_DEFINITIONS = {
 }
 
 
-def build_classification_section(class_df, class_figs_dir, arch_figs_dir, max_figs_per_category, top_n):
-    """Tree view of the differential-site classification: 4 top-level buckets (PRIVATE / SHARED_LOCAL
-    / SHARED_DISTAL / UNEXPLAINABLE), each expanded into its structural events, each event into its
-    directions + sites + architecture-map figures. EVERY category is shown, including ones with zero
-    sites (reported as such), so the taxonomy is always complete."""
+def build_classification_section(class_df, private_df, class_figs_dir, arch_figs_dir, max_figs_per_category, top_n):
+    """Tree view of the differential-site classification. The PRIVATE bucket is sourced from the
+    coverage-INDEPENDENT private scan (private_df), which finds sites where the base is absent from
+    a fragmentform even when that form has no coverage there; the SHARED / UNEXPLAINABLE buckets come
+    from the differential test (class_df). Every bucket and event is always listed (with "No sites"
+    for empty ones)."""
     title = ("Classification of Transcript Architecture Changes Associated with Differential "
              "Epitranscriptomic Modification")
     intro = (
-        "Every significant between-fragmentform modification site (across all detected mod codes; "
-        "BH-FDR and the &gt;10% absolute-stoichiometry rule — tunable via classify_diffs.min_effect) "
-        "is placed in a tree. <b>Level 1</b>: does the base exist in the mature RNA of both forms — "
-        "<b>PRIVATE</b> (base only in the higher form) vs <b>SHARED</b>. <b>Level 2</b> (shared): is "
-        "the distinguishing structural change ON the base's exon (<b>SHARED_LOCAL</b>) or elsewhere "
-        "(<b>SHARED_DISTAL</b>)? A 4th bucket, <b>UNEXPLAINABLE</b>, holds sites with no confident "
-        "structural cause (5' blind spot, intron/soft-clip artifact, no model). Each site also "
-        "carries a direction (which form is higher), a structural size (structural_delta_nt), and a "
-        "stoichiometry tier."
+        "Sites are placed in a tree. <b>Level 1</b>: does the base exist in the mature RNA of both "
+        "forms — <b>PRIVATE</b> (base only in the higher form) vs <b>SHARED</b>. <b>Level 2</b> "
+        "(shared): is the distinguishing structural change ON the base's exon (<b>SHARED_LOCAL</b>) "
+        "or elsewhere (<b>SHARED_DISTAL</b>)? A 4th bucket, <b>UNEXPLAINABLE</b>, holds sites with no "
+        "confident structural cause. PRIVATE sites are detected by a COVERAGE-INDEPENDENT structural "
+        "scan (every modified site checked against all fragmentform models of its gene) — so they are "
+        "found even when the form lacking the base has no coverage there, which the differential test "
+        "cannot see; SHARED / UNEXPLAINABLE come from the between-fragmentform differential test "
+        "(BH-FDR + the &gt;10% effect rule, tunable via classify_diffs.min_effect)."
     )
-    if class_df is None or class_df.empty or "bucket" not in class_df.columns:
+    class_ok = class_df is not None and not class_df.empty and "bucket" in class_df.columns
+    priv_ok = private_df is not None and not private_df.empty and "bucket" in private_df.columns
+    if not class_ok and not priv_ok:
         return section(title, "<p class='muted'>No classified differential sites available.</p>", intro=intro)
 
-    total = len(class_df)
-    detail_cols = [c for c in [
+    SHARED_COLS = [c for c in [
         "gene_name", "mod_code", "chrom", "start0", "strand", "direction", "structural_delta_nt",
         "hi_ZN", "hi_arch", "hi_frac", "lo_ZN", "lo_arch", "lo_frac", "stoich_tier", "hi_stoich_level",
         "effect_max_abs_frac_diff", "p_adj_bh",
-    ] if c in class_df.columns]
+    ] if class_ok and c in class_df.columns]
+    PRIV_COLS = [c for c in [
+        "gene_name", "mod_code", "chrom", "start0", "strand", "direction", "structural_delta_nt",
+        "carry_ZN", "carry_arch", "carry_frac", "carry_cov", "n_forms_present", "n_forms_absent", "absent_in_ZN",
+    ] if priv_ok and c in private_df.columns]
+
+    def src_for(bucket):
+        return private_df if bucket == "PRIVATE" else class_df
+
+    def count(bucket, event=None):
+        df = src_for(bucket)
+        if df is None or df.empty or "bucket" not in df.columns:
+            return 0
+        m = df["bucket"] == bucket
+        if event is not None:
+            m &= df["event"] == event
+        return int(m.sum())
+
+    total = sum(count(b) for b in CLASS_BUCKET_ORDER) or 1
 
     # ---- overview: complete bucket x event count grid (zeros included) + a bucket distribution ----
-    rows = []
-    for bucket in CLASS_BUCKET_ORDER:
-        for event in CLASS_TAXONOMY[bucket]:
-            n = int(((class_df["bucket"] == bucket) & (class_df["event"] == event)).sum())
-            rows.append({"bucket": bucket, "event": event, "n_sites": n,
-                         "pct": f"{100.0 * n / total:.1f}%" if total else "0.0%"})
-    grid = pd.DataFrame(rows)
-    bucket_counts = {b: int((class_df["bucket"] == b).sum()) for b in CLASS_BUCKET_ORDER}
+    grid = pd.DataFrame([
+        {"bucket": b, "event": e, "n_sites": count(b, e), "pct": f"{100.0 * count(b, e) / total:.1f}%"}
+        for b in CLASS_BUCKET_ORDER for e in CLASS_TAXONOMY[b]
+    ])
+    bucket_counts = {b: count(b) for b in CLASS_BUCKET_ORDER}
     hero = category_distribution_png(bucket_counts, mod_label=None)
     hero_html = clickable_image_html(hero, "Classification by top-level bucket", figure_class="hero-figure",
                                      caption="Sites per top-level bucket.") if hero else ""
@@ -1188,31 +1214,35 @@ def build_classification_section(class_df, class_figs_dir, arch_figs_dir, max_fi
         "</div>"
     )
 
-    # ---- the tree: bucket -> event -> (direction summary + sites + figures) ----
+    # ---- the tree: bucket -> event -> (direction summary + sites [+ figures]) ----
     tree = []
     for bucket in CLASS_BUCKET_ORDER:
-        bdf = class_df[class_df["bucket"] == bucket]
+        df = src_for(bucket)
+        cols = PRIV_COLS if bucket == "PRIVATE" else SHARED_COLS
+        bdf = df[df["bucket"] == bucket] if (df is not None and not df.empty and "bucket" in df.columns) else pd.DataFrame()
         n_b = len(bdf)
         events_html = []
         for event in CLASS_TAXONOMY[bucket]:
-            edf = bdf[bdf["event"] == event]
+            edf = bdf[bdf["event"] == event] if not bdf.empty else bdf
             n_e = len(edf)
             if n_e == 0:
                 inner = "<p class='muted'>No sites in this category in this run.</p>"
             else:
-                dirs = edf["direction"].fillna("").replace("", "—").value_counts().to_dict()
-                dir_line = "<p><b>direction:</b> " + " &nbsp;·&nbsp; ".join(
-                    f"<b>{int(v)}</b> {html.escape(str(k))}" for k, v in dirs.items()) + "</p>"
-                srt = edf.sort_values("effect_max_abs_frac_diff", ascending=False) \
-                    if "effect_max_abs_frac_diff" in edf.columns else edf
-                tbl = df_to_html(srt[detail_cols] if detail_cols else srt, max_rows=top_n)
+                dirs = edf["direction"].fillna("").replace("", "—").value_counts().to_dict() if "direction" in edf.columns else {}
+                dir_line = ("<p><b>direction:</b> " + " &nbsp;·&nbsp; ".join(
+                    f"<b>{int(v)}</b> {html.escape(str(k))}" for k, v in dirs.items()) + "</p>") if dirs else ""
+                sort_col = "carry_frac" if bucket == "PRIVATE" else "effect_max_abs_frac_diff"
+                srt = edf.sort_values(sort_col, ascending=False) if sort_col in edf.columns else edf
+                tbl = df_to_html(srt[cols] if cols else srt, max_rows=top_n)
                 figs = ""
-                for ck in edf["class_key"].dropna().unique():
-                    figs += category_figure_gallery(arch_figs_dir, ck, max_figs_per_category,
-                                                    summary_label="isoform architecture map(s) — exon/intron tracks, site marked",
-                                                    open_by_default=False)
-                    figs += category_figure_gallery(class_figs_dir, ck, max_figs_per_category)
-                inner = dir_line + tbl + figs
+                if bucket != "PRIVATE" and "class_key" in edf.columns:
+                    for ck in edf["class_key"].dropna().unique():
+                        figs += category_figure_gallery(arch_figs_dir, ck, max_figs_per_category,
+                                                        summary_label="isoform architecture map(s) — exon/intron tracks, site marked",
+                                                        open_by_default=False)
+                        figs += category_figure_gallery(class_figs_dir, ck, max_figs_per_category)
+                defs = definitions_html(column_definitions(cols), summary="Column definitions") if cols else ""
+                inner = dir_line + defs + tbl + figs
             defn = EVENT_DEFINITIONS.get(event, "")
             events_html.append(
                 "<details class='report-subtree'>"
@@ -1558,8 +1588,9 @@ def main():
         definitions=definitions_html(column_definitions(diff_cols), summary="Result-column definitions") if diff_cols else "",
     )
 
+    private_df = read_tsv(args.private_sites) if getattr(args, "private_sites", "") else pd.DataFrame()
     sec_class = build_classification_section(
-        classified_df, args.class_figs_dir, args.arch_figs_dir,
+        classified_df, private_df, args.class_figs_dir, args.arch_figs_dir,
         args.max_class_figs_per_category, args.max_class_figs_per_category,
     )
 

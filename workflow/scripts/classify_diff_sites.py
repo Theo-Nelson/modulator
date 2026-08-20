@@ -452,6 +452,77 @@ CATEGORY_ORDER = [
 ]
 
 
+def scan_private_sites(zn_long_path, iso, genes, *, min_frac, min_cov):
+    """Coverage-INDEPENDENT PRIVATE detection.
+
+    The differential test only reaches a site when >=2 fragmentforms are covered there, so a base
+    that is genuinely ABSENT from a fragmentform (the cleanest private events) is never tested. This
+    scan bypasses that: for every modified site carried by >=1 fragmentform (frac>=min_frac & pooled
+    cov>=min_cov, exonic there), it checks the base's status by transcript-MODEL coordinates in every
+    OTHER fragmentform of the gene. If the base is intronic/absent (and not in the 5' blind spot) in
+    >=1 other form, the site is PRIVATE -- reported without requiring the absent form to have any
+    coverage. Returns (rows, out_cols)."""
+    out_cols = ['gene_name', 'mod_code', 'chrom', 'start0', 'end0', 'strand',
+                'bucket', 'event', 'direction', 'structural_delta_nt',
+                'carry_ZN', 'carry_arch', 'carry_frac', 'carry_cov',
+                'n_forms_present', 'n_forms_absent', 'absent_in_ZN']
+    agg = defaultdict(lambda: [0, 0])   # (gene,zn,chrom,start0,strand,mod) -> [Nmod, Ncov]
+    with open(zn_long_path) as fh:
+        rd = csv.DictReader(fh, delimiter='\t')
+        for r in rd:
+            try:
+                nm = int(float(r['Nmod'])); nc = int(float(r['Nvalid_cov']))
+            except (KeyError, ValueError, TypeError):
+                continue
+            k = (r.get('gene_name', ''), str(r['ZN_transcript_index']), r['chrom'],
+                 int(r['start0']), r['strand'], r['mod_code'])
+            a = agg[k]; a[0] += nm; a[1] += nc
+    sites = defaultdict(dict)
+    for (g, zn, chrom, s0, strand, mod), (nm, nc) in agg.items():
+        if nc > 0:
+            sites[(g, chrom, s0, strand, mod)][zn] = (nm / nc, nc)
+
+    rows = []
+    for (g, chrom, s0, strand, mod), zdict in sites.items():
+        pos = s0 + 1  # 1-based, to match the GTF exon coords used by status_in
+        gene_zns = [str(z) for z in genes.get(g, []) if (g, str(z)) in iso]
+        if len(gene_zns) < 2:
+            continue
+        present, absent = [], []
+        for z in gene_zns:
+            exons = iso[(g, z)]['exons']
+            st = status_in(exons, strand, pos)
+            if st in ('exonic_terminal', 'exonic_internal'):
+                present.append(z)
+            elif st in ('intronic', 'absent'):
+                blind = pos <= exons[0][1] if strand == '+' else pos >= exons[-1][0]
+                if not blind:
+                    absent.append(z)
+        if not absent:
+            continue
+        carriers = [(z, zdict[z][0], zdict[z][1]) for z in present
+                    if z in zdict and zdict[z][0] >= min_frac and zdict[z][1] >= min_cov]
+        if not carriers:
+            continue
+        carriers.sort(key=lambda t: t[1], reverse=True)   # highest modified fraction first
+        cz, cfrac, ccov = carriers[0]
+        ihi = iso[(g, cz)]; sh = status_in(ihi['exons'], strand, pos)
+        if ihi['arch'] == 'IPA' and sh == 'exonic_terminal':
+            event, direction, delta = 'INTRONIC_POLYA', 'IPA_TRANSCRIPT_HIGHER', ''
+        elif sh == 'exonic_terminal':
+            event, direction = 'ALT_LAST_EXON', ''
+            th = terminal_exon(ihi['exons'], strand); tl = terminal_exon(iso[(g, absent[0])]['exons'], strand)
+            delta = exon_gap(th, tl)
+            direction = 'LONGER_EXON_HIGHER' if (th[1] - th[0]) >= (tl[1] - tl[0]) else 'SHORTER_EXON_HIGHER'
+        else:
+            e = _exon_containing(ihi['exons'], pos)
+            event, direction, delta = 'SKIPPED_EXON', 'WITH_EXON_HIGHER', (e[1] - e[0]) if e else ''
+        rows.append([g, mod, chrom, s0, s0 + 1, strand, 'PRIVATE', event, direction, delta,
+                     cz, ihi['arch'], f"{cfrac:.4f}", ccov, len(present), len(absent), ','.join(absent)])
+    rows.sort(key=lambda x: (x[7], x[0], x[3]))
+    return rows, out_cols
+
+
 def parse_args():
     ap = argparse.ArgumentParser(description="Granular structural classification of ZN diff sites.")
     ap.add_argument("--diff-tsv", required=True, help="{prefix}__ZN_site_diff_results.tsv")
@@ -467,6 +538,17 @@ def parse_args():
     ap.add_argument("--min-cov", type=int, default=0,
                     help="extra per-isoform Ncov floor on the JSON entries (the diff "
                          "table is already coverage-filtered by test_diffs --min-cov). Default 0")
+    # --- coverage-independent PRIVATE-site scan (does not need the differential test; reuses
+    # --zn-long defined below for the FILTERED_sites_long table) ---
+    ap.add_argument("--private-out-tsv", default="",
+                    help="output TSV for the coverage-independent PRIVATE-site scan: every modified "
+                         "site is checked structurally against ALL fragmentforms of its gene, so "
+                         "private events are found even when the form lacking the base has no coverage "
+                         "there (the differential test cannot see those). Needs --zn-long.")
+    ap.add_argument("--private-min-frac", type=float, default=0.10,
+                    help="min modified fraction for a fragmentform to 'carry' the site in the PRIVATE scan.")
+    ap.add_argument("--private-min-cov", type=int, default=20,
+                    help="min pooled coverage in the carrying fragmentform for the PRIVATE scan.")
     ap.add_argument("--tes-tol", type=int, default=25,
                     help="TES match tolerance (bp); matches assembler.tes_match_tol. Default 25 "
                          "(was 200, which lumped sub-200bp tandem-APA into SHARED_TERMINAL_EXON).")
@@ -879,6 +961,21 @@ def main():
         w = csv.writer(out, delimiter='\t')
         w.writerow(out_cols)
         w.writerows(rows)
+
+    # --- coverage-independent PRIVATE-site scan (separate table; not gated by the differential test)
+    if args.private_out_tsv and args.zn_long and os.path.exists(args.zn_long):
+        priv_rows, priv_cols = scan_private_sites(
+            args.zn_long, iso, genes,
+            min_frac=args.private_min_frac, min_cov=args.private_min_cov)
+        os.makedirs(os.path.dirname(args.private_out_tsv) or '.', exist_ok=True)
+        with open(args.private_out_tsv, 'w', newline='') as out:
+            w = csv.writer(out, delimiter='\t')
+            w.writerow(priv_cols)
+            w.writerows(priv_rows)
+        from collections import Counter as _C
+        pc = _C(r[7] for r in priv_rows)
+        print(f"[ok] wrote {args.private_out_tsv}: {len(priv_rows)} PRIVATE sites "
+              f"(coverage-independent scan)  " + " ".join(f"{k}={v}" for k, v in pc.items()))
 
     if args.figs_dir and args.zn_long:
         render_category_figures(fig_records, args.zn_long, args.figs_dir,

@@ -201,6 +201,10 @@ class PipelinePaths:
         return self.test_diffs / f"{self.prefix}__ZN_site_classified.tsv"
 
     @property
+    def zn_site_private(self) -> Path:
+        return self.test_diffs / f"{self.prefix}__ZN_site_private.tsv"
+
+    @property
     def zn_diff_figs(self) -> Path:
         return self.test_diffs / f"{self.prefix}__figs"
 
@@ -1338,6 +1342,15 @@ class ModulatorPipeline:
             "--intergenic-gap", str(cfg.get("intergenic_gap", 1000)),
             "--verbose",
         ]
+        # Coverage-independent PRIVATE-site scan (needs the FILTERED long table; independent of the
+        # differential test and of figures).
+        if self.paths.zn_filtered_long.exists():
+            args.extend([
+                "--zn-long", str(self.paths.zn_filtered_long),
+                "--private-out-tsv", str(self.paths.zn_site_private),
+                "--private-min-frac", str(cfg.get("private_min_frac", 0.10)),
+                "--private-min-cov", str(cfg.get("private_min_cov", 20)),
+            ])
         if as_bool(cfg.get("figures", True), True):
             # Isoform architecture-map figures are the PRIMARY per-category figure.
             # They are built from the GTF isoform models + the diff table's
@@ -1346,12 +1359,10 @@ class ModulatorPipeline:
                 "--arch-figs-dir", str(self.paths.zn_class_figs_arch),
                 "--figs-per-category", str(int(cfg.get("figs_per_category", 10))),
             ])
-            # The 2-panel per-sample stoichiometry figures additionally need --zn-long.
+            # The 2-panel per-sample stoichiometry figures additionally need --figs-dir (--zn-long
+            # is already added above for the PRIVATE scan).
             if self.paths.zn_filtered_long.exists():
-                args.extend([
-                    "--zn-long", str(self.paths.zn_filtered_long),
-                    "--figs-dir", str(self.paths.zn_class_figs),
-                ])
+                args.extend(["--figs-dir", str(self.paths.zn_class_figs)])
         mod_filter = cfg.get("mod_filter")
         if mod_filter is None:
             mod_filter = self.config.get("test_diffs", {}).get("mod_filter")
@@ -1952,6 +1963,7 @@ class ModulatorPipeline:
             "--diff-results", str(self.paths.zn_diff_results) if self.paths.zn_diff_results.exists() else "",
             "--diff-figs-dir", str(self.paths.zn_diff_figs) if self.paths.zn_diff_figs.exists() else "",
             "--classified-sites", str(self.paths.zn_site_classified) if self.paths.zn_site_classified.exists() else "",
+            "--private-sites", str(self.paths.zn_site_private) if self.paths.zn_site_private.exists() else "",
             "--class-figs-dir", str(self.paths.zn_class_figs) if self.paths.zn_class_figs.exists() else "",
             "--arch-figs-dir", str(self.paths.zn_class_figs_arch) if self.paths.zn_class_figs_arch.exists() else "",
             "--max-class-figs-per-category", str(int(report_cfg.get("max_class_figs_per_category", 10))),
