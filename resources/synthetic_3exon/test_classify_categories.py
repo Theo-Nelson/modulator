@@ -28,75 +28,44 @@ CHROM = "chrUnit"
 SCRIPT = Path(__file__).resolve().parents[2] / "workflow" / "scripts" / "classify_diff_sites.py"
 
 # Each case: gene -> isoforms {zn: (exons[list of 1-based (s,e)], tes, read_support)},
-# the differential-site 1-based base, which zn is hi (high m6A) vs lo, and the
-# expected STRUCTURAL category (the mapped mechanism the classifier outputs).
+# the differential-site 1-based base, which zn is hi (high m6A) vs lo, and the expected
+# (bucket, event) the tree classifier (classify_tree) should return. All cases are + strand.
 CASES = [
-    # name, isoforms, site(1based), hi, lo, expected_structural
-    ("CASSETTE_EXON",              # exon-skip, site in skipped cassette
-     {1: ([(1000, 1200), (2000, 2200), (3000, 3500)], 3500, 40),
-      2: ([(1000, 1200), (3000, 3500)], 3500, 200)},           # skip = anchor (higher rs)
-     2100, 1, 2, "CASSETTE_EXON"),
+    # name, isoforms, site(1based), hi, lo, expected_bucket, expected_event
+    ("PRIVATE_SKIPPED_EXON",        # base in a cassette exon present in hi, skipped (intronic) in lo
+     {1: ([(1000, 1200), (2000, 2200), (3000, 3500)], 3500, 100),
+      2: ([(1000, 1200), (3000, 3500)], 3500, 100)},
+     2100, 1, 2, "PRIVATE", "SKIPPED_EXON"),
 
-    ("INTRONIC_POLYADENYLATION_UNIQUE",  # hi is an IPA form, site in its intron-derived terminal exon
-     {1: ([(1000, 1200), (2000, 2200), (3000, 3500)], 3500, 200),
-      2: ([(1000, 1200), (2000, 2600)], 2600, 60)},
-     2400, 2, 1, "INTRONIC_POLYADENYLATION"),
+    ("PRIVATE_ALT_LAST_EXON",       # base in hi's distal terminal exon, absent from lo entirely
+     {1: ([(1000, 1200), (2000, 2500), (5000, 6000)], 6000, 100),
+      2: ([(1000, 1200), (2000, 3500)], 3500, 100)},
+     5500, 1, 2, "PRIVATE", "ALT_LAST_EXON"),
 
-    ("INTRONIC_POLYADENYLATION_SHARED_EJC",  # IPA form terminalizes a base internal to the anchor
-     {1: ([(1000, 1200), (2000, 2200), (3000, 3500)], 3500, 200),
-      2: ([(1000, 1200), (2000, 2400)], 2400, 60)},
-     2100, 2, 1, "INTRONIC_POLYADENYLATION"),
+    ("SHARED_LOCAL_ALT_ACCEPTOR",   # base's exon shares its donor but uses a different acceptor (5' start)
+     {1: ([(1000, 1200), (2000, 2500), (3000, 3500)], 3500, 100),
+      2: ([(1000, 1200), (2100, 2500), (3000, 3500)], 3500, 100)},
+     2300, 1, 2, "SHARED_LOCAL", "ALT_ACCEPTOR"),
 
-    ("EJC_SPLICING",               # read-through hi vs spliced lo, junction near site in lo
-     {1: ([(1000, 1200), (2000, 3000)], 3000, 60),
-      2: ([(1000, 1200), (2000, 2400), (2550, 3000)], 3000, 200)},
-     2600, 1, 2, "EJC_SPLICING"),
+    ("SHARED_LOCAL_ALT_DONOR",      # base's exon shares its acceptor but uses a different donor (3' end)
+     {1: ([(1000, 1200), (2000, 2500), (3000, 3500)], 3500, 100),
+      2: ([(1000, 1200), (2000, 2400), (3000, 3500)], 3500, 100)},
+     2200, 1, 2, "SHARED_LOCAL", "ALT_DONOR"),
 
-    ("TANDEM_APA_distal_only",     # site only in the distal isoform's extended 3'UTR
-     {1: ([(1000, 1200), (2000, 3000)], 3000, 200),
-      2: ([(1000, 1200), (2000, 2500)], 2500, 60)},
-     2800, 1, 2, "TANDEM_APA"),
-
-    ("TANDEM_APA_proximal_favored",  # same acceptor, different TES, proximal isoform hi
+    ("SHARED_LOCAL_ALT_POLYA_SITE", # both in the last exon, same acceptor, different poly(A) site
      {1: ([(1000, 1200), (2000, 2500)], 2500, 100),
       2: ([(1000, 1200), (2000, 3000)], 3000, 100)},
-     2300, 1, 2, "TANDEM_APA"),
+     2300, 1, 2, "SHARED_LOCAL", "ALT_POLYA_SITE"),
 
-    ("TANDEM_APA_distal_favored",    # same geometry, distal isoform hi
-     {1: ([(1000, 1200), (2000, 2500)], 2500, 100),
-      2: ([(1000, 1200), (2000, 3000)], 3000, 100)},
-     2300, 2, 1, "TANDEM_APA"),
-
-    ("ALTERNATIVE_LAST_EXON",      # different (overlapping) last-exon acceptors
-     {1: ([(1000, 1200), (2000, 2600)], 2600, 100),
-      2: ([(1000, 1200), (2100, 2600)], 2600, 100)},
-     2400, 1, 2, "ALTERNATIVE_LAST_EXON"),
-
-    ("INTERGENIC_TERMINAL_EXON",   # hi terminal exon far downstream & disjoint
-     {1: ([(1000, 1200), (2000, 2500), (5000, 6000)], 6000, 200),
-      2: ([(1000, 1200), (2000, 3500)], 3500, 60)},
-     5500, 1, 2, "INTERGENIC_TERMINAL_EXON"),
-
-    ("SHARED_TERMINAL_EXON",       # same terminal exon + same TES, differ only 5'
+    ("SHARED_DISTAL_CHANGE",        # base's exon identical in both; forms differ only in the 5' exon
      {1: ([(1000, 1200), (2000, 2200), (3000, 3500)], 3500, 100),
       2: ([(1500, 1700), (2000, 2200), (3000, 3500)], 3500, 100)},
-     3200, 1, 2, "SHARED_TERMINAL_EXON"),
+     3200, 1, 2, "SHARED_DISTAL", "DISTAL_CHANGE"),
 
-    ("SHARED_INTERNAL_EXON",       # site in a shared internal exon, symmetric junctions
-     {1: ([(1000, 1200), (2000, 2600), (3000, 3500)], 3500, 100),
-      2: ([(1000, 1200), (2000, 2600), (3000, 3200)], 3200, 100)},
-     2300, 1, 2, "SHARED_INTERNAL_EXON"),
-
-    ("UNEXPLAINED",                # terminal in hi & anchor, internal in lo, no nearby junction
-     {1: ([(1000, 1200), (2000, 3500)], 3500, 100),
-      2: ([(1000, 1200), (2000, 3000)], 3000, 100),
-      3: ([(1000, 1200), (2000, 2700), (2900, 3200)], 3200, 100)},
-     2500, 2, 3, "UNEXPLAINED"),
-
-    ("ARTIFACT",                   # highest-m6A isoform does not contain the base (intronic)
+    ("UNEXPLAINABLE_INTRON_READ",   # the higher-m6A form does not structurally contain the base (intronic)
      {1: ([(1000, 1200), (3000, 3500)], 3500, 100),
       2: ([(1000, 1200), (2000, 2200), (3000, 3500)], 3500, 100)},
-     2000, 1, 2, "ARTIFACT"),
+     2000, 1, 2, "UNEXPLAINABLE", "INTRON_READ_ARTIFACT"),
 ]
 
 
@@ -116,7 +85,7 @@ def write_gtf(path: Path):
 
 def write_diff(path: Path):
     rows = []
-    for name, isos, site1, hi, lo, _exp in CASES:
+    for name, isos, site1, hi, lo, _bkt, _evt in CASES:
         start0 = site1 - 1
         per_tx = []
         for zn in isos:
@@ -142,17 +111,18 @@ def main():
         subprocess.run([sys.executable, str(SCRIPT), "--diff-tsv", str(diff),
                         "--gtf", str(gtf), "--out-tsv", str(out)],
                        check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-        got = pd.read_csv(out, sep="\t").set_index("gene_name")["structural_category"].to_dict()
+        df = pd.read_csv(out, sep="\t").set_index("gene_name")
+        got = {g: (df.loc[g, "bucket"], df.loc[g, "event"]) for g in df.index}
 
     n_pass = n_fail = 0
-    print(f"  {'case':<34} {'expected':<26} {'got':<26} ok")
-    for name, _isos, _s, _hi, _lo, exp in CASES:
-        g = got.get(name, "<missing>")
-        ok = (g == exp)
+    print(f"  {'case':<30} {'expected (bucket/event)':<34} {'got':<34} ok")
+    for name, _isos, _s, _hi, _lo, exp_b, exp_e in CASES:
+        g = got.get(name, ("<missing>", ""))
+        ok = (g == (exp_b, exp_e))
         n_pass += ok
         n_fail += (not ok)
-        print(f"  {name:<34} {exp:<26} {g:<26} {'PASS' if ok else '**FAIL**'}")
-    print(f"\nclassify taxonomy: {n_pass}/{len(CASES)} categories correct"
+        print(f"  {name:<30} {exp_b+'/'+exp_e:<34} {g[0]+'/'+str(g[1]):<34} {'PASS' if ok else '**FAIL**'}")
+    print(f"\nclassify tree taxonomy: {n_pass}/{len(CASES)} cases correct"
           + ("" if not n_fail else f"  ({n_fail} FAILED)"))
     sys.exit(1 if n_fail else 0)
 

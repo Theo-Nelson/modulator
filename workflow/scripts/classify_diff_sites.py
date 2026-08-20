@@ -317,81 +317,129 @@ def exon_gap(a, b):
     return 0
 
 
-def classify(gene, pos, hiZN, loZN, anchorZN, iso, *, tes_tol, inside_tol,
-             ejc_nt, intergenic_gap):
-    ihi = iso[(gene, hiZN)]; ilo = iso[(gene, loZN)]; ianc = iso[(gene, anchorZN)]
+# =============================================================================
+# Taxonomy tree (4 top-level buckets):
+#   PRIVATE        - the modified base exists (exonically) ONLY in the higher fragmentform; the
+#                    difference is trivial (the base is physically absent from the lower form).
+#   SHARED_LOCAL   - base exonic in BOTH; the distinguishing structural change is ON / adjacent to
+#                    the base's own exon.
+#   SHARED_DISTAL  - base exonic in both, in an identical local context; the forms differ only
+#                    ELSEWHERE, so the modification tracks isoform identity.
+#   UNEXPLAINABLE  - cannot be attributed structurally (5' blind spot, intron-read/soft-clip
+#                    artifact, or no usable isoform model).
+# class_key = BUCKET__EVENT__DIRECTION
+# =============================================================================
+TAXONOMY = {
+    "PRIVATE":       ["SKIPPED_EXON", "INTRONIC_POLYA", "ALT_LAST_EXON"],
+    "SHARED_LOCAL":  ["ALT_DONOR", "ALT_ACCEPTOR", "ALT_POLYA_SITE", "NEAR_ALT_JUNCTION"],
+    "SHARED_DISTAL": ["DISTAL_CHANGE"],
+    "UNEXPLAINABLE": ["FIVE_PRIME_UNCERTAIN", "INTRON_READ_ARTIFACT", "NO_MODEL", "UNRESOLVED"],
+}
+BUCKET_ORDER = ["PRIVATE", "SHARED_LOCAL", "SHARED_DISTAL", "UNEXPLAINABLE"]
+
+
+def _exon_containing(exons, pos):
+    for (s, e) in exons:
+        if s <= pos <= e:
+            return (s, e)
+    return None
+
+
+def _exon_index(exons, pos):
+    for i, (s, e) in enumerate(exons):
+        if s <= pos <= e:
+            return i
+    return None
+
+
+def _is_last_exon(exons, strand, idx):
+    return idx == (len(exons) - 1 if strand == '+' else 0)
+
+
+def _is_first_exon(exons, strand, idx):
+    return idx == (0 if strand == '+' else len(exons) - 1)
+
+
+def classify_tree(gene, pos, hiZN, loZN, iso, *, tes_tol, ejc_nt):
+    """Assign the site to (bucket, event, direction). Uses only transcript-MODEL coordinates -- a
+    PRIVATE call means the base is intronic/absent in the low form's assembled model (no spanning-
+    read requirement), guarded only against the 5' blind spot where the model is unreliable."""
+    ihi = iso[(gene, hiZN)]; ilo = iso[(gene, loZN)]
     strand = ihi['strand']
     sh = status_in(ihi['exons'], strand, pos)
     sl = status_in(ilo['exons'], strand, pos)
-    sa = status_in(ianc['exons'], strand, pos)
-    a_hi = ihi['arch']
-    jd_hi = dist_to_junction(ihi['exons'], pos)
-    jd_lo = dist_to_junction(ilo['exons'], pos)
-    jd_anc = dist_to_junction(ianc['exons'], pos)
-    same_tes_hl = abs(ihi['tes'] - ilo['tes']) <= tes_tol
-    out = dict(status_hi=sh, status_lo=sl, status_anchor=sa, jd_hi=jd_hi, jd_lo=jd_lo)
+    info = dict(status_hi=sh, status_lo=sl,
+                jd_hi=dist_to_junction(ihi['exons'], pos),
+                jd_lo=dist_to_junction(ilo['exons'], pos), delta_nt='')
 
-    # the high-m6A isoform must structurally contain the A; else it's intron-read
+    # (0) the high (more-modified) form must structurally contain the base; else it is an intron /
+    # soft-clip read artifact, not a real exonic modification.
     if sh not in ('exonic_terminal', 'exonic_internal'):
-        return 'HI_INTRONIC_ARTIFACT', out
+        return 'UNEXPLAINABLE', 'INTRON_READ_ARTIFACT', '', info
 
-    th = terminal_exon(ihi['exons'], strand)
-    tl = terminal_exon(ilo['exons'], strand)
-    ta = terminal_exon(ianc['exons'], strand)
+    # ---- LEVEL 1: PRIVATE (base intronic/absent in the low form, by model coordinates) ----
+    if sl in ('intronic', 'absent'):
+        # 5' guard: an "absent" call 5' of the low model's own 5' end is truncation, not real
+        # absence -- we can't trust the model there. Everything else (intronic, or absent past the
+        # reliable 3' end) is a genuine private call.
+        lo5 = ilo['exons'][0][0] if strand == '+' else ilo['exons'][-1][1]
+        truncated_5p = (pos < lo5) if strand == '+' else (pos > lo5)
+        if sl == 'absent' and truncated_5p:
+            return 'UNEXPLAINABLE', 'FIVE_PRIME_UNCERTAIN', '', info
+        if ihi['arch'] == 'IPA' and sh == 'exonic_terminal':
+            return 'PRIVATE', 'INTRONIC_POLYA', 'IPA_TRANSCRIPT_HIGHER', info
+        if sh == 'exonic_terminal':
+            th, tl = terminal_exon(ihi['exons'], strand), terminal_exon(ilo['exons'], strand)
+            info['delta_nt'] = exon_gap(th, tl)
+            d = 'LONGER_EXON_HIGHER' if (th[1] - th[0]) >= (tl[1] - tl[0]) else 'SHORTER_EXON_HIGHER'
+            return 'PRIVATE', 'ALT_LAST_EXON', d, info
+        ehi = _exon_containing(ihi['exons'], pos)
+        if ehi:
+            info['delta_nt'] = ehi[1] - ehi[0]
+        return 'PRIVATE', 'SKIPPED_EXON', 'WITH_EXON_HIGHER', info
 
-    # NEW: intergenic-scale separate terminal exon. The site is in a non-IPA high
-    # isoform's terminal exon, and that terminal exon is genomically DISJOINT from
-    # (and far from) the comparator's terminal exon -> the contrast spans
-    # spatially-separated terminal exons, not a local 3'UTR/ALE effect. Gated to
-    # NOT steal genuine IPA (which is intron-derived but biologically distinct).
-    if sh == 'exonic_terminal' and a_hi != 'IPA':
-        gap_hl = exon_gap(th, tl)
-        gap_ha = exon_gap(th, ta)
-        disjoint_hl = (th[1] < tl[0] or tl[1] < th[0])
-        disjoint_ha = (th[1] < ta[0] or ta[1] < th[0])
-        if (disjoint_hl and gap_hl >= intergenic_gap) or \
-           (disjoint_ha and gap_ha >= intergenic_gap):
-            return 'INTERGENIC_TERMINAL_EXON', out
+    # ---- base is SHARED (exonic in both). LEVEL 2: LOCAL vs DISTAL ----
+    ehi = _exon_containing(ihi['exons'], pos); elo = _exon_containing(ilo['exons'], pos)
+    ihx = _exon_index(ihi['exons'], pos); ilx = _exon_index(ilo['exons'], pos)
+    hi_last = _is_last_exon(ihi['exons'], strand, ihx); lo_last = _is_last_exon(ilo['exons'], strand, ilx)
+    hi_first = _is_first_exon(ihi['exons'], strand, ihx); lo_first = _is_first_exon(ilo['exons'], strand, ilx)
 
-    # ---- A is NOT in the long (anchor) mature transcript: PRIVATE to high ----
-    if sa in ('intronic', 'absent'):
-        if a_hi == 'IPA' and sh == 'exonic_terminal':
-            return 'IPA_UNIQUE', out
-        return 'SPLICED_EXON_UNIQUE', out
+    # 3'UTR-length polarity of the higher form (used by the shared events)
+    ht, lt = ihi['tes'], ilo['tes']
+    if ht is None or lt is None or abs(ht - lt) <= tes_tol:
+        polar = 'CO_TERMINAL_HIGHER'
+    elif is_proximal(ht, lt, strand):
+        polar = 'PROXIMAL_HIGHER'
+    else:
+        polar = 'DISTAL_HIGHER'
 
-    # ---- A IS in the anchor; check the proximal comparator ----
-    if sl == 'absent':
-        return 'LAST_EXON_DISTAL_ONLY', out
-    if sl == 'intronic':
-        return 'SPLICED_EXON_UNIQUE', out
+    # (a) same last exon, different poly(A) site -> ALT_POLYA_SITE
+    if hi_last and lo_last and ht is not None and lt is not None and abs(ht - lt) > tes_tol:
+        info['delta_nt'] = abs(ht - lt)
+        return 'SHARED_LOCAL', 'ALT_POLYA_SITE', polar, info
 
-    # ---- A SHARED & exonic in hi, lo and anchor ----
-    # (1) terminalization: terminal in hi, INTERNAL in the long anchor
-    if sh == 'exonic_terminal' and sa == 'exonic_internal':
-        if a_hi == 'IPA':
-            return 'IPA_SHARED_EJC', out
-        return 'SPLICING_EJC', out
+    # (b) the base's exon has a shifted acceptor / donor boundary (internal splice junctions only:
+    # the 5' end is the blind spot; the 3' end is the poly(A) site handled in (a)).
+    if ehi and elo:
+        if strand == '+':
+            acc_hi, acc_lo, don_hi, don_lo = ehi[0], elo[0], ehi[1], elo[1]
+        else:
+            acc_hi, acc_lo, don_hi, don_lo = ehi[1], elo[1], ehi[0], elo[0]
+        exon_dir = 'LONGER_EXON_HIGHER' if (ehi[1] - ehi[0]) >= (elo[1] - elo[0]) else 'SHORTER_EXON_HIGHER'
+        if not (hi_first or lo_first) and acc_hi != acc_lo:
+            info['delta_nt'] = abs(acc_hi - acc_lo)
+            return 'SHARED_LOCAL', 'ALT_ACCEPTOR', exon_dir, info
+        if not (hi_last or lo_last) and don_hi != don_lo:
+            info['delta_nt'] = abs(don_hi - don_lo)
+            return 'SHARED_LOCAL', 'ALT_DONOR', exon_dir, info
 
-    # (2) EJC by junction proximity
-    if jd_hi > ejc_nt and min(jd_lo, jd_anc) <= ejc_nt:
-        return 'SPLICING_EJC', out
+    # (c) base near a junction present in one form but not the other (EJC window) -> NEAR_ALT_JUNCTION
+    if (info['jd_hi'] <= ejc_nt) != (info['jd_lo'] <= ejc_nt):
+        d = 'JUNCTION_REMOVED_HIGHER' if info['jd_hi'] > ejc_nt else 'JUNCTION_PRESENT_HIGHER'
+        return 'SHARED_LOCAL', 'NEAR_ALT_JUNCTION', d, info
 
-    # (3) internal in hi (CDS / shared internal exon), no junction asymmetry
-    if sh == 'exonic_internal':
-        return 'SHARED_INTERNAL_EXON', out
-
-    # (4) terminal in hi & lo -> a 3'UTR site; classify the 3'-end geometry
-    if sl == 'exonic_terminal':
-        if same_last_exon_start(th, tl, strand, inside_tol):
-            if same_tes_hl:
-                return 'SHARED_TERMINAL_EXON', out
-            if is_proximal(ihi['tes'], ilo['tes'], strand):
-                return 'LAST_EXON_PROXIMAL_APA_FAVORED', out
-            return 'LAST_EXON_DISTAL_APA_FAVORED', out
-        return 'ALTERNATIVE_LAST_EXON', out
-
-    # (5) genuine leftover
-    return 'UNEXPLAINED_SHARED', out
+    # (d) the base's exon is identical in both -> the structural difference is DISTAL
+    return 'SHARED_DISTAL', 'DISTAL_CHANGE', polar, info
 
 
 CATEGORY_ORDER = [
@@ -747,10 +795,10 @@ def main():
 
     out_cols = [
         'gene_name', 'mod_code', 'chrom', 'start0', 'end0', 'strand',
-        'class_key', 'n_tx_tested', 'effect_max_abs_frac_diff', 'p_adj_bh',
+        'class_key', 'bucket', 'event', 'direction', 'structural_delta_nt',
+        'n_tx_tested', 'effect_max_abs_frac_diff', 'p_adj_bh',
         'hi_ZN', 'hi_arch', 'hi_frac', 'lo_ZN', 'lo_arch', 'lo_frac', 'anchor_ZN',
-        'status_hi', 'status_lo', 'status_anchor', 'jd_hi', 'jd_lo',
-        'structural_category', 'stoich_direction', 'stoich_direction_ctx',
+        'status_hi', 'status_lo', 'jd_hi', 'jd_lo',
         'stoich_tier', 'hi_stoich_level',
     ]
     rows = []
@@ -784,52 +832,44 @@ def main():
                   and (gene, str(t['ZN'])) in iso]
         if len(cov_tx) < 2:
             n_no_model += 1
-            counts['UNCLASSIFIED'] += 1
+            ck = 'UNEXPLAINABLE__NO_MODEL'
+            counts[ck] += 1
             rows.append([gene, mod, r['chrom'], pos, r.get('end0', pos + 1), strand,
-                         'UNCLASSIFIED', r.get('n_tx_tested', ''), f"{eff:.4f}", f"{padj:.3e}",
-                         '', '', '', '', '', '', '', '', '', '', '', '',
-                         'UNCLASSIFIED', '', '', '', ''])
+                         ck, 'UNEXPLAINABLE', 'NO_MODEL', '', '',
+                         r.get('n_tx_tested', ''), f"{eff:.4f}", f"{padj:.3e}",
+                         '', '', '', '', '', '', '',
+                         '', '', '', '', '', ''])
             continue
         hi = max(cov_tx, key=lambda t: t['frac'])
         lo = min(cov_tx, key=lambda t: t['frac'])
         hiZN = str(hi['ZN']); loZN = str(lo['ZN'])
         anchorZN = anchor_of(gene, genes[gene], iso)
-        if anchorZN is None:
-            cat, info = 'UNCLASSIFIED', dict(status_hi='', status_lo='', status_anchor='',
-                                             jd_hi='', jd_lo='')
-        else:
-            cat, info = classify(gene, cpos, hiZN, loZN, anchorZN, iso,
-                                  tes_tol=args.tes_tol, inside_tol=args.inside_tol,
-                                  ejc_nt=args.ejc_nt, intergenic_gap=args.intergenic_gap)
-        # The primary label is now the mechanism x direction key (the fused 14-label `cat` is used
-        # only internally to derive the structural mechanism and to key the figure subdirs).
-        struct = STRUCTURAL_OF.get(cat, cat)
-        if anchorZN is not None and (gene, hiZN) in iso and (gene, loZN) in iso:
-            sdir, sctx = stoich_direction(gene, hiZN, loZN, iso, cat, args.tes_tol)
-        else:
-            sdir = sctx = ''
+        bucket, event, direction, info = classify_tree(
+            gene, cpos, hiZN, loZN, iso, tes_tol=args.tes_tol, ejc_nt=args.ejc_nt)
         stier = stoich_tier(hi['frac'] - lo['frac'])
         hlvl = hi_stoich_level(hi['frac'])
-        class_key = make_class_key(struct, sdir)
+        class_key = f"{bucket}__{event}" + (f"__{direction}" if direction else "")
         counts[class_key] += 1
         fig_records.append({
-            'class_key': class_key, 'gene': gene, 'mod': mod, 'chrom': r['chrom'],
+            'class_key': class_key, 'bucket': bucket, 'event': event,
+            'gene': gene, 'mod': mod, 'chrom': r['chrom'],
             'start0': pos, 'end0': int(r.get('end0', pos + 1)), 'strand': strand,
             'effect': eff, 'padj': padj, 'per_tx': per_tx,
             'hiZN': hiZN, 'loZN': loZN, 'anchorZN': anchorZN or '',
             'hi_frac': hi['frac'], 'lo_frac': lo['frac'],
         })
-        jd_hi = info['jd_hi']; jd_lo = info['jd_lo']
+        jd_hi = info.get('jd_hi', ''); jd_lo = info.get('jd_lo', '')
         rows.append([
             gene, mod, r['chrom'], pos, r.get('end0', pos + 1), strand,
-            class_key, r.get('n_tx_tested', ''), f"{eff:.4f}", f"{padj:.3e}",
+            class_key, bucket, event, direction, info.get('delta_nt', ''),
+            r.get('n_tx_tested', ''), f"{eff:.4f}", f"{padj:.3e}",
             hiZN, iso[(gene, hiZN)]['arch'], f"{hi['frac']:.4f}",
             loZN, iso[(gene, loZN)]['arch'], f"{lo['frac']:.4f}",
             anchorZN or '',
-            info['status_hi'], info['status_lo'], info['status_anchor'],
-            jd_hi if jd_hi != '' and jd_hi < 10**9 else '',
-            jd_lo if jd_lo != '' and jd_lo < 10**9 else '',
-            struct, sdir, sctx, stier, hlvl,
+            info.get('status_hi', ''), info.get('status_lo', ''),
+            jd_hi if jd_hi != '' and jd_hi != 10**9 else '',
+            jd_lo if jd_lo != '' and jd_lo != 10**9 else '',
+            stier, hlvl,
         ])
 
     rows.sort(key=lambda x: (x[6], x[0], x[3]))

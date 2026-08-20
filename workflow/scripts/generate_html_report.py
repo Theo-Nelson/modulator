@@ -1109,163 +1109,126 @@ def build_polya_section(frag_df, diffs_df, mod_df, top_n, diff_figs_dir="", mod_
     )
 
 
+CLASS_TAXONOMY = {
+    "PRIVATE":       ["SKIPPED_EXON", "INTRONIC_POLYA", "ALT_LAST_EXON"],
+    "SHARED_LOCAL":  ["ALT_DONOR", "ALT_ACCEPTOR", "ALT_POLYA_SITE", "NEAR_ALT_JUNCTION"],
+    "SHARED_DISTAL": ["DISTAL_CHANGE"],
+    "UNEXPLAINABLE": ["FIVE_PRIME_UNCERTAIN", "INTRON_READ_ARTIFACT", "NO_MODEL", "UNRESOLVED"],
+}
+CLASS_BUCKET_ORDER = ["PRIVATE", "SHARED_LOCAL", "SHARED_DISTAL", "UNEXPLAINABLE"]
+BUCKET_DEFINITIONS = {
+    "PRIVATE": "The modified base exists (exonically) ONLY in the more-modified fragmentform — it is intronic or absent in the other form's assembled model, so the difference is structurally trivial: the base is physically missing from one isoform. (Called from transcript-model coordinates, guarded against the 5' blind spot.)",
+    "SHARED_LOCAL": "The base is exonic in BOTH fragmentforms, and the structural difference between them lies ON / adjacent to the base's own exon (a shifted splice site, an alternative poly(A) site, or a nearby differential junction).",
+    "SHARED_DISTAL": "The base is exonic in both, in an IDENTICAL local context; the fragmentforms differ only ELSEWHERE in the transcript, so the modification difference tracks isoform identity rather than any feature at the base.",
+    "UNEXPLAINABLE": "The difference cannot be attributed to structure: the 5' blind spot (direct-RNA truncation), an intron / soft-clip read artifact, or too few covered isoforms to compare.",
+}
+EVENT_DEFINITIONS = {
+    "SKIPPED_EXON": "The base sits in a cassette exon spliced INTO the higher form and OUT of the lower form.",
+    "INTRONIC_POLYA": "The base is in the retained-intron 3'UTR of an intronic-polyadenylation isoform — it does not exist in the spliced full-length form.",
+    "ALT_LAST_EXON": "The base is in a mutually-exclusive alternative last exon used by the higher form.",
+    "ALT_DONOR": "The base's exon uses a different 5' splice site (donor) in the two forms, changing that exon's length (structural_delta_nt).",
+    "ALT_ACCEPTOR": "The base's exon uses a different 3' splice site (acceptor) in the two forms, changing that exon's length (structural_delta_nt).",
+    "ALT_POLYA_SITE": "Same last exon, different poly(A) cleavage sites (tandem APA); the base is in the shared body of the last exon.",
+    "NEAR_ALT_JUNCTION": "The base sits within the exon-junction-complex footprint of a splice junction present in one form and removed in the other (EJC relief).",
+    "DISTAL_CHANGE": "No structural difference at or near the base — its exon is identical in both forms; the isoforms differ elsewhere, so methylation tracks isoform identity.",
+    "FIVE_PRIME_UNCERTAIN": "The base falls in (or 5' of) the 5'-most exon, where direct-RNA 5' truncation makes the assembled model unreliable — no confident structural call.",
+    "INTRON_READ_ARTIFACT": "The more-modified form does not structurally contain the base (it is intronic there) — likely an intron / soft-clip read, not a real exonic modification.",
+    "NO_MODEL": "Fewer than two adequately-covered fragmentforms at the site, so there is nothing to compare.",
+    "UNRESOLVED": "Passes the filters but fits no structural rule.",
+}
+
+
 def build_classification_section(class_df, class_figs_dir, arch_figs_dir, max_figs_per_category, top_n):
-    """Site-classification overview: per-category counts, the distribution graph,
-    and per-category top sites. Each category features the isoform architecture-map
-    (locus-track) figures as the primary visual, with the 2-panel per-sample
-    stoichiometry figures kept as a secondary collapsible gallery."""
-    key_candidates = [c for c in ("class_key", "structural_category", "category") if c in class_df.columns]
-    if class_df is None or class_df.empty or not key_candidates:
-        return section(
-            "Classification of Transcript Architecture Changes Associated with Differential Epitranscriptomic Modification",
-            "<p class='muted'>No classified differential sites available.</p>",
-            intro="Structural classification of significant between-fragmentform modification sites.",
-        )
-
-    # The single primary key is class_key = structural_category__stoich_direction (mechanism + which
-    # fragmentform is more modified). The old fused 14-label `category` is gone; figures live in
-    # per-class_key subdirs. structural_category / stoich_direction / tier / level remain as the
-    # component columns and drive the cross-tab. (Fallback to older column names for old reports.)
-    key_col = key_candidates[0]
-    has_axes = "structural_category" in class_df.columns and "stoich_direction" in class_df.columns
-    counts = class_df[key_col].value_counts().to_dict()
-    total = int(sum(counts.values())) or 1
-
-    def _def_for(key):  # a class_key's definition = its structural mechanism (part before "__")
-        struct = str(key).split("__")[0]
-        return CATEGORY_DEFINITIONS.get(struct, CATEGORY_DEFINITIONS.get(str(key),
-                                        "Classification assigned by classify_diff_sites."))
-
-    mods_present = (
-        sorted(class_df["mod_code"].dropna().astype(str).unique())
-        if "mod_code" in class_df.columns else []
+    """Tree view of the differential-site classification: 4 top-level buckets (PRIVATE / SHARED_LOCAL
+    / SHARED_DISTAL / UNEXPLAINABLE), each expanded into its structural events, each event into its
+    directions + sites + architecture-map figures. EVERY category is shown, including ones with zero
+    sites (reported as such), so the taxonomy is always complete."""
+    title = ("Classification of Transcript Architecture Changes Associated with Differential "
+             "Epitranscriptomic Modification")
+    intro = (
+        "Every significant between-fragmentform modification site (across all detected mod codes; "
+        "BH-FDR and the &gt;10% absolute-stoichiometry rule — tunable via classify_diffs.min_effect) "
+        "is placed in a tree. <b>Level 1</b>: does the base exist in the mature RNA of both forms — "
+        "<b>PRIVATE</b> (base only in the higher form) vs <b>SHARED</b>. <b>Level 2</b> (shared): is "
+        "the distinguishing structural change ON the base's exon (<b>SHARED_LOCAL</b>) or elsewhere "
+        "(<b>SHARED_DISTAL</b>)? A 4th bucket, <b>UNEXPLAINABLE</b>, holds sites with no confident "
+        "structural cause (5' blind spot, intron/soft-clip artifact, no model). Each site also "
+        "carries a direction (which form is higher), a structural size (structural_delta_nt), and a "
+        "stoichiometry tier."
     )
-    permod_figs = []
-    if len(mods_present) > 1:
-        combined = category_distribution_png(counts, mod_label=None)
-        hero_html = (
-            clickable_image_html(combined, "Classification distribution — all modifications",
-                                 figure_class="hero-figure", caption="All modifications combined")
-            if combined else ""
-        )
-        for mod in mods_present:
-            mc = class_df.loc[class_df["mod_code"].astype(str) == mod, key_col].value_counts().to_dict()
-            uri = category_distribution_png(mc, mod_label=mod_display(mod))
-            if uri:
-                cap = mod_display(mod) if mod_display(mod) == mod else f"{mod_display(mod)} ({mod})"
-                permod_figs.append(clickable_image_html(uri, f"Classification distribution — {mod_display(mod)}", caption=cap))
-    else:
-        only_label = mod_display(mods_present[0]) if mods_present else None
-        uri = category_distribution_png(counts, mod_label=only_label)
-        hero_html = clickable_image_html(uri, "Classification distribution", figure_class="hero-figure") if uri else ""
-    permod_html = "".join(permod_figs)
+    if class_df is None or class_df.empty or "bucket" not in class_df.columns:
+        return section(title, "<p class='muted'>No classified differential sites available.</p>", intro=intro)
 
-    summary_df = (
-        pd.DataFrame({"class_key": list(counts.keys()), "n_sites": list(counts.values())})
-        .sort_values("n_sites", ascending=False)
-        .reset_index(drop=True)
-    )
-    summary_df["pct"] = (100.0 * summary_df["n_sites"] / total).map(lambda v: f"{v:.1f}%")
+    total = len(class_df)
+    detail_cols = [c for c in [
+        "gene_name", "mod_code", "chrom", "start0", "strand", "direction", "structural_delta_nt",
+        "hi_ZN", "hi_arch", "hi_frac", "lo_ZN", "lo_arch", "lo_frac", "stoich_tier", "hi_stoich_level",
+        "effect_max_abs_frac_diff", "p_adj_bh",
+    ] if c in class_df.columns]
 
-    # The complete structural-mechanism taxonomy (the distinct structural_category values), always
-    # reported in full so every mechanism appears even with zero sites this run.
-    ALL_STRUCTURAL_MECHANISMS = [
-        "TANDEM_APA", "INTRONIC_POLYADENYLATION", "ALTERNATIVE_LAST_EXON",
-        "INTERGENIC_TERMINAL_EXON", "CASSETTE_EXON", "EJC_SPLICING",
-        "SHARED_TERMINAL_EXON", "SHARED_INTERNAL_EXON", "UNEXPLAINED",
-        "ARTIFACT", "UNCLASSIFIED",
-    ]
-    ALL_STOICH_DIRECTIONS = ["PROXIMAL_HIGHER", "DISTAL_HIGHER", "CO_TERMINAL"]
-
-    # structural_category x stoich_direction cross-tab -- always the FULL grid (every mechanism row
-    # and every direction column), 0 where nothing was seen this run.
-    xtab_html = ""
-    if has_axes:
-        ct = pd.crosstab(class_df["structural_category"], class_df["stoich_direction"].fillna("(n/a)"))
-        extra_cols = [c for c in ct.columns if c not in ALL_STOICH_DIRECTIONS]  # e.g. "(n/a)"
-        ct = ct.reindex(columns=ALL_STOICH_DIRECTIONS + extra_cols, fill_value=0)
-        extra_rows = [m for m in ct.index if m not in ALL_STRUCTURAL_MECHANISMS]
-        ct = ct.reindex(index=ALL_STRUCTURAL_MECHANISMS + extra_rows, fill_value=0)
-        ct.insert(len(ct.columns), "TOTAL", ct.sum(axis=1))
-        ct = ct.reset_index()
-        xtab_html = subsection(
-            "Sites by structural category × stoichiometry direction",
-            "<p class='section-intro'>The class_key factored into its two components, showing every "
-            "structural mechanism (0 where none were found this run). Rows = structural mechanism; "
-            "columns = which fragmentform carries more modification (PROXIMAL_HIGHER = shorter-3'UTR "
-            "form; DISTAL_HIGHER = longer; CO_TERMINAL = same 3' end).</p>"
-            + df_to_html(ct, max_rows=len(ct)),
-        )
-
-    # Define EVERY structural mechanism (the complete taxonomy), not only those present this run,
-    # so the mechanism reference is always complete.
-    mech_defs = [(m, CATEGORY_DEFINITIONS[m]) for m in ALL_STRUCTURAL_MECHANISMS if m in CATEGORY_DEFINITIONS]
+    # ---- overview: complete bucket x event count grid (zeros included) + a bucket distribution ----
+    rows = []
+    for bucket in CLASS_BUCKET_ORDER:
+        for event in CLASS_TAXONOMY[bucket]:
+            n = int(((class_df["bucket"] == bucket) & (class_df["event"] == event)).sum())
+            rows.append({"bucket": bucket, "event": event, "n_sites": n,
+                         "pct": f"{100.0 * n / total:.1f}%" if total else "0.0%"})
+    grid = pd.DataFrame(rows)
+    bucket_counts = {b: int((class_df["bucket"] == b).sum()) for b in CLASS_BUCKET_ORDER}
+    hero = category_distribution_png(bucket_counts, mod_label=None)
+    hero_html = clickable_image_html(hero, "Classification by top-level bucket", figure_class="hero-figure",
+                                     caption="Sites per top-level bucket.") if hero else ""
     overview = (
         "<div class='overview-layout'>"
-        f"<div>{df_to_html(summary_df, max_rows=len(summary_df))}"
-        f"{definitions_html(mech_defs, summary='Structural-mechanism definitions (all mechanisms)', open_by_default=False)}</div>"
-        f"<div class='hero'>{hero_html or '<p class=\"muted\">Distribution graph unavailable.</p>'}</div>"
+        f"<div>{df_to_html(grid, max_rows=len(grid))}"
+        f"{definitions_html(list(BUCKET_DEFINITIONS.items()), summary='Bucket definitions', open_by_default=False)}"
+        f"{definitions_html(list(EVENT_DEFINITIONS.items()), summary='Event definitions (all events)', open_by_default=False)}"
         "</div>"
-    ) + xtab_html
-    if permod_html:
-        overview += (
-            "<details class='definitions' open>"
-            "<summary>Per-modification classification distributions</summary>"
-            f"<div class='gallery'>{permod_html}</div></details>"
-        )
-
-    detail_cols = [
-        c for c in [
-            "gene_name", "mod_code", "chrom", "start0", "strand",
-            "class_key", "structural_category", "stoich_direction", "stoich_tier", "hi_stoich_level",
-            "hi_ZN", "hi_arch", "hi_frac", "lo_ZN", "lo_arch", "lo_frac",
-            "effect_max_abs_frac_diff", "p_adj_bh",
-        ] if c in class_df.columns
-    ]
-    sort_cols = [c for c in ["effect_max_abs_frac_diff"] if c in class_df.columns]
-
-    # One block per class_key; figures come from the matching class_key subdir.
-    blocks = []
-    for ck in list(summary_df["class_key"]):
-        sub = class_df[class_df[key_col] == ck]
-        if sort_cols:
-            sub = sub.sort_values(sort_cols, ascending=False)
-        n = len(sub)
-        table_html = df_to_html(sub[detail_cols] if detail_cols else sub, max_rows=top_n)
-        arch_gallery_html = category_figure_gallery(
-            arch_figs_dir, ck, max_figs_per_category,
-            summary_label="isoform architecture map(s) — exon/intron tracks, site marked",
-            open_by_default=True,
-        )
-        stoich_gallery_html = category_figure_gallery(class_figs_dir, ck, max_figs_per_category)
-        defn = _def_for(ck)
-        defn_html = f"<p class='section-intro'>{html.escape(defn)}</p>" if defn else ""
-        blocks.append(
-            subsection(
-                f"{ck} — top {min(top_n, n)} of {n} site(s)",
-                defn_html + table_html + arch_gallery_html + stoich_gallery_html,
-            )
-        )
-
-    body = overview + "".join(blocks)
-    return section(
-        "Classification of Transcript Architecture Changes Associated with Differential Epitranscriptomic Modification",
-        body,
-        intro=(
-            "Every significant between-fragmentform modification site (across all detected "
-            "mod codes; BH-FDR and the >10% absolute-stoichiometry rule — the 10% is tunable, see input parameter classify_diffs.min_effect) is described on two "
-            "orthogonal axes, anchored to the gene's longest-3'UTR isoform: (1) "
-            "<b>structural_category</b> — the mechanism that makes the isoforms differ (tandem APA, "
-            "intronic polyadenylation, EJC/splicing, cassette exon, alternative/intergenic terminal "
-            "exon, shared exon); and (2) <b>stoich_direction</b> — which fragmentform carries more "
-            "modification (proximal/shorter-3'UTR vs distal/longer, or co-terminal), with "
-            "<b>stoich_tier</b> (effect magnitude) and <b>hi_stoich_level</b> (is the favored form "
-            "itself hyper- or hypo-modified). The cross-tab below is the primary view. "
-            "Each mechanism lists its top sites with an isoform architecture map (exon/intron tracks "
-            "with the site marked) plus per-sample stoichiometry figures."
-        ),
-        definitions=definitions_html(column_definitions(detail_cols), summary="Column definitions") if detail_cols else "",
+        f"<div class='hero'>{hero_html or ''}</div>"
+        "</div>"
     )
+
+    # ---- the tree: bucket -> event -> (direction summary + sites + figures) ----
+    tree = []
+    for bucket in CLASS_BUCKET_ORDER:
+        bdf = class_df[class_df["bucket"] == bucket]
+        n_b = len(bdf)
+        events_html = []
+        for event in CLASS_TAXONOMY[bucket]:
+            edf = bdf[bdf["event"] == event]
+            n_e = len(edf)
+            if n_e == 0:
+                inner = "<p class='muted'>No sites in this category in this run.</p>"
+            else:
+                dirs = edf["direction"].fillna("").replace("", "—").value_counts().to_dict()
+                dir_line = "<p><b>direction:</b> " + " &nbsp;·&nbsp; ".join(
+                    f"<b>{int(v)}</b> {html.escape(str(k))}" for k, v in dirs.items()) + "</p>"
+                srt = edf.sort_values("effect_max_abs_frac_diff", ascending=False) \
+                    if "effect_max_abs_frac_diff" in edf.columns else edf
+                tbl = df_to_html(srt[detail_cols] if detail_cols else srt, max_rows=top_n)
+                figs = ""
+                for ck in edf["class_key"].dropna().unique():
+                    figs += category_figure_gallery(arch_figs_dir, ck, max_figs_per_category,
+                                                    summary_label="isoform architecture map(s) — exon/intron tracks, site marked",
+                                                    open_by_default=False)
+                    figs += category_figure_gallery(class_figs_dir, ck, max_figs_per_category)
+                inner = dir_line + tbl + figs
+            defn = EVENT_DEFINITIONS.get(event, "")
+            events_html.append(
+                "<details class='report-subtree'>"
+                f"<summary><h3>{html.escape(event)} — {n_e} site{'s' if n_e != 1 else ''}</h3></summary>"
+                f"<div class='section-body'><p class='section-intro'>{html.escape(defn)}</p>{inner}</div>"
+                "</details>"
+            )
+        bdef = BUCKET_DEFINITIONS.get(bucket, "")
+        tree.append(
+            f"<details class='report-subtree'{' open' if n_b else ''}>"
+            f"<summary><h2 class='bucket'>{html.escape(bucket)} — {n_b} site{'s' if n_b != 1 else ''}</h2></summary>"
+            f"<div class='section-body'><p class='section-intro'>{html.escape(bdef)}</p>{''.join(events_html)}</div>"
+            "</details>"
+        )
+
+    return section(title, overview + "".join(tree), intro=intro)
 
 
 def externalize_data_uris(html_doc, out_html):
@@ -1881,6 +1844,23 @@ def main():
       display:inline; margin:0; padding:0; border:0;
       font-size:28px; color:#17807f; font-weight:660;  /* green, matches the run-manifest header */
     }}
+    /* nested classification tree: buckets (h2.bucket) and events (h3), collapsible with the same
+       green summary + gold arrow, progressively smaller and indented. */
+    details.report-subtree {{ margin:6px 0; }}
+    details.report-subtree > summary {{
+      cursor:pointer; user-select:none; list-style:none; display:flex; align-items:center; gap:9px;
+      padding:6px 0; margin:0;
+    }}
+    details.report-subtree > summary::-webkit-details-marker {{ display:none; }}
+    details.report-subtree > summary::before {{ content:"\\25B8"; color:#d4a017; font-size:.8em; }}
+    details.report-subtree[open] > summary::before {{ content:"\\25BE"; }}
+    details.report-subtree > summary > h2.bucket {{
+      display:inline; margin:0; padding:0; border:0; font-size:23px; color:#17807f; font-weight:680;
+    }}
+    details.report-subtree > summary > h3 {{
+      display:inline; margin:0; padding:0; font-size:17px; color:#17807f; font-weight:640;
+    }}
+    details.report-subtree > .section-body {{ padding-left:20px; border-left:2px solid var(--line-soft); margin-left:4px; }}
     details.run-manifest {{ margin:16px 0 4px; }}
     details.run-manifest > summary {{
       cursor:pointer; font-weight:660; color:#17807f; letter-spacing:-.01em;

@@ -175,11 +175,11 @@ def main():
     print("== STRUCTURAL CLASSIFICATION (classify_diffs) ==")
     cl = rd(f"test_diffs/{P}__ZN_site_classified.tsv")
     ta = cl[cl.gene_name == "GENE_TA"]
-    check("GENE_TA differential site classified TANDEM_APA",
-          len(ta) and (ta["structural_category"] == "TANDEM_APA").any())
+    check("GENE_TA differential site classified SHARED_LOCAL / ALT_POLYA_SITE (tandem APA)",
+          len(ta) and (ta["event"] == "ALT_POLYA_SITE").any())
     ga = cl[(cl.gene_name == "GENE_A")]
-    check("GENE_A co-terminal isoform site classified SHARED_TERMINAL_EXON",
-          len(ga) and (ga["structural_category"] == "SHARED_TERMINAL_EXON").any())
+    check("GENE_A co-terminal isoform site classified SHARED (DISTAL_CHANGE or a shared-local event)",
+          len(ga) and ga["bucket"].isin(["SHARED_DISTAL", "SHARED_LOCAL"]).any())
 
     print("== SEQUENCE ELEMENTS (unbiased element x modification) ==")
     se = rd(f"assemble/{P}_sequence_elements.tsv")
