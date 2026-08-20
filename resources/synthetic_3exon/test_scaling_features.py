@@ -196,9 +196,33 @@ def test_nfail_score_k():
     return checks
 
 
+def test_stage_skip_reason():
+    """A disabled/no-op stage must be reported as disabled, not "checkpoint found" (pipeline
+    ._stage_disabled), so a --resume log never claims work was reused when a stage was simply off."""
+    from modulator import pipeline as pl
+
+    class Stub:
+        _stage_disabled = pl.ModulatorPipeline._stage_disabled
+
+        def __init__(self, config, contrasts):
+            self.config = config
+            self.contrasts = contrasts
+
+    off = Stub({"genotype": {"enable": False}}, contrasts=[])
+    on = Stub({"between_conditions": {"enable": True}}, contrasts=[{"name": "a_vs_b"}])
+    return [
+        ("genotype off -> disabled", off._stage_disabled("genotype") is True),
+        ("hierarchical_stoich (default off) -> disabled", off._stage_disabled("hierarchical_stoich") is True),
+        ("between_conditions with no contrasts -> disabled", off._stage_disabled("between_conditions") is True),
+        ("between_conditions WITH contrasts -> not disabled", on._stage_disabled("between_conditions") is False),
+        ("assemble (always on) -> not disabled", off._stage_disabled("assemble") is False),
+    ]
+
+
 def main():
     all_checks = [("PIVOT TRI-STATE", test_pivots()), ("BAM PREFLIGHT", test_preflight()),
-                  ("NFAIL-SCORE k-RATIO", test_nfail_score_k())]
+                  ("NFAIL-SCORE k-RATIO", test_nfail_score_k()),
+                  ("STAGE SKIP REASON", test_stage_skip_reason())]
     n_fail = 0
     for header, checks in all_checks:
         print(f"== {header} ==")

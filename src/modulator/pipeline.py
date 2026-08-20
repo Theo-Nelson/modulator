@@ -744,6 +744,31 @@ class ModulatorPipeline:
     def _stage_done(self, stage: str) -> bool:
         return self._stage_marker(stage).exists() or self._outputs_present(stage)
 
+    def _stage_disabled(self, stage: str) -> bool:
+        """True when the stage is toggled off (or a no-op, like between_conditions with no
+        contrasts) rather than actually completed. Used only to report an accurate skip reason:
+        a disabled stage must not be described as "checkpoint found / outputs reused"."""
+        cfg = self.config
+        toggles = cfg.get("toggles", {})
+        checks = {
+            "splice_junctions":    lambda: not as_bool(cfg.get("splice_junctions", {}).get("enable", True), True),
+            "apa_motifs":          lambda: not as_bool(cfg.get("apa_motifs", {}).get("enable", True), True),
+            "novel_loci":          lambda: not as_bool(cfg.get("novel_loci", {}).get("enable", True), True),
+            "sequence_elements":   lambda: not as_bool(cfg.get("sequence_elements", {}).get("enable", True), True),
+            "multigene_filter":    lambda: not as_bool(cfg.get("multigene_filter", {}).get("enable", True), True),
+            "modkit_zn":           lambda: not as_bool(toggles.get("enable_zn_pileup", True), True),
+            "aggregate_zn":        lambda: not as_bool(toggles.get("enable_zn_aggregate", True), True),
+            "test_diffs":          lambda: not as_bool(toggles.get("enable_test_diffs", True), True),
+            "classify_diffs":      lambda: not as_bool(cfg.get("classify_diffs", {}).get("enable", True), True),
+            "genotype":            lambda: not as_bool(cfg.get("genotype", {}).get("enable", False), False),
+            "polya":               lambda: not as_bool(cfg.get("polya", {}).get("enable", True), True),
+            "hierarchical_stoich": lambda: not as_bool(cfg.get("hierarchical_stoich", {}).get("enable", False), False),
+            "between_conditions":  lambda: (not as_bool(cfg.get("between_conditions", {}).get("enable", True), True)) or not self.contrasts,
+            "report":              lambda: not as_bool(cfg.get("report", {}).get("enable", True), True),
+        }
+        fn = checks.get(stage)
+        return bool(fn()) if fn else False
+
     def _merge_stage_table(self, path: Path, value_header: str,
                            new_rows: list[tuple[str, float]], fmt: str,
                            summary_label: str, summary_fn) -> None:
@@ -839,7 +864,16 @@ class ModulatorPipeline:
         for stage in selected:
             if self.resume and self._stage_done(stage):
                 if self.verbose:
-                    print(f"[modulator] stage: {stage} — checkpoint found, skipping", flush=True)
+                    # Report the ACCURATE reason: a disabled/no-op stage was never run (so nothing
+                    # was "reused"); a real checkpoint marker means outputs were reused; otherwise
+                    # pre-existing outputs (from a pre-marker run) satisfied the resume check.
+                    if self._stage_disabled(stage):
+                        reason = "disabled (off) — skipping"
+                    elif self._stage_marker(stage).exists():
+                        reason = "checkpoint found — reusing existing outputs"
+                    else:
+                        reason = "existing outputs found (no checkpoint) — skipping"
+                    print(f"[modulator] stage: {stage} — {reason}", flush=True)
                 continue
             if self.verbose:
                 print(f"[modulator] stage: {stage}", flush=True)
