@@ -10,10 +10,12 @@ base-modification tags and, in a single command:
 1. **assembles** fragment transcripts and partitions reads per transcript (`ZN`/`ZT` tags) — here *fragment* means the fragmented / partial transcript a long read represents, not an assumed full-length molecule;
 2. **calls modifications per transcript** (via [`modkit`](https://github.com/nanoporetech/modkit) pileup, partitioned by transcript);
 3. finds sites that are **differentially modified _between_ transcripts** of the same gene, and **classifies _why_** (alternative polyadenylation, intronic polyadenylation, EJC, splicing, …), anchored to each gene's longest-3′UTR transcript;
-4. connects to **genotype** — read-backed SNPs, SNP-modification and SNP-fragment associations, fragment-conditioned dependency tests, and local haplotype blocks;
+4. connects to **genotype** — read-backed SNPs, SNP-modification and SNP-fragment associations (each cis-SNP→modification hit broken down per fragmentform), and local haplotype blocks;
 5. writes a single self-contained **HTML report**.
 
 The supported interface is the `modulator` Python CLI.
+
+**See a live example → [sample HTML report](https://raw.githack.com/Theo-Nelson/modulator/test/docs/sample_report/demo14_report.html)** (rendered from the bundled 14-gene demo).
 
 **Full parameter, output, and HPC reference -> [ADVANCED_USAGE.md](ADVANCED_USAGE.md)**
 
