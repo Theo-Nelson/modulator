@@ -117,6 +117,28 @@ COLUMN_DEFINITIONS = {
     "frac_canonical": "Fraction of the gene's junctions that are canonical GT-AG.",
     "has_noncanonical": "1 if the gene carries at least one non-canonical junction, else 0.",
     "intron_category": "Overall call for the gene: ALL_CANONICAL, CANONICAL_WITH_GC_AG, or HAS_NONCANONICAL.",
+    # --- sequence-element tables ---
+    "element_type": "The cis-element class scanned (PAS, ARE, CPE, GRE, G4, KOZAK, UORF, TOP, STOP_CONTEXT, M6AM).",
+    "element_subclass": "Finer subclass of the element (e.g. the specific PAS hexamer or ARE variant).",
+    "n_instances": "Number of instances of this element type found across all fragmentforms' mature mRNAs.",
+    "n_with_modification": "How many of those instances overlap at least one modification (any mod code).",
+    "frac_with_mod": "n_with_modification / n_instances.",
+    "mod_codes_seen": "Modification codes found within this element type, with a count per code.",
+    "n_mod_sites": "Number of distinct modification sites overlapping this element instance.",
+    "matched_seq": "The mature-mRNA sequence matched for this element instance.",
+    "mod_codes": "Modification codes overlapping this element instance.",
+    "modifications": "Per-modification detail for the element: code@genomic-position (stoichiometry).",
+    # --- poly(A) tail tables ---
+    "median_tail": "Median poly(A) tail length (nt) across the fragmentform's reads.",
+    "n_fragmentforms_tested": "Number of the gene's fragmentforms with enough tailed reads to compare.",
+    "min_median_tail": "Smallest per-fragmentform median tail length (nt) among the gene's fragmentforms.",
+    "max_median_tail": "Largest per-fragmentform median tail length (nt) among the gene's fragmentforms.",
+    "effect_median_range_nt": "Spread (nt) of per-fragmentform median tail lengths within a gene — how differently its isoforms are tailed.",
+    "effect_median_diff_nt": "Median tail of modified reads minus unmodified reads at a site (negative = modification associates with shorter tails).",
+    "test_name": "Statistical test used: Mann-Whitney U (2 groups) or Kruskal-Wallis (>2 groups).",
+    "median_tail_modified": "Median tail length (nt) of reads modified at the target site.",
+    "median_tail_unmodified": "Median tail length (nt) of reads unmodified at the target site.",
+    "n_unmodified": "Number of reads unmodified at the target site.",
     "sample": "Sample identifier derived from the BAM filename.",
     "chrom": "Reference chromosome or contig containing the reported feature.",
     "pos1": "1-based genomic coordinate of the reported SNP locus.",
@@ -244,6 +266,8 @@ def parse_args():
     ap.add_argument("--title", required=True)
     ap.add_argument("--run-manifest", default="",
                     help="Run manifest TXT (command line, resolved inputs, full config) to embed.")
+    ap.add_argument("--sample-metadata", default="",
+                    help="Sample metadata TSV (sample, condition, replicate) for the replicate-concordance note.")
     ap.add_argument("--zn-long", default="")
     ap.add_argument("--zt-long", default="")
     ap.add_argument("--diff-results", default="")
@@ -326,6 +350,57 @@ def embed_png(path):
     with open(path, "rb") as fh:
         encoded = base64.b64encode(fh.read()).decode("ascii")
     return f"data:image/png;base64,{encoded}"
+
+
+def replicate_concordance(zn_long_df, meta_df, min_cov=20):
+    """How reproducible are the replicates WITHIN each condition? For every site×fragmentform
+    covered (Nvalid_cov >= min_cov) in >=2 replicates of a condition, take the range (max-min) of
+    frac_modified across those replicates; the median of those ranges is the typical per-site
+    replicate disagreement. Returns {condition: {n_reps, n_sites, median_pp}}."""
+    if (zn_long_df is None or zn_long_df.empty or meta_df is None or meta_df.empty
+            or "condition" not in meta_df.columns or "sample" not in meta_df.columns):
+        return {}
+    cond = dict(zip(meta_df["sample"].astype(str), meta_df["condition"].astype(str)))
+    df = zn_long_df.copy()
+    df["_cond"] = df["sample"].astype(str).map(cond)
+    df = df[df["_cond"].notna()]
+    df["_cov"] = pd.to_numeric(df.get("Nvalid_cov"), errors="coerce")
+    df["_frac"] = pd.to_numeric(df.get("frac_modified"), errors="coerce")
+    df = df[(df["_cov"] >= min_cov) & df["_frac"].notna()]
+    site_keys = [k for k in ["chrom", "start0", "strand", "mod_code", "ZN_transcript_index"] if k in df.columns]
+    out = {}
+    for condition, cdf in df.groupby("_cond"):
+        n_reps = cdf["sample"].nunique()
+        entry = {"n_reps": int(n_reps), "n_sites": 0, "median_pp": None}
+        if n_reps >= 2 and site_keys:
+            g = cdf.groupby(site_keys)["_frac"]
+            rng = (g.max() - g.min())[g.count() >= 2]
+            if len(rng):
+                entry["n_sites"] = int(len(rng))
+                entry["median_pp"] = float(rng.median() * 100.0)
+        out[condition] = entry
+    return out
+
+
+def significance_note_box(concordance):
+    """A prominent, data-driven callout placed above the differential sections: reports THIS run's
+    per-condition replicate reproducibility and warns that tight replicates make significance cheap,
+    so hits should be ranked by effect size, not p-value."""
+    parts = [f"within <b>{html.escape(str(c))}</b> ({d['n_reps']} replicates) the typical site "
+             f"differs by only <b>~{d['median_pp']:.1f} pp</b> between replicates"
+             for c, d in sorted(concordance.items()) if d.get("median_pp") is not None]
+    if not parts:
+        return ""
+    return (
+        "<div class='callout-warn'>"
+        "<b>Read this first — significance is cheap here; rank by effect size, not p-value.</b> "
+        "Your replicates are highly reproducible: " + "; ".join(parts) + ". "
+        "When replicates agree this tightly the replicate-aware tests have very high power, so a shift "
+        "of only a couple of percentage points can clear FDR even though it may be biologically "
+        "trivial. Sort the tables below by <b>|delta|</b> / the effect-size column (not by p-value) to "
+        "surface the meaningful changes."
+        "</div>"
+    )
 
 
 from plot_utils import save_figure, setup_matplotlib_style, bump_fonts
@@ -651,7 +726,10 @@ def polya_distribution_png(frag_df):
     if med.empty:
         return ""
     has_cls = "classification" in frag_df.columns and frag_df["classification"].notna().any()
-    fig, axes = plt.subplots(1, 2 if has_cls else 1, figsize=(11.5 if has_cls else 6.5, 3.6))
+    # constrained layout + a taller canvas so the enlarged house fonts / rotated tick labels don't
+    # overlap the axis labels (build-time tight_layout can't account for the +12 bump).
+    fig, axes = plt.subplots(1, 2 if has_cls else 1, figsize=(13 if has_cls else 7.0, 5.2),
+                             layout="constrained")
     axes = axes if has_cls else [axes]
     axes[0].hist(med.values, bins=40, color="#3b6ea5", edgecolor="white", linewidth=0.4)
     axes[0].axvline(float(med.median()), color="#c1121f", ls="--", lw=1.2,
@@ -669,8 +747,7 @@ def polya_distribution_png(frag_df):
         axes[1].set_ylabel("fragmentform median tail (nt)")
         axes[1].set_xlabel("fragmentform class")
         for t in axes[1].get_xticklabels():
-            t.set_rotation(20); t.set_ha("right"); t.set_fontsize(8)
-    fig.tight_layout()
+            t.set_rotation(25); t.set_ha("right")
     _save_report_chart(fig, "polya_tail_distribution")
     buf = BytesIO()
     fig.savefig(buf, format="png", dpi=130, bbox_inches="tight")
@@ -679,7 +756,7 @@ def polya_distribution_png(frag_df):
     return "data:image/png;base64," + _b64.b64encode(buf.getvalue()).decode("ascii")
 
 
-def build_between_conditions_section(bc_dir, top_n):
+def build_between_conditions_section(bc_dir, top_n, top_note=""):
     """Replicate-aware between-condition results, one subsection per contrast."""
     if not bc_dir or not os.path.isdir(bc_dir):
         return ""
@@ -732,7 +809,7 @@ def build_between_conditions_section(bc_dir, top_n):
                                     df_to_html(pd.DataFrame(summary), max_rows=10) + "".join(blocks)))
     return section(
         "Between-Condition Changes in Fragment-form Usage, Junction Usage, APA Usage, polyA Tail Length, and Modification Stoichiometries",
-        "".join(parts),
+        top_note + "".join(parts),
         intro="Replicate-aware comparisons between conditions, from the samplesheet's `condition` column. "
               "Counts (modification and isoform/APA/junction usage) use a beta-binomial likelihood-ratio "
               "test with dispersion shrinkage across features; poly(A) tail length is continuous and is "
@@ -743,8 +820,6 @@ def build_between_conditions_section(bc_dir, top_n):
             ("mu_reference / mu_test", "Fitted modified (or usage) fraction in the reference and test condition."),
             ("delta", "mu_test - mu_reference: the effect size, in fraction units (delta_nt = nucleotides of tail)."),
             ("p_adj_bh", "Benjamini-Hochberg FDR over all features in that analysis."),
-            ("Read this carefully", "These replicates are tightly reproducible, so significance is cheap: a ~2 "
-                                    "percentage-point shift can clear FDR. Rank by |delta|, not by p-value alone."),
         ], summary="Column definitions"),
     )
 
@@ -851,7 +926,8 @@ def build_sequence_elements_section(se_df, summ_df, top_n):
     # per element-type summary (prefer the precomputed summary table)
     if summ_df is not None and not summ_df.empty:
         parts.append(subsection("Elements by type (and how many carry a modification)",
-                                df_to_html(summ_df, max_rows=20)))
+                                df_to_html(summ_df, max_rows=20),
+                                definitions=definitions_html(column_definitions(list(summ_df.columns)), summary="Column definitions")))
     # per-gene rollup: how many of each gene's fragmentforms have a MODIFIED element of each type
     if not with_mod.empty and "gene_name" in with_mod.columns:
         tx_col = "zt_label" if "zt_label" in with_mod.columns else None
@@ -863,7 +939,11 @@ def build_sequence_elements_section(se_df, summ_df, top_n):
         piv = piv.reset_index()
         parts.append(subsection(
             "Per-gene rollup — fragmentforms with a MODIFIED element of each type",
-            df_to_html(piv, max_rows=max(top_n, 25))))
+            df_to_html(piv, max_rows=max(top_n, 25)),
+            definitions=definitions_html([
+                ("gene_name", "The gene."),
+                ("(each element-type column)", "Number of that gene's fragmentforms whose mature mRNA carries a MODIFIED element of that type. Columns are element types (defined under Element definitions on the section header)."),
+            ], summary="Column definitions")))
     # the modification-carrying elements themselves (deduped across repeated fragmentforms)
     if not with_mod.empty:
         w = with_mod.copy()
@@ -872,7 +952,8 @@ def build_sequence_elements_section(se_df, summ_df, top_n):
                             "matched_seq", "mod_codes", "modifications"] if c in w.columns]
         w = w[cols].drop_duplicates()
         parts.append(subsection("Elements carrying a modification (any code)",
-                                df_to_html(w, max_rows=max(top_n, 25))))
+                                df_to_html(w, max_rows=max(top_n, 25)),
+                                definitions=definitions_html(column_definitions(cols), summary="Column definitions")))
     return section("Modifications within RNA Sequence Elements", "".join(parts), intro=intro,
                    definitions=definitions_html([
                        ("PAS", "Polyadenylation signal hexamer (AATAAA + variants) upstream of the 3' end."),
@@ -970,7 +1051,7 @@ def _flat_figure_gallery(figs_dir, max_figs, summary_label):
             f"<div class='gallery'>{''.join(pieces)}</div></details>")
 
 
-def build_polya_section(frag_df, diffs_df, mod_df, top_n, diff_figs_dir="", mod_figs_dir="", max_figs=10):
+def build_polya_section(frag_df, diffs_df, mod_df, top_n, diff_figs_dir="", mod_figs_dir="", max_figs=10, top_note=""):
     """Poly(A) tail length as a first-class readout: distribution across fragmentforms,
     differential tail length between the fragmentforms of a gene, and tail x modification."""
     if (frag_df is None or frag_df.empty) and (diffs_df is None or diffs_df.empty) and (mod_df is None or mod_df.empty):
@@ -988,6 +1069,7 @@ def build_polya_section(frag_df, diffs_df, mod_df, top_n, diff_figs_dir="", mod_
         med_all = pd.to_numeric(frag_df["median_tail"], errors="coerce").dropna()
         n_sig_diff = int((pd.to_numeric(diffs_df.get("p_adj_bh"), errors="coerce") < 0.05).sum()) if diffs_df is not None and not diffs_df.empty else 0
         n_sig_mod = int((pd.to_numeric(mod_df.get("p_adj_bh"), errors="coerce") < 0.05).sum()) if mod_df is not None and not mod_df.empty else 0
+        parts.append("<h3>Summary Across All Poly(A) Tail Measurements</h3>")
         parts.append(
             "<ul>"
             f"<li><b>{len(frag_df):,}</b> fragmentforms with a tail-length distribution; "
@@ -1001,17 +1083,19 @@ def build_polya_section(frag_df, diffs_df, mod_df, top_n, diff_figs_dir="", mod_
                             "min_median_tail", "max_median_tail", "test_name", "p_value", "p_adj_bh"] if c in diffs_df.columns]
         gallery = _flat_figure_gallery(diff_figs_dir, max_figs, "per-gene tail-distribution figure(s) — tail length by fragmentform")
         parts.append(subsection("Differential tail length between fragmentforms of a gene",
-                                df_to_html(diffs_df[cols], max_rows=top_n) + gallery))
+                                df_to_html(diffs_df[cols], max_rows=top_n) + gallery,
+                                definitions=definitions_html(column_definitions(cols), summary="Column definitions")))
     if mod_df is not None and not mod_df.empty:
         cols = [c for c in ["gene_name", "mod_site_id", "target_mod_code", "n_modified", "n_unmodified",
                             "median_tail_modified", "median_tail_unmodified", "effect_median_diff_nt",
                             "p_value", "p_adj_bh"] if c in mod_df.columns]
         gallery = _flat_figure_gallery(mod_figs_dir, max_figs, "per-site figure(s) — modified vs unmodified tail length")
         parts.append(subsection("Poly(A) tail length vs modification state",
-                                df_to_html(mod_df[cols], max_rows=top_n) + gallery))
+                                df_to_html(mod_df[cols], max_rows=top_n) + gallery,
+                                definitions=definitions_html(column_definitions(cols), summary="Column definitions")))
     return section(
         "Differential polyA Tail Length by Fragmentform and Modification Status",
-        "".join(parts),
+        top_note + "".join(parts),
         intro="Direct per-read poly(A) tail-length estimates from the dorado basecaller (pt:i tag), "
               "grouped by fragmentform (isoform). Tail length is mechanistically tied to m6A, RNA "
               "stability, and translation, so it is reported as a first-class readout: its distribution "
@@ -1242,6 +1326,9 @@ def main():
     zn_long_df = read_tsv(args.zn_long)
     zt_long_df = read_tsv(args.zt_long)
     diff_df = read_tsv(args.diff_results)
+    # Data-driven "significance is cheap" callout, shown above every differential section.
+    meta_df = read_tsv(args.sample_metadata) if getattr(args, "sample_metadata", "") else pd.DataFrame()
+    sig_box = significance_note_box(replicate_concordance(zn_long_df, meta_df))
     classified_df = read_tsv(args.classified_sites)
     overlap_df = read_summary_metrics(glob.glob(args.multigene_summary_glob)) if args.multigene_summary_glob else pd.DataFrame()
     candidate_snps_df = read_tsv(args.candidate_snps)
@@ -1499,7 +1586,7 @@ def main():
 
     sec_diff = section(
         "Sites with Differential Epitranscriptomic Modification Between Fragmentforms",
-        diff_html + diff_fig_html,
+        sig_box + diff_html + diff_fig_html,
         intro="Positions where the modification stoichiometry differs between the fragmentforms of a gene "
               "(across all detected mod codes; Fisher exact / chi-square with Benjamini-Hochberg FDR, keeping "
               "sites whose absolute stoichiometry difference clears the minimum effect). The effect threshold "
@@ -1588,10 +1675,10 @@ def main():
     if args.polya_fragmentform or args.taillength_diffs or args.taillength_mod:
         sec_polya = build_polya_section(polya_frag_df, taillength_diffs_df, taillength_mod_df, args.top_genes,
                                         diff_figs_dir=args.taillength_diff_figs, mod_figs_dir=args.taillength_mod_figs,
-                                        max_figs=int(getattr(args, "max_snp_figs", 12)))
+                                        max_figs=int(getattr(args, "max_snp_figs", 12)), top_note=sig_box)
 
     # --- Between-condition comparisons (conditional) ---
-    sec_between = build_between_conditions_section(args.between_conditions_dir, args.top_genes) if args.between_conditions_dir else None
+    sec_between = build_between_conditions_section(args.between_conditions_dir, args.top_genes, top_note=sig_box) if args.between_conditions_dir else None
 
     sec_snp_cand = section(
         "Segregating cis SNP Candidates",
@@ -1820,6 +1907,16 @@ def main():
       padding:20px 22px; margin:0 0 18px; box-shadow:var(--shadow);
     }}
     .section-intro {{ color:var(--muted); font-size:14px; max-width:74ch; margin:10px 0 16px; }}
+    .callout-warn {{
+      border:1px solid #d8b24a; border-left:5px solid #d4a017; background:#fdf6e3;
+      color:#5c4a12; border-radius:9px; padding:12px 15px; margin:0 0 16px; font-size:13.5px;
+      line-height:1.5;
+    }}
+    @media (prefers-color-scheme: dark) {{
+      .callout-warn {{ background:#2a2410; color:#e7d9a8; border-color:#5c4d1c; border-left-color:#d4a017; }}
+    }}
+    :root[data-theme="dark"] .callout-warn {{ background:#2a2410; color:#e7d9a8; border-color:#5c4d1c; border-left-color:#d4a017; }}
+    :root[data-theme="light"] .callout-warn {{ background:#fdf6e3; color:#5c4a12; border-color:#d8b24a; border-left-color:#d4a017; }}
     .muted {{ color:var(--muted); font-style:normal; }}
     .subsection {{ margin-top:20px; padding-top:4px; }}
     /* ---- cards / stat tiles ---- */

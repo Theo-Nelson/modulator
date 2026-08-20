@@ -1943,6 +1943,7 @@ class ModulatorPipeline:
             "--out-html", str(self.paths.report_html),
             "--title", str(report_cfg.get("title", f"modulator report: {self.prefix}")),
             "--run-manifest", str(self.paths.results / f"{self.prefix}_run_manifest.txt"),
+            "--sample-metadata", str(self.paths.sample_metadata) if self._nonempty(self.paths.sample_metadata) else "",
             "--max-diff-figs", str(int(report_cfg.get("max_diff_figs", 6))),
             "--top-transcripts", str(int(report_cfg.get("top_transcripts", 20))),
             "--top-genes", str(int(report_cfg.get("top_genes", 20))),

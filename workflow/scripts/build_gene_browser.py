@@ -251,10 +251,16 @@ function select(g){cur=g;selExon=null;renderList($("#q").value);draw();}
 function draw(){
   const G=DATA.genes[cur]; if(!G){return;}
   const all=G.forms.flatMap(f=>f.exons), lo=Math.min(...all.map(e=>e[0])), hi=Math.max(...all.map(e=>e[1]));
-  const W=1000,H=Math.max(60,G.forms.length*30+22),PAD=8,span=Math.max(hi-lo,1);
+  const W=1000,H=Math.max(78,G.forms.length*30+40),PAD=8,span=Math.max(hi-lo,1);
   const X=p=>PAD+(p-lo)/span*(W-2*PAD);
+  // The track is drawn in GENOMIC coordinates (left = lowest coordinate). Label the transcript
+  // 5'/3' ends accordingly: on + strand 5' is left, on - strand 5' is right.
+  const lEnd=G.strand==="+"?"5′":"3′", rEnd=G.strand==="+"?"3′":"5′";
+  const ends=`<line x1="${X(lo)+18}" x2="${X(hi)-18}" y1="12" y2="12" stroke="var(--line)" stroke-width="1" stroke-dasharray="2 3"/>`
+    +`<text x="${X(lo)}" y="16" font-size="13" font-weight="700" fill="var(--accent)" text-anchor="start">${lEnd}</text>`
+    +`<text x="${X(hi)}" y="16" font-size="13" font-weight="700" fill="var(--accent)" text-anchor="end">${rEnd}</text>`;
   const rows=G.forms.map((f,i)=>{
-    const y=i*30+16, mid=y+8;
+    const y=i*30+34, mid=y+8;
     const introns=`<line x1="${X(Math.min(...f.exons.map(e=>e[0])))}" x2="${X(Math.max(...f.exons.map(e=>e[1])))}"
        y1="${mid}" y2="${mid}" stroke="var(--line)" stroke-width="2"/>`;
     const ex=f.exons.map((e,j)=>`<g class="exon" data-s="${e[0]}" data-e="${e[1]}" data-zt="${f.zt}">
@@ -272,7 +278,7 @@ function draw(){
    <div class="card"><h2>Fragmentform structures</h2>
      <div class="hint">Click an exon to filter the tables below to modification sites inside it.
        <span id="selinfo"></span></div>
-     <div style="overflow-x:auto"><svg viewBox="0 0 ${W+150} ${H}" style="min-width:640px">${rows}</svg></div>
+     <div style="overflow-x:auto"><svg viewBox="0 0 ${W+150} ${H}" style="min-width:640px">${ends}${rows}</svg></div>
      <div class="legend"><span><i class="sw" style="background:var(--exon)"></i>exon</span>
        <span><i class="sw" style="background:var(--line)"></i>intron</span>
        <span>hover an exon for coordinates</span></div>
