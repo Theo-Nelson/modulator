@@ -645,14 +645,21 @@ def plot_locus_arch(rec, iso, genes, out_png):
         else:
             ax.plot([pos], [y], marker='x', ms=7, color='#b91c1c', mew=2, zorder=5)
 
-    # site marker + headline. Stop the red guide line just BELOW the red coordinate label so the
-    # line and the text never overlap (the label reads as a callout above the line's tip); leave
-    # headroom above for the (enlarged) two-line label.
+    # site marker + headline. Stop the red guide line just BELOW the red coordinate label (callout
+    # above the line's tip). Offset the label to ONE SIDE of the line rather than centring it, so it
+    # never crosses the red line or the axes frame: a site in the left half gets a right-extending
+    # label (ha='left'), a site in the right half a left-extending one (ha='right').
     line_top = len(zns) + 0.55
     ax.plot([pos, pos], [0.2, line_top], color='red', ls='--', lw=1.2, zorder=3)
-    ax.text(pos, line_top + 0.12,
+    x_right = x1 + span * 1.7 + pad          # matches the set_xlim() right edge below
+    x_off = (x_right - x0) * 0.015
+    if pos < 0.5 * (x0 + x_right):
+        lab_x, lab_ha = pos + x_off, 'left'
+    else:
+        lab_x, lab_ha = pos - x_off, 'right'
+    ax.text(lab_x, line_top + 0.12,
             f"{mdisp} @ {chrom}:{pos}\nΔ={eff:.2f} (hi {hf:.2f} vs lo {lf:.2f})",
-            color='red', ha='center', va='bottom', fontsize=8)
+            color='red', ha=lab_ha, va='bottom', fontsize=8)
 
     ax.set_xlim(x0, x1 + span * 1.7 + pad)   # extra right room for the (enlarged) per-ZN labels
     ax.set_ylim(0.2, len(zns) + 2.6)
