@@ -522,7 +522,14 @@ def df_to_html(df, max_rows=25):
 
 def section(title, body, *, intro="", definitions=""):
     intro_html = f"<p class='section-intro'>{html.escape(intro)}</p>" if intro else ""
-    return f"<section><h2>{html.escape(title)}</h2>{intro_html}{definitions}{body}</section>"
+    # Each section is a collapsible open/close panel: the header (h2) lives in the <summary>, and
+    # everything after it collapses. Defaults open.
+    return (
+        "<section><details class='report-section' open>"
+        f"<summary><h2>{html.escape(title)}</h2></summary>"
+        f"<div class='section-body'>{intro_html}{definitions}{body}</div>"
+        "</details></section>"
+    )
 
 
 def subsection(title, body, *, definitions=""):
@@ -1669,15 +1676,34 @@ def main():
     }}
     /* Logo banner + "Report" wordmark, styled to vibe with the modulator logo (teal #17807f /
        gold #d4a017, rounded-geometric face). */
-    .report-logo {{ display:block; width:100%; max-width:620px; height:auto; margin:2px 0 6px; }}
+    header {{ text-align:center; }}
+    .report-logo {{ display:block; width:100%; max-width:620px; height:auto; margin:2px auto 6px; }}
     h1.report-title {{
       font-family:"Century Gothic","Futura","Avenir Next","Trebuchet MS","Segoe UI",system-ui,sans-serif;
       font-size:clamp(30px,4.4vw,48px); font-weight:700; letter-spacing:.10em;
-      color:#17807f; line-height:1; margin:0; text-transform:uppercase;
+      color:#17807f; line-height:1; margin:0; text-transform:uppercase; text-align:center;
     }}
     h1.report-title::after {{
       content:""; display:block; width:64px; height:5px; border-radius:3px;
-      margin-top:10px; background:#d4a017;
+      margin:10px auto 0; background:#d4a017;
+    }}
+    /* run-manifest sits under the centered header but reads left-aligned like the section bodies */
+    details.run-manifest {{ text-align:left; }}
+    /* collapsible section headers (open/close), enlarged +12 over the base h2 size */
+    details.report-section {{ margin:0; }}
+    details.report-section > summary {{
+      cursor:pointer; user-select:none; list-style:none;
+      display:flex; align-items:center; gap:10px;
+      margin:0 0 14px; padding-bottom:12px; border-bottom:1px solid var(--line-soft);
+    }}
+    details.report-section > summary::-webkit-details-marker {{ display:none; }}
+    details.report-section > summary::before {{
+      content:"\\25B8"; color:#d4a017; font-size:.72em; line-height:1;
+    }}
+    details.report-section[open] > summary::before {{ content:"\\25BE"; }}
+    details.report-section > summary > h2 {{
+      display:inline; margin:0; padding:0; border:0;
+      font-size:31px;  /* 19px base + 12 */
     }}
     details.run-manifest {{ margin:16px 0 4px; }}
     details.run-manifest > summary {{
