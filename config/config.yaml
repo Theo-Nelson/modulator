@@ -127,8 +127,9 @@ aggregation:
   jobs: 12            # chromosomes processed in parallel by the stream engine
   zn:
     filter_enable: true
-    count_diff_factor: 3
-    mod_fail_margin: 1
+    count_diff_factor: 3                # site-filter (1): FAIL if Ndiff > count_diff_factor * coverage (drops positions dominated by a variant/misalignment rather than a modification)
+    mod_fail_margin: 1                  # site-filter (2): FAIL if Nmod <= Nfail + mod_fail_margin (confident modified calls must outweigh low-confidence ones)
+    nfail_score_k: 0.0                  # site-filter (3): NFail-SCORE k-ratio (Nelson et al.). FAIL if k = Nmod/(Nfail+1) < this. Error-prone false-positive sites carry a large Nfail; true sites a small one. 0 disables. CALIBRATE per modification basecaller + version -- see resources/nfail_score_k_calibration.tsv (e.g. Dorado SUP m6A-DRACH v2.0.0 -> k=0.4; SUP pseU v2.0.0 -> k=1.0).
     emit_raw: false                    # RAW sites_long is huge (~all bedMethyl rows) and not consumed downstream; FILTERED is what test_diffs/genotype/report use. Set true only if you need the full pre-filter table and have disk/quota headroom.
     emit_filtered: true
     write_long: true
@@ -203,7 +204,7 @@ report:
   max_snp_figs: 12                  # per-example figures per SNP/haplotype section (embedded + written to results/genotype/<prefix>__snp_figs/)
 
 genotype:
-  enable: false
+  enable: true       # on by default (SNP discovery + SNP/mod/fragment associations, haplotypes). Set false to skip this (slower) stage.
   jobs: 2
   # discover_candidate_snps parallelism, decoupled from `jobs` (which sizes the memory-heavy
   # per-molecule substeps). SNP discovery is embarrassingly parallel and low-memory, so it gets its

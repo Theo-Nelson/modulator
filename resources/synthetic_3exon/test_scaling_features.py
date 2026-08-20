@@ -181,8 +181,24 @@ def test_preflight():
     return checks
 
 
+def test_nfail_score_k():
+    """NFail-SCORE k-ratio site filter (aggregate_by_gene.row_pass_filter): keep a site iff
+    k = Nmod/(Nfail+1) >= nfail_score_k, on top of the Ndiff and mod_fail_margin guards."""
+    import aggregate_by_gene as agg
+    P = agg.row_pass_filter
+    checks = [
+        ("k=0 disables the k-ratio filter (legacy behaviour)", P(100, 10, 4, 0, 3, 1, 0.0) is True),
+        ("clean site passes at k=0.4 (k=10/5=2.0)", P(100, 10, 4, 0, 3, 1, 0.4) is True),
+        ("error-prone site (Nmod=3,Nfail=40 -> k=0.07) fails at k=0.4", P(100, 3, 40, 0, 3, 1, 0.4) is False),
+        ("stricter k=1.5 rejects a borderline site (Nmod=6,Nfail=4 -> k=1.2)", P(100, 6, 4, 0, 3, 1, 1.5) is False),
+        ("Ndiff guard still applies regardless of k", P(100, 50, 0, 400, 3, 1, 0.4) is False),
+    ]
+    return checks
+
+
 def main():
-    all_checks = [("PIVOT TRI-STATE", test_pivots()), ("BAM PREFLIGHT", test_preflight())]
+    all_checks = [("PIVOT TRI-STATE", test_pivots()), ("BAM PREFLIGHT", test_preflight()),
+                  ("NFAIL-SCORE k-RATIO", test_nfail_score_k())]
     n_fail = 0
     for header, checks in all_checks:
         print(f"== {header} ==")

@@ -1212,6 +1212,7 @@ class ModulatorPipeline:
             "--chunk-lines", str(int(self.config.get("aggregation_chunk_lines") or self.config.get("aggregation", {}).get("chunk_lines", 2000000))),
             "--count-diff-factor", str(float(agg_cfg.get("count_diff_factor", filters_cfg.get("count_diff_factor", 3)))),
             "--mod-fail-margin", str(int(agg_cfg.get("mod_fail_margin", filters_cfg.get("mod_fail_margin", 1)))),
+            "--nfail-score-k", str(float(agg_cfg.get("nfail_score_k", filters_cfg.get("nfail_score_k", 0.0)))),
             "--verbose",
         ]
         if as_bool(agg_cfg.get("filter_enable", filters_cfg.get("enable_site_filter", True)), True):

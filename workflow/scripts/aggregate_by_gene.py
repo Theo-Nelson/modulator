@@ -146,11 +146,20 @@ def row_pass_filter(
     nfail: int,
     ndiff: int,
     count_diff_factor: float,
-    mod_fail_margin: int
+    mod_fail_margin: int,
+    nfail_score_k: float = 0.0,
 ) -> bool:
+    # (1) variant/misalignment guard: drop positions dominated by a different base, not a modification
     if ndiff > (count_diff_factor * cov):
         return False
+    # (2) confident-call guard: confident modified calls must outweigh low-confidence (failed) calls
     if nmod <= (nfail + mod_fail_margin):
+        return False
+    # (3) NFail-SCORE k-ratio (Nelson et al., "NFail-SCORE"): error-prone false-positive sites carry
+    # a large NFail; true sites carry a small one. Require k = Nmod / (NFail + 1) >= nfail_score_k,
+    # with k calibrated per modification basecaller + version (see resources/nfail_score_k_calibration.tsv).
+    # Disabled when nfail_score_k <= 0.
+    if nfail_score_k > 0.0 and nmod < nfail_score_k * (nfail + 1):
         return False
     return True
 
@@ -193,6 +202,10 @@ def parse_args():
     ap.add_argument("--filter-enable", action="store_true", help="Enable site-level filtering")
     ap.add_argument("--count-diff-factor", type=float, default=3.0, help="FAIL if Ndiff > factor * Nvalid_cov (default: 3)")
     ap.add_argument("--mod-fail-margin", type=int, default=1, help="FAIL if Nmod <= Nfail + margin (default: 1)")
+    ap.add_argument("--nfail-score-k", type=float, default=0.0,
+                    help="NFail-SCORE k-ratio filter: FAIL if Nmod < k*(Nfail+1), i.e. k = Nmod/(Nfail+1) < this. "
+                         "Calibrate k per modification basecaller + version (see resources/nfail_score_k_calibration.tsv). "
+                         "0 disables (default).")
 
     # output toggles (explicit on/off)
     ap.add_argument("--emit-raw", dest="emit_raw", action="store_true")
@@ -631,6 +644,7 @@ def dedup_reduce_sorted(
     filter_enable: bool,
     count_diff_factor: float,
     mod_fail_margin: int,
+    nfail_score_k: float = 0.0,
     verbose: bool = False,
 ) -> int:
     """
@@ -688,7 +702,7 @@ def dedup_reduce_sorted(
             )
 
         if pass_fh is not None:
-            if row_pass_filter(cov, nmod, nfail, ndiff, count_diff_factor, mod_fail_margin):
+            if row_pass_filter(cov, nmod, nfail, ndiff, count_diff_factor, mod_fail_margin, nfail_score_k):
                 pass_fh.write(f"{chrom}\t{start0}\t{end0}\t{strand}\t{mod}\n")
 
         dedup_written += 1
@@ -1406,6 +1420,7 @@ def main():
                 filter_enable=args.filter_enable,
                 count_diff_factor=args.count_diff_factor,
                 mod_fail_margin=args.mod_fail_margin,
+                nfail_score_k=args.nfail_score_k,
                 verbose=args.verbose
             )
 

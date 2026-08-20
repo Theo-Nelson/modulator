@@ -84,6 +84,7 @@ def process_chrom(chrom):
     min_cov = cfg["min_cov"]
     cdf = cfg["count_diff_factor"]
     mfm = cfg["mod_fail_margin"]
+    ksc = cfg.get("nfail_score_k", 0.0)
     filter_enable = cfg["filter_enable"]
 
     # one position-sorted iterator per bed that has this chrom
@@ -152,7 +153,7 @@ def process_chrom(chrom):
                         f"{cov}\t{nmod}\t{frac:.6f}\t{gid}\t{gname}\t"
                         f"{ncan}\t{nother}\t{ndel}\t{nfail}\t{ndiff}\t{nnoc}\n"
                     )
-                    if filter_enable and agg.row_pass_filter(cov, nmod, nfail, ndiff, cdf, mfm):
+                    if filter_enable and agg.row_pass_filter(cov, nmod, nfail, ndiff, cdf, mfm, ksc):
                         site_pass = True
                 if emit_raw:
                     dedup_raw.writelines(buf_dedup)
@@ -207,6 +208,8 @@ def parse_args():
     ap.add_argument("--jobs", type=int, default=8, help="chromosomes processed in parallel")
     ap.add_argument("--verbose", action="store_true")
     ap.add_argument("--filter-enable", dest="filter_enable", action="store_true", default=False)
+    ap.add_argument("--nfail-score-k", type=float, default=0.0,
+                    help="NFail-SCORE k-ratio filter: FAIL if Nmod < k*(Nfail+1). 0 disables (default).")
     for flag in ("emit-raw", "emit-filtered", "write-long",
                  "write-raw-per-gene", "write-filtered-per-gene"):
         dest = flag.replace("-", "_")
@@ -240,7 +243,8 @@ def main():
         print(f"[stream] {len(beds)} beds, {len(chroms)} chromosomes, jobs={args.jobs}", file=sys.stderr, flush=True)
 
     cfg = dict(workdir=workdir, min_cov=args.min_cov, count_diff_factor=args.count_diff_factor,
-               mod_fail_margin=args.mod_fail_margin, filter_enable=args.filter_enable, emit_raw=args.emit_raw)
+               mod_fail_margin=args.mod_fail_margin, nfail_score_k=args.nfail_score_k,
+               filter_enable=args.filter_enable, emit_raw=args.emit_raw)
 
     # ---- Phase 1: per-chromosome streaming merge (parallel, resumable) ----
     todo = [c for c in chroms if not os.path.exists(os.path.join(workdir, f".done.{agg.sanitize_filename_token(c)}"))]
