@@ -142,7 +142,6 @@ def main():
 
         snp_tx_out = tmp / "snp_tx.tsv"
         snp_mod_out = tmp / "snp_mod.tsv"
-        joint_out = tmp / "joint.tsv"
         hap_blocks = tmp / "hap_blocks.tsv"
         hap_mols = tmp / "hap_molecules.tsv"
         hap_tx_out = tmp / "hap_tx.tsv"
@@ -150,13 +149,11 @@ def main():
 
         run([sys.executable, str(ROOT / "test_snp_transcript_assoc.py"), "--molecule-snps", str(snp_path), "--out-tsv", str(snp_tx_out), "--min-allele-reads", "2", "--min-transcript-reads", "2"])
         run([sys.executable, str(ROOT / "test_snp_mod_assoc.py"), "--molecule-snps", str(snp_path), "--molecule-mods", str(mod_path), "--out-tsv", str(snp_mod_out), "--min-allele-reads", "2", "--min-total-reads", "4"])
-        run([sys.executable, str(ROOT / "test_snp_tx_mod_dependency.py"), "--molecule-snps", str(snp_path), "--molecule-mods", str(mod_path), "--snp-transcript-assoc", str(snp_tx_out), "--snp-mod-assoc", str(snp_mod_out), "--out-tsv", str(joint_out), "--min-stratum-reads", "2"])
         run([sys.executable, str(ROOT / "build_haplotype_blocks.py"), "--molecule-snps", str(snp_path), "--out-blocks-tsv", str(hap_blocks), "--out-molecules-tsv", str(hap_mols), "--min-alt-reads", "2", "--min-cocover-reads", "2", "--max-block-snps", "4", "--min-haplotype-reads", "2"])
         run([sys.executable, str(ROOT / "test_haplotype_associations.py"), "--molecule-haplotypes", str(hap_mols), "--molecule-mods", str(mod_path), "--out-haplotype-transcript", str(hap_tx_out), "--out-haplotype-mod", str(hap_mod_out), "--min-haplotype-reads", "2", "--min-transcript-reads", "2", "--min-total-reads", "4"])
 
         snp_tx = pd.read_csv(snp_tx_out, sep="\t")
         snp_mod = pd.read_csv(snp_mod_out, sep="\t")
-        joint = pd.read_csv(joint_out, sep="\t")
         hap_blocks_df = pd.read_csv(hap_blocks, sep="\t")
         hap_tx = pd.read_csv(hap_tx_out, sep="\t")
         hap_mod = pd.read_csv(hap_mod_out, sep="\t")
@@ -165,8 +162,6 @@ def main():
             raise AssertionError("Expected non-empty SNP to transcript associations.")
         if snp_mod.empty:
             raise AssertionError("Expected non-empty SNP to mod associations.")
-        if joint.empty:
-            raise AssertionError("Expected non-empty joint dependency results.")
         if hap_blocks_df.empty:
             raise AssertionError("Expected at least one haplotype block.")
         if hap_tx.empty:

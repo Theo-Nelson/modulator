@@ -332,7 +332,7 @@ def exon_gap(a, b):
 TAXONOMY = {
     "PRIVATE":       ["SKIPPED_EXON", "INTRONIC_POLYA", "ALT_LAST_EXON"],
     "SHARED_LOCAL":  ["ALT_DONOR", "ALT_ACCEPTOR", "ALT_POLYA_SITE", "NEAR_ALT_JUNCTION"],
-    "SHARED_DISTAL": ["DISTAL_CHANGE"],
+    "SHARED_DISTAL": ["DISTAL_APA", "DISTAL_SPLICING"],
     "UNEXPLAINABLE": ["FIVE_PRIME_UNCERTAIN", "INTRON_READ_ARTIFACT", "NO_MODEL", "UNRESOLVED"],
 }
 BUCKET_ORDER = ["PRIVATE", "SHARED_LOCAL", "SHARED_DISTAL", "UNEXPLAINABLE"]
@@ -438,8 +438,11 @@ def classify_tree(gene, pos, hiZN, loZN, iso, *, tes_tol, ejc_nt):
         d = 'JUNCTION_REMOVED_HIGHER' if info['jd_hi'] > ejc_nt else 'JUNCTION_PRESENT_HIGHER'
         return 'SHARED_LOCAL', 'NEAR_ALT_JUNCTION', d, info
 
-    # (d) the base's exon is identical in both -> the structural difference is DISTAL
-    return 'SHARED_DISTAL', 'DISTAL_CHANGE', polar, info
+    # (d) the base's exon is identical in both -> the structural difference is DISTAL. Sub-classify
+    # by WHERE it is: a different 3' end (distal APA) or a splicing difference elsewhere (same 3' end).
+    if ht is not None and lt is not None and abs(ht - lt) > tes_tol:
+        return 'SHARED_DISTAL', 'DISTAL_APA', polar, info
+    return 'SHARED_DISTAL', 'DISTAL_SPLICING', 'CO_TERMINAL_HIGHER', info
 
 
 CATEGORY_ORDER = [

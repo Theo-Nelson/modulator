@@ -19,8 +19,7 @@ Special case worth its own flag: if the SNP IS the modified base and the alt all
 modification (m6A needs an A), the "association" is DEFINITIONAL, not regulatory -- there is simply
 no A to methylate on alt reads. Those are flagged ``mod_base_ablated`` so they can be excluded.
 
-Primary key = ``{positional_class}__{motif_effect}``. Composes with the mediation call already in
-test_snp_tx_mod_dependency.py (direct vs transcript-mediated).
+Primary key = ``{positional_class}__{motif_effect}``.
 """
 import argparse
 import json

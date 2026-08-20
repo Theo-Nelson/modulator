@@ -220,7 +220,7 @@ genotype:
   min_baseq: 20
   min_mapq: 10
   min_mod_site_cov: 1
-  mod_sites_require_snp_link: true   # keep only mod sites whose context_key matches a candidate SNP (sites that can pair with a SNP on a shared read); lossless for snp_mod / snp_tx_mod_dependency / haplotype_mod, avoids 100k+-site molecule_mod OOM on deep genome-wide data. Set false to keep all mod sites.
+  mod_sites_require_snp_link: true   # keep only mod sites whose context_key matches a candidate SNP (sites that can pair with a SNP on a shared read); lossless for snp_mod / haplotype_mod, avoids 100k+-site molecule_mod OOM on deep genome-wide data. Set false to keep all mod sites.
 
   # Pre-subset each BAM to the union of candidate SNP + mod-site regions (samtools view -M -L)
   # before the per-molecule scans. Every read that can contribute to a snp/mod/haplotype

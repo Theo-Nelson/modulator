@@ -276,10 +276,6 @@ class PipelinePaths:
         return self.genotype / f"{self.prefix}_snp_mod_assoc.tsv"
 
     @property
-    def geno_joint(self) -> Path:
-        return self.genotype / f"{self.prefix}_snp_tx_mod_dependency.tsv"
-
-    @property
     def geno_hap_blocks(self) -> Path:
         return self.genotype / f"{self.prefix}_haplotype_blocks.tsv"
 
@@ -1431,7 +1427,7 @@ class ModulatorPipeline:
             "--min-total-cov", str(int(geno.get("min_mod_site_cov", 1))),
         ]
         # Restrict candidate mod sites to those that can pair with a candidate SNP (same
-        # context_key on a shared read). Lossless for snp_mod_assoc/snp_tx_mod_dependency/
+        # context_key on a shared read). Lossless for snp_mod_assoc/
         # haplotype_mod_assoc and keeps the per-read mod table tractable on deep genome-wide
         # data (otherwise 100k+ sites -> molecule_mod_calls OOM). Toggle off to keep all sites.
         if as_bool(geno.get("mod_sites_require_snp_link", True), True):
@@ -1644,18 +1640,6 @@ class ModulatorPipeline:
                 ],
                 label="classify_snp_mod_mechanism",
             )
-        self.run_python_script(
-            "test_snp_tx_mod_dependency.py",
-            [
-                "--molecule-snps", str(self.paths.geno_molecule_snps),
-                "--molecule-mods", str(self.paths.geno_molecule_mod_calls),
-                "--snp-transcript-assoc", str(self.paths.geno_snp_tx),
-                "--snp-mod-assoc", str(self.paths.geno_snp_mod),
-                "--out-tsv", str(self.paths.geno_joint),
-                "--min-stratum-reads", str(int(geno.get("min_group_reads", 4))),
-            ],
-            label="test_snp_tx_mod_dependency",
-        )
         self.run_python_script(
             "build_haplotype_blocks.py",
             [
@@ -1976,7 +1960,8 @@ class ModulatorPipeline:
             "--candidate-snps", str(self.paths.geno_candidate_snps) if self.paths.geno_candidate_snps.exists() else "",
             "--snp-tx-assoc", str(self.paths.geno_snp_tx) if self.paths.geno_snp_tx.exists() else "",
             "--snp-mod-assoc", str(self.paths.geno_snp_mod) if self.paths.geno_snp_mod.exists() else "",
-            "--snp-tx-mod-assoc", str(self.paths.geno_joint) if self.paths.geno_joint.exists() else "",
+            "--assembled-gtf", str(self.paths.out_gtf) if self.paths.out_gtf.exists() else "",
+            "--molecule-mod-calls", str(self.paths.geno_molecule_mod_calls) if self.paths.geno_molecule_mod_calls.exists() else "",
             "--hap-blocks", str(self.paths.geno_hap_blocks) if self.paths.geno_hap_blocks.exists() else "",
             "--hap-tx-assoc", str(self.paths.geno_hap_tx) if self.paths.geno_hap_tx.exists() else "",
             "--hap-mod-assoc", str(self.paths.geno_hap_mod) if self.paths.geno_hap_mod.exists() else "",

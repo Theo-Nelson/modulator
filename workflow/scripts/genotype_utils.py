@@ -113,48 +113,6 @@ def run_contingency_test(
     return do_chi2(tab)
 
 
-def cmh_test_2x2xk(strata: List[np.ndarray]) -> Tuple[float, float, float]:
-    valid = []
-    for tab in strata:
-        tt = np.asarray(tab, dtype=float)
-        if tt.shape != (2, 2):
-            continue
-        if tt.sum() <= 1:
-            continue
-        valid.append(tt)
-    if not valid:
-        return 0.0, 1.0, 0.0
-
-    num = 0.0
-    den = 0.0
-    or_num = 0.0
-    or_den = 0.0
-    for tt in valid:
-        a, b = tt[0, 0], tt[0, 1]
-        c, d = tt[1, 0], tt[1, 1]
-        n = a + b + c + d
-        row1 = a + b
-        row2 = c + d
-        col1 = a + c
-        col2 = b + d
-        expected_a = (row1 * col1) / n if n > 0 else 0.0
-        if n > 1:
-            var_a = (row1 * row2 * col1 * col2) / (n * n * (n - 1))
-        else:
-            var_a = 0.0
-        num += (a - expected_a)
-        den += var_a
-        or_num += (a * d) / n if n > 0 else 0.0
-        or_den += (b * c) / n if n > 0 else 0.0
-
-    if den <= 0:
-        return 0.0, 1.0, 0.0
-    stat = (num * num) / den
-    p_value = float(chi2.sf(stat, 1))
-    common_or = float(or_num / or_den) if or_den > 0 else float("inf")
-    return float(stat), p_value, common_or
-
-
 def robust_load_summary(path: str) -> pd.DataFrame:
     if not path or not os.path.exists(path) or os.path.getsize(path) == 0:
         return pd.DataFrame()

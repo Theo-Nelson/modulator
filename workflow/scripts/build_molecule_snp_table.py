@@ -176,7 +176,7 @@ def main():
         df = df.drop_duplicates(["sample", "qname", "snp_id"], keep="first")
         # Deterministic on-disk order: parallel (BAM x chrom) sharding returns rows in
         # nondeterministic completion order. Sort so the molecule table and every
-        # order-sensitive consumer (haplotype blocks, snp_tx_mod_dependency) are reproducible.
+        # order-sensitive consumer (haplotype blocks) are reproducible.
         df = df.sort_values(["chrom", "pos1", "snp_id", "sample", "qname"]).reset_index(drop=True)
     else:
         df = pd.DataFrame(columns=[

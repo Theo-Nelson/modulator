@@ -57,10 +57,15 @@ CASES = [
       2: ([(1000, 1200), (2000, 3000)], 3000, 100)},
      2300, 1, 2, "SHARED_LOCAL", "ALT_POLYA_SITE"),
 
-    ("SHARED_DISTAL_CHANGE",        # base's exon identical in both; forms differ only in the 5' exon
+    ("SHARED_DISTAL_SPLICING",      # base's exon identical, SAME 3' end (tes 3500); forms differ only in the 5' exon
      {1: ([(1000, 1200), (2000, 2200), (3000, 3500)], 3500, 100),
       2: ([(1500, 1700), (2000, 2200), (3000, 3500)], 3500, 100)},
-     3200, 1, 2, "SHARED_DISTAL", "DISTAL_CHANGE"),
+     3200, 1, 2, "SHARED_DISTAL", "DISTAL_SPLICING"),
+
+    ("SHARED_DISTAL_APA",           # base's exon (middle) identical in both; forms differ only in 3' end / poly(A) site
+     {1: ([(1000, 1200), (2000, 2200), (3000, 3500)], 3500, 100),
+      2: ([(1000, 1200), (2000, 2200), (3000, 4200)], 4200, 100)},
+     2100, 1, 2, "SHARED_DISTAL", "DISTAL_APA"),
 
     ("UNEXPLAINABLE_INTRON_READ",   # the higher-m6A form does not structurally contain the base (intronic)
      {1: ([(1000, 1200), (3000, 3500)], 3500, 100),

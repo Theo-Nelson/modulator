@@ -15,7 +15,7 @@ def parse_args():
     ap.add_argument("--candidate-snps", default="", help=(
         "Candidate SNP TSV. When given, keep only mod sites whose context_key "
         "(metagene/gene/chrom) matches a candidate SNP's context_key -- i.e. sites that can "
-        "actually pair with a SNP on a shared read in snp_mod_assoc / snp_tx_mod_dependency / "
+        "actually pair with a SNP on a shared read in snp_mod_assoc / "
         "haplotype_mod_assoc. Drops genome-wide mod sites with no linked SNP (lossless for "
         "those outputs) and keeps the per-read mod table tractable on deep data."))
     ap.add_argument("--out-tsv", required=True, help="Output candidate mod site TSV")
@@ -72,7 +72,7 @@ def main():
 
     # Keep only SNP-linked mod sites: downstream pairing is by equal context_key on a shared
     # read, so a mod site whose context has no candidate SNP can never appear in
-    # snp_mod_assoc / snp_tx_mod_dependency / haplotype_mod_assoc. Dropping those is lossless
+    # snp_mod_assoc / haplotype_mod_assoc. Dropping those is lossless
     # for those outputs and keeps the per-read mod-call table at SNP scale.
     if args.candidate_snps and os.path.exists(args.candidate_snps) and os.path.getsize(args.candidate_snps) and not out.empty:
         snps = load_input(args.candidate_snps)
@@ -81,7 +81,7 @@ def main():
             # context_key is GENE:{gene_name}; the SNP side, at a single-metagene locus, yields
             # MG:{metagene}. Comparing those directly (the old code) made isin() False and dropped
             # EVERY linkable mod site -- violating this filter's "lossless" promise and silently
-            # emptying snp_mod_assoc / snp_tx_mod_dependency / haplotype_mod_assoc on real data.
+            # emptying snp_mod_assoc / haplotype_mod_assoc on real data.
             # Match at GENE granularity on both sides: also register each SNP's gene(s) as a
             # GENE: key. This is a lossless superset -- it never drops a mod site that could pair
             # with a SNP, and may keep a few extra same-gene/different-metagene sites (safe).

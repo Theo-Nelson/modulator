@@ -26,7 +26,7 @@ _EFFECT_COLS = [
     "weighted_within_tx_effect", "overall_effect_abs_delta_mod_frac",
     "effect_max_abs_mod_rate_diff",
 ]
-_PADJ_COLS = ["p_adj_bh", "cmh_p_adj_bh"]
+_PADJ_COLS = ["p_adj_bh"]
 _READS_COLS = ["n_reads", "support_reads", "n_alt_reads", "complete_reads"]
 
 
@@ -134,34 +134,6 @@ def _fig_snp_mod(row, plt):
     return fig, f"{row.get('snp_id','')} {gene} {row.get('target_mod_code','')} (allele→mod)"
 
 
-def _fig_snp_tx_mod(row, plt):
-    import numpy as np
-    data = _load_json(row.get("strata_json"))
-    if not data:
-        return None
-    txs = [_short_zt(d.get("ZT", "?")) for d in data]
-    ref_f = [_frac(d.get("ref_modified"), d.get("ref_not_target"))[0] for d in data]
-    alt_f = [_frac(d.get("alt_modified"), d.get("alt_not_target"))[0] for d in data]
-    nreads = [int(d.get("n_reads", 0)) for d in data]
-    refb, altb = _alleles(row.get("snp_id"))
-    x = np.arange(len(txs)); w = 0.38
-    fig, ax = plt.subplots(figsize=(max(4.4, 1.3 * len(txs) + 2.0), 3.5))
-    ax.bar(x - w / 2, ref_f, w, label=f"ref ({refb})", color="#4878a8")
-    ax.bar(x + w / 2, alt_f, w, label=f"alt ({altb})", color="#c0552f")
-    for xi, (rf, af, nr) in enumerate(zip(ref_f, alt_f, nreads)):
-        ax.text(xi, max(rf, af) + 0.02, f"n={nr}", ha="center", va="bottom", fontsize=7, color="#555")
-    ax.set_xticks(x); ax.set_xticklabels(txs, fontsize=8, rotation=20, ha="right")
-    ax.set_ylim(0, 1.18); ax.set_ylabel(f"fraction modified ({row.get('target_mod_code','')})")
-    ax.set_xlabel("transcript stratum")
-    cls = str(row.get("classification", ""))
-    ax.set_title(f"{row.get('snp_id','')}  {row.get('mod_site_id','')}\nper-transcript allele effect — {cls}", fontsize=8.5)
-    ax.legend(fontsize=7, frameon=False, loc="upper right")
-    for sp in ("top", "right"):
-        ax.spines[sp].set_visible(False)
-    fig.tight_layout()
-    return fig, f"{row.get('snp_id','')} {row.get('mod_site_id','')} ({cls})"
-
-
 def _fig_hap(row, plt):
     import numpy as np
     data = _load_json(row.get("per_table_json"))
@@ -209,7 +181,6 @@ def _fig_hap(row, plt):
 _KINDS = {
     "snp_tx":     ("_fig_snp_transcript", "SNP→transcript example(s)"),
     "snp_mod":    ("_fig_snp_mod",        "SNP→modification example(s)"),
-    "snp_tx_mod": ("_fig_snp_tx_mod",     "SNP×transcript×mod example(s)"),
     "hap_tx":     ("_fig_hap",            "haplotype→transcript example(s)"),
     "hap_mod":    ("_fig_hap",            "haplotype→modification example(s)"),
 }
@@ -279,17 +250,16 @@ def _gallery(df, kind, figs_dir, max_figs, min_reads):
     )
 
 
-def build_snp_galleries(*, snp_tx=None, snp_mod=None, snp_tx_mod=None,
+def build_snp_galleries(*, snp_tx=None, snp_mod=None,
                         hap_tx=None, hap_mod=None, figs_dir="", max_figs=12, min_reads=10):
     """Return {section_key: gallery_html} for the per-example SNP figures.
 
-    section_key in {snp_tx, snp_mod, snp_tx_mod, hap_tx, hap_mod}. Missing/empty
+    section_key in {snp_tx, snp_mod, hap_tx, hap_mod}. Missing/empty
     tables yield "" for that key.
     """
     return {
         "snp_tx":     _gallery(snp_tx,     "snp_tx",     figs_dir, max_figs, min_reads),
         "snp_mod":    _gallery(snp_mod,    "snp_mod",    figs_dir, max_figs, min_reads),
-        "snp_tx_mod": _gallery(snp_tx_mod, "snp_tx_mod", figs_dir, max_figs, min_reads),
         "hap_tx":     _gallery(hap_tx,     "hap_tx",     figs_dir, max_figs, min_reads),
         "hap_mod":    _gallery(hap_mod,    "hap_mod",    figs_dir, max_figs, min_reads),
     }

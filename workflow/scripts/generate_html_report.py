@@ -187,8 +187,6 @@ COLUMN_DEFINITIONS = {
     "n_modified": "Reads classified as modified for the target mod code.",
     "n_not_target": "Reads classified as canonical or as another modification state for the target site.",
     "n_transcripts_tested": "Number of fragmentform partitions retained in the reported test.",
-    "cmh_p_value": "Cochran-Mantel-Haenszel p-value after stratifying by fragmentform.",
-    "cmh_p_adj_bh": "Benjamini-Hochberg adjusted CMH p-value.",
     "complete_reads": "Reads covering every SNP in the reported haplotype block.",
     "support_reads": "Reads overlapping at least one SNP in the reported haplotype block.",
     "n_snps": "Number of SNPs represented in the reported haplotype block.",
@@ -301,7 +299,12 @@ def parse_args():
     ap.add_argument("--candidate-snps", default="")
     ap.add_argument("--snp-tx-assoc", default="")
     ap.add_argument("--snp-mod-assoc", default="")
-    ap.add_argument("--snp-tx-mod-assoc", default="")
+    ap.add_argument("--assembled-gtf", default="",
+                    help="assembled GTF (per-fragmentform exon models) used to break the cis-SNP→mod "
+                         "stoichiometry hits down per fragmentform and flag which forms cover the site")
+    ap.add_argument("--molecule-mod-calls", default="",
+                    help="per-read modification-call table (with ZN fragmentform tag); read-backs the "
+                         "per-fragmentform stoichiometry graphs in the cis-SNP→mod section")
     ap.add_argument("--hap-blocks", default="")
     ap.add_argument("--hap-tx-assoc", default="")
     ap.add_argument("--hap-mod-assoc", default="")
@@ -402,19 +405,202 @@ def significance_note_box(concordance):
         return ""
     return (
         "<div class='callout-warn'>"
-        "<b>Read this first — significance is cheap here; rank by effect size, not p-value.</b> "
+        "<b>Read this first — please consider both effect size and p-value.</b> "
         "Your replicates are highly reproducible: " + "; ".join(parts) + ". "
         "When replicates agree this tightly the replicate-aware tests have very high power, so a shift "
-        "of only a couple of percentage points can clear FDR even though it may be biologically "
-        "trivial. Sort the tables below by <b>|delta|</b> / the effect-size column (not by p-value) to "
-        "surface the meaningful changes."
+        "of only a couple of percentage points can clear FDR even though it may be biologically less "
+        "meaningful."
         "</div>"
     )
 
 
 from plot_utils import save_figure, setup_matplotlib_style, bump_fonts
 
+try:  # per-fragmentform structural coverage for the cis-SNP→mod breakdown graphs
+    from classify_diff_sites import load_isoforms, status_in
+except Exception:
+    load_isoforms = status_in = None
+
 _REPORT_FIGS_DIR = None  # set by main(); when set, inline summary charts also write PNG/PDF/SVG here
+
+
+def _first_gene(g):
+    """First gene name out of a possibly multi-gene field ('A,B' / 'A;B' / 'A|B' / 'A B')."""
+    s = str(g or "")
+    for sep in (",", ";", "|", "/", " "):
+        s = s.replace(sep, ",")
+    toks = [t for t in s.split(",") if t and t.lower() != "nan"]
+    return toks[0] if toks else ""
+
+
+def _scan_perff_mod_calls(mol_mods_path, sites):
+    """Scan the per-read mod-call table (chunked + filtered, so it stays bounded at genome scale) and
+    return {(chrom,start0,mod_code): {ZN: [n_modified, n_reads]}} for the requested sites only.
+
+    ZN is the fragmentform partition tag, so grouping the per-read calls at a site by ZN gives the TRUE
+    per-fragmentform stoichiometry (read-backed) — unlike the aggregate_zn FILTERED table, which drops
+    sites that do not clear the per-fragmentform coverage/fail filter."""
+    acc = {}
+    want = {(str(c), int(s), str(mc)) for (_g, c, s, mc) in sites}
+    if not mol_mods_path or not os.path.exists(mol_mods_path) or not want:
+        return acc
+    keep = ["chrom", "start0", "target_mod_code", "target_modified", "ZN", "usable"]
+    try:
+        reader = pd.read_csv(mol_mods_path, sep="\t", usecols=lambda c: c in keep,
+                             chunksize=200000, low_memory=False)
+    except Exception:
+        return acc
+    for chunk in reader:
+        if not {"chrom", "start0", "target_mod_code", "ZN"}.issubset(chunk.columns):
+            break
+        chunk = chunk.copy()
+        chunk["start0"] = pd.to_numeric(chunk["start0"], errors="coerce")
+        chunk = chunk.dropna(subset=["start0"])
+        chunk["start0"] = chunk["start0"].astype(int)
+        if "usable" in chunk.columns:
+            chunk = chunk[chunk["usable"].astype(str).str.lower().isin(("true", "1"))]
+        for (c, s, mc), grp in chunk.groupby(["chrom", "start0", "target_mod_code"]):
+            key = (str(c), int(s), str(mc))
+            if key not in want:
+                continue
+            per_zn = acc.setdefault(key, {})
+            for zn, zg in grp.groupby("ZN"):
+                try:
+                    zn_i = int(float(zn))
+                except (TypeError, ValueError):
+                    continue  # unassigned reads (blank ZN) belong to no fragmentform
+                nmod = pd.to_numeric(zg["target_modified"], errors="coerce").fillna(0).astype(float).sum()
+                cell = per_zn.setdefault(zn_i, [0.0, 0])
+                cell[0] += float(nmod); cell[1] += int(len(zg))
+    return acc
+
+
+def snp_mod_fragmentform_png(gene, chrom, mod_start0, mod_code, iso, perff):
+    """Per-fragmentform modification stoichiometry at ONE cis-SNP-linked mod site. For every
+    fragmentform (ZN) of the gene: forms with reads at the position get a bar = read-backed
+    frac_modified (n = reads); forms whose assembled model does not include the position are drawn as a
+    grey hatched 'does not cover this position' band; forms that include it structurally but have no
+    reads here are flagged. ``perff`` is {ZN: [n_modified, n_reads]} for this site. base64 PNG or ''."""
+    if not iso or status_in is None:
+        return ""
+
+    def _zn_int(z):
+        try:
+            return int(float(z))
+        except (TypeError, ValueError):
+            return None
+
+    zns = [zn for (g, zn) in iso.keys() if g == gene]
+    if not zns:
+        return ""
+    zns.sort(key=lambda z: (_zn_int(z) is None, _zn_int(z) if _zn_int(z) is not None else 0, str(z)))
+    strand = iso[(gene, zns[0])]["strand"]
+    pos = int(mod_start0) + 1  # 1-based, to match the GTF exon coords used by status_in
+    perff = perff or {}
+    try:
+        import matplotlib
+        matplotlib.use("Agg")
+        import matplotlib.pyplot as plt
+        from io import BytesIO
+    except Exception:
+        return ""
+    # Classify every fragmentform; PLOT the ones that carry the site (reads, or in-model), and collapse
+    # the many that structurally do not cover it into a single summary row (keeps the figure readable
+    # on genes with dozens of partial fragmentforms).
+    with_reads, n_other = [], 0
+    for zn in zns:
+        nmod, nreads = perff.get(_zn_int(zn), (0.0, 0))  # perff is keyed by INTEGER ZN
+        if nreads:
+            with_reads.append((zn, nmod / nreads, int(nreads)))
+        else:
+            n_other += 1  # in the model but no reads here, or does not cover the site at all
+    with_reads.sort(key=lambda t: t[1], reverse=True)
+    rows = []  # (label, frac, kind, annotation)
+    for zn, frac, nreads in with_reads:
+        rows.append((f"ZN{zn}", frac, "reads", f"{frac*100:.0f}%  (n={nreads})"))
+    if n_other:
+        rows.append((f"{n_other} other fragmentform{'s' if n_other != 1 else ''}", 1.0, "not_covered",
+                     "no reads at / do not cover this position"))
+    if not rows:
+        return ""
+    rows = rows[::-1]  # first (highest stoichiometry) at the TOP of the horizontal bar chart
+    height = max(2.0, 0.46 * len(rows) + 1.0)
+    fig, ax = plt.subplots(figsize=(8.4, height))
+    ypos = list(range(len(rows)))
+    for y, (_lab, frac, kind, _a) in zip(ypos, rows):
+        if kind == "reads":
+            ax.barh(y, frac, color="#17807f", edgecolor="#0f5c5b", linewidth=0.9)
+        elif kind == "not_covered":
+            ax.barh(y, 1.0, color="#ededed", edgecolor="#cfcfcf", linewidth=0.8, hatch="///")
+        # model_no_reads: no bar, just the annotation
+    ax.set_yticks(ypos); ax.set_yticklabels([r[0] for r in rows], fontsize=9)
+    ax.set_xlim(0, 1.0); ax.set_xlabel("Modified fraction (stoichiometry)")
+    ax.set_title(f"{gene}  {chrom}:{pos} ({mod_code}) — per-fragmentform stoichiometry")
+    for y, (_lab, frac, kind, a) in zip(ypos, rows):
+        xt = min((frac + 0.02) if kind == "reads" else 0.02, 0.72)
+        ax.text(xt, y, a, va="center", ha="left", fontsize=8,
+                color="#4a3f35" if kind == "reads" else "#9a9a9a")
+    ax.grid(True, axis="x", linestyle="--", linewidth=0.6, alpha=0.4)
+    for sp in ("top", "right"):
+        ax.spines[sp].set_visible(False)
+    fig.tight_layout()
+    _save_report_chart(fig, f"snp_mod_fragmentform_{_first_gene(gene)}_{pos}_{mod_code}")
+    buf = BytesIO()
+    fig.savefig(buf, format="png", dpi=200, bbox_inches="tight")
+    plt.close(fig)
+    return "data:image/png;base64," + base64.b64encode(buf.getvalue()).decode("ascii")
+
+
+def build_snp_mod_fragmentform_html(snp_mod_df, iso, mol_mods_path, top_n):
+    """For the top cis-SNP→modification hits, a per-fragmentform stoichiometry breakdown at each hit's
+    modified position, read-backed from the per-read mod-call table (ZN = fragmentform)."""
+    if snp_mod_df is None or snp_mod_df.empty or not iso or status_in is None:
+        return ""
+    if not {"chrom", "mod_start0", "target_mod_code"}.issubset(snp_mod_df.columns):
+        return ""
+    srt = snp_mod_df.sort_values("p_adj_bh", ascending=True) if "p_adj_bh" in snp_mod_df.columns else snp_mod_df
+    iso_genes = {g for (g, _z) in iso.keys()}
+    # First pass: resolve the top-N target sites (gene + coordinates), then a single chunked scan.
+    sites, seen = [], set()
+    for _, r in srt.iterrows():
+        ms0 = r.get("mod_start0")
+        if pd.isna(ms0):
+            continue
+        chrom = str(r.get("chrom")); mc = str(r.get("target_mod_code"))
+        gene = _first_gene(r.get("gene_names", ""))
+        if gene not in iso_genes:
+            continue  # no assembled models for this gene → cannot lay out its fragmentforms
+        key = (gene, chrom, int(ms0), mc)
+        if key in seen:
+            continue
+        seen.add(key)
+        sites.append(key)
+        if len(sites) >= top_n:
+            break
+    if not sites:
+        return ""
+    perff_all = _scan_perff_mod_calls(mol_mods_path, sites)
+    cards = []
+    for (gene, chrom, ms0, mc) in sites:
+        perff = perff_all.get((str(chrom), int(ms0), str(mc)), {})
+        img = snp_mod_fragmentform_png(gene, chrom, ms0, mc, iso, perff)
+        if not img:
+            continue
+        cards.append(clickable_image_html(
+            img, f"Per-fragmentform stoichiometry at {gene} {chrom}:{ms0+1} ({mc})",
+            caption=f"{gene} {chrom}:{ms0+1} ({mc}): the target modification's read-backed stoichiometry in "
+                    "each fragmentform (ZN partition) that has reads at the site (bar = modified fraction, "
+                    "n = reads). The single grey hatched bar collapses every remaining fragmentform of the "
+                    "gene that has no reads here — either because its model does not cover the position or "
+                    "because it is unsampled at it."))
+    if not cards:
+        return ""
+    return ("<h3>Per-fragmentform breakdown at top cis-SNP-linked modification sites</h3>"
+            "<p class='section-intro'>For each top hit, the target modification's stoichiometry is broken "
+            "down across every fragmentform (ZN partition) of the gene, computed directly from the per-read "
+            "modification calls. A fragmentform is only comparable where its assembled transcript model "
+            "places the site in its mature RNA; forms that do not cover the position are labelled as "
+            "such.</p>" + "".join(cards))
 
 
 def _save_report_chart(fig, name):
@@ -925,6 +1111,7 @@ def build_sequence_elements_section(se_df, summ_df, top_n):
     if fig:
         parts.append(clickable_image_html(fig, "Sequence elements: modification-carrying instances per type",
                                           caption="Per element type, how many instances overlap a modification (any code)."))
+    parts.append("<h3>Summary Across All Sequence Elements</h3>")
     parts.append(
         "<ul>"
         f"<li><b>{n_inst:,}</b> element instances across <b>{se_df['element_type'].nunique()}</b> element types</li>"
@@ -1121,8 +1308,38 @@ def build_polya_section(frag_df, diffs_df, mod_df, top_n, diff_figs_dir="", mod_
 CLASS_TAXONOMY = {
     "PRIVATE":       ["SKIPPED_EXON", "INTRONIC_POLYA", "ALT_LAST_EXON"],
     "SHARED_LOCAL":  ["ALT_DONOR", "ALT_ACCEPTOR", "ALT_POLYA_SITE", "NEAR_ALT_JUNCTION"],
-    "SHARED_DISTAL": ["DISTAL_CHANGE"],
+    "SHARED_DISTAL": ["DISTAL_APA", "DISTAL_SPLICING"],
     "UNEXPLAINABLE": ["FIVE_PRIME_UNCERTAIN", "INTRON_READ_ARTIFACT", "NO_MODEL", "UNRESOLVED"],
+}
+
+# Level 3 of the tree: the direction sub-categories each event can resolve to. Every direction listed
+# here is always shown for its event (with a zero count when none landed there), so the tree is a
+# complete, self-documenting enumeration rather than only whatever the run happened to produce.
+EVENT_DIRECTIONS = {
+    "SKIPPED_EXON":         ["WITH_EXON_HIGHER"],
+    "INTRONIC_POLYA":       ["IPA_TRANSCRIPT_HIGHER"],
+    "ALT_LAST_EXON":        ["LONGER_EXON_HIGHER", "SHORTER_EXON_HIGHER"],
+    "ALT_DONOR":            ["LONGER_EXON_HIGHER", "SHORTER_EXON_HIGHER"],
+    "ALT_ACCEPTOR":         ["LONGER_EXON_HIGHER", "SHORTER_EXON_HIGHER"],
+    "ALT_POLYA_SITE":       ["PROXIMAL_HIGHER", "DISTAL_HIGHER"],
+    "NEAR_ALT_JUNCTION":    ["JUNCTION_REMOVED_HIGHER", "JUNCTION_PRESENT_HIGHER"],
+    "DISTAL_APA":           ["PROXIMAL_HIGHER", "DISTAL_HIGHER"],
+    "DISTAL_SPLICING":      ["CO_TERMINAL_HIGHER"],
+    "FIVE_PRIME_UNCERTAIN": [],
+    "INTRON_READ_ARTIFACT": [],
+    "NO_MODEL":             [],
+    "UNRESOLVED":           [],
+}
+DIRECTION_DEFINITIONS = {
+    "WITH_EXON_HIGHER":        "The more-modified fragmentform is the one that splices the cassette exon IN.",
+    "IPA_TRANSCRIPT_HIGHER":   "The more-modified fragmentform is the intronic-polyadenylation isoform (base lives in its retained-intron 3'UTR).",
+    "LONGER_EXON_HIGHER":      "The more-modified fragmentform carries the LONGER version of the base's exon (structural_delta_nt = the extra length).",
+    "SHORTER_EXON_HIGHER":     "The more-modified fragmentform carries the SHORTER version of the base's exon.",
+    "PROXIMAL_HIGHER":         "The more-modified fragmentform uses the PROXIMAL (upstream, shorter-3'UTR) poly(A) site.",
+    "DISTAL_HIGHER":           "The more-modified fragmentform uses the DISTAL (downstream, longer-3'UTR) poly(A) site.",
+    "JUNCTION_REMOVED_HIGHER": "The more-modified fragmentform is the one in which the nearby splice junction has been REMOVED (EJC relief).",
+    "JUNCTION_PRESENT_HIGHER": "The more-modified fragmentform is the one that still has the nearby splice junction.",
+    "CO_TERMINAL_HIGHER":      "The two fragmentforms share the same 3' end; the more-modified one differs only in an internal / 5' splicing choice elsewhere.",
 }
 CLASS_BUCKET_ORDER = ["PRIVATE", "SHARED_LOCAL", "SHARED_DISTAL", "UNEXPLAINABLE"]
 BUCKET_DEFINITIONS = {
@@ -1139,7 +1356,8 @@ EVENT_DEFINITIONS = {
     "ALT_ACCEPTOR": "The base's exon uses a different 3' splice site (acceptor) in the two forms, changing that exon's length (structural_delta_nt).",
     "ALT_POLYA_SITE": "Same last exon, different poly(A) cleavage sites (tandem APA); the base is in the shared body of the last exon.",
     "NEAR_ALT_JUNCTION": "The base sits within the exon-junction-complex footprint of a splice junction present in one form and removed in the other (EJC relief).",
-    "DISTAL_CHANGE": "No structural difference at or near the base — its exon is identical in both forms; the isoforms differ elsewhere, so methylation tracks isoform identity.",
+    "DISTAL_APA": "The base's local exon is identical in both forms, but the forms end at DIFFERENT poly(A) sites (a distal alternative-polyadenylation choice); methylation tracks which 3' end the isoform uses.",
+    "DISTAL_SPLICING": "The base's local exon is identical AND the forms share the same 3' end; they differ only in an internal / 5' splicing choice ELSEWHERE, so methylation tracks that distal splicing decision.",
     "FIVE_PRIME_UNCERTAIN": "The base falls in (or 5' of) the 5'-most exon, where direct-RNA 5' truncation makes the assembled model unreliable — no confident structural call.",
     "INTRON_READ_ARTIFACT": "The more-modified form does not structurally contain the base (it is intronic there) — likely an intron / soft-clip read, not a real exonic modification.",
     "NO_MODEL": "Fewer than two adequately-covered fragmentforms at the site, so there is nothing to compare.",
@@ -1156,15 +1374,21 @@ def build_classification_section(class_df, private_df, class_figs_dir, arch_figs
     title = ("Classification of Transcript Architecture Changes Associated with Differential "
              "Epitranscriptomic Modification")
     intro = (
-        "Sites are placed in a tree. <b>Level 1</b>: does the base exist in the mature RNA of both "
-        "forms — <b>PRIVATE</b> (base only in the higher form) vs <b>SHARED</b>. <b>Level 2</b> "
-        "(shared): is the distinguishing structural change ON the base's exon (<b>SHARED_LOCAL</b>) "
-        "or elsewhere (<b>SHARED_DISTAL</b>)? A 4th bucket, <b>UNEXPLAINABLE</b>, holds sites with no "
-        "confident structural cause. PRIVATE sites are detected by a COVERAGE-INDEPENDENT structural "
-        "scan (every modified site checked against all fragmentform models of its gene) — so they are "
-        "found even when the form lacking the base has no coverage there, which the differential test "
-        "cannot see; SHARED / UNEXPLAINABLE come from the between-fragmentform differential test "
-        "(BH-FDR + the &gt;10% effect rule, tunable via classify_diffs.min_effect)."
+        "Sites are placed in a <b>three-level tree</b>. <b>Level 1 (bucket)</b>: does the base exist in "
+        "the mature RNA of both forms — <b>PRIVATE</b> (base only in the higher form) vs <b>SHARED</b>. "
+        "<b>Level 2 (event)</b> for shared sites: is the distinguishing structural change ON the base's "
+        "exon (<b>SHARED_LOCAL</b> → ALT_DONOR / ALT_ACCEPTOR / ALT_POLYA_SITE / NEAR_ALT_JUNCTION) or "
+        "ELSEWHERE in the transcript (<b>SHARED_DISTAL</b>)? SHARED_DISTAL now splits into <b>DISTAL_APA</b> "
+        "(the forms differ in their 3' end / poly(A) site) vs <b>DISTAL_SPLICING</b> (same 3' end, they "
+        "differ in an internal / 5' splicing choice). <b>Level 3 (direction)</b>: which form is the "
+        "more-modified one, worded per event (e.g. LONGER_EXON_HIGHER, PROXIMAL_HIGHER). A 4th bucket, "
+        "<b>UNEXPLAINABLE</b>, holds sites with no confident structural cause. Every bucket, event and "
+        "direction is ALWAYS listed — with a zero count where nothing landed there — so the taxonomy is "
+        "reported completely. PRIVATE sites are detected by a COVERAGE-INDEPENDENT structural scan (every "
+        "modified site checked against all fragmentform models of its gene) — so they are found even when "
+        "the form lacking the base has no coverage there, which the differential test cannot see; SHARED / "
+        "UNEXPLAINABLE come from the between-fragmentform differential test (BH-FDR + the &gt;10% effect "
+        "rule, tunable via classify_diffs.min_effect)."
     )
     class_ok = class_df is not None and not class_df.empty and "bucket" in class_df.columns
     priv_ok = private_df is not None and not private_df.empty and "bucket" in private_df.columns
@@ -1195,11 +1419,32 @@ def build_classification_section(class_df, private_df, class_figs_dir, arch_figs
 
     total = sum(count(b) for b in CLASS_BUCKET_ORDER) or 1
 
-    # ---- overview: complete bucket x event count grid (zeros included) + a bucket distribution ----
-    grid = pd.DataFrame([
-        {"bucket": b, "event": e, "n_sites": count(b, e), "pct": f"{100.0 * count(b, e) / total:.1f}%"}
-        for b in CLASS_BUCKET_ORDER for e in CLASS_TAXONOMY[b]
-    ])
+    def count_dir(bucket, event, direction):
+        df = src_for(bucket)
+        if df is None or df.empty or "bucket" not in df.columns:
+            return 0
+        m = (df["bucket"] == bucket) & (df["event"] == event)
+        if "direction" in df.columns:
+            m &= df["direction"].fillna("") == direction
+        elif direction:
+            return 0
+        return int(m.sum())
+
+    # ---- overview: complete bucket x event x direction count grid (all leaves, zeros included) ----
+    grid_rows = []
+    for b in CLASS_BUCKET_ORDER:
+        for e in CLASS_TAXONOMY[b]:
+            dlist = EVENT_DIRECTIONS.get(e, [])
+            if dlist:
+                for d in dlist:
+                    n = count_dir(b, e, d)
+                    grid_rows.append({"bucket": b, "event": e, "direction": d,
+                                      "n_sites": n, "pct": f"{100.0 * n / total:.1f}%"})
+            else:
+                n = count(b, e)
+                grid_rows.append({"bucket": b, "event": e, "direction": "—",
+                                  "n_sites": n, "pct": f"{100.0 * n / total:.1f}%"})
+    grid = pd.DataFrame(grid_rows)
     bucket_counts = {b: count(b) for b in CLASS_BUCKET_ORDER}
     hero = category_distribution_png(bucket_counts, mod_label=None)
     hero_html = clickable_image_html(hero, "Classification by top-level bucket", figure_class="hero-figure",
@@ -1207,14 +1452,30 @@ def build_classification_section(class_df, private_df, class_figs_dir, arch_figs
     overview = (
         "<div class='overview-layout'>"
         f"<div>{df_to_html(grid, max_rows=len(grid))}"
-        f"{definitions_html(list(BUCKET_DEFINITIONS.items()), summary='Bucket definitions', open_by_default=False)}"
-        f"{definitions_html(list(EVENT_DEFINITIONS.items()), summary='Event definitions (all events)', open_by_default=False)}"
+        f"{definitions_html(list(BUCKET_DEFINITIONS.items()), summary='Level 1-2: bucket definitions', open_by_default=False)}"
+        f"{definitions_html(list(EVENT_DEFINITIONS.items()), summary='Level 2: event definitions (all events)', open_by_default=False)}"
+        f"{definitions_html(list(DIRECTION_DEFINITIONS.items()), summary='Level 3: direction definitions (all directions)', open_by_default=False)}"
         "</div>"
         f"<div class='hero'>{hero_html or ''}</div>"
         "</div>"
     )
 
-    # ---- the tree: bucket -> event -> (direction summary + sites [+ figures]) ----
+    def render_sites(sub, bucket, cols):
+        """Table (+ architecture/mechanism figures for shared buckets) for a leaf set of sites."""
+        sort_col = "carry_frac" if bucket == "PRIVATE" else "effect_max_abs_frac_diff"
+        srt = sub.sort_values(sort_col, ascending=False) if sort_col in sub.columns else sub
+        tbl = df_to_html(srt[cols] if cols else srt, max_rows=top_n)
+        figs = ""
+        if bucket != "PRIVATE" and "class_key" in sub.columns:
+            for ck in sub["class_key"].dropna().unique():
+                figs += category_figure_gallery(arch_figs_dir, ck, max_figs_per_category,
+                                                summary_label="isoform architecture map(s) — exon/intron tracks, site marked",
+                                                open_by_default=False)
+                figs += category_figure_gallery(class_figs_dir, ck, max_figs_per_category)
+        defs = definitions_html(column_definitions(cols), summary="Column definitions") if cols else ""
+        return defs + tbl + figs
+
+    # ---- the tree: bucket -> event -> direction -> (sites [+ figures]) ----
     tree = []
     for bucket in CLASS_BUCKET_ORDER:
         df = src_for(bucket)
@@ -1225,25 +1486,31 @@ def build_classification_section(class_df, private_df, class_figs_dir, arch_figs
         for event in CLASS_TAXONOMY[bucket]:
             edf = bdf[bdf["event"] == event] if not bdf.empty else bdf
             n_e = len(edf)
-            if n_e == 0:
-                inner = "<p class='muted'>No sites in this category in this run.</p>"
-            else:
-                dirs = edf["direction"].fillna("").replace("", "—").value_counts().to_dict() if "direction" in edf.columns else {}
-                dir_line = ("<p><b>direction:</b> " + " &nbsp;·&nbsp; ".join(
-                    f"<b>{int(v)}</b> {html.escape(str(k))}" for k, v in dirs.items()) + "</p>") if dirs else ""
-                sort_col = "carry_frac" if bucket == "PRIVATE" else "effect_max_abs_frac_diff"
-                srt = edf.sort_values(sort_col, ascending=False) if sort_col in edf.columns else edf
-                tbl = df_to_html(srt[cols] if cols else srt, max_rows=top_n)
-                figs = ""
-                if bucket != "PRIVATE" and "class_key" in edf.columns:
-                    for ck in edf["class_key"].dropna().unique():
-                        figs += category_figure_gallery(arch_figs_dir, ck, max_figs_per_category,
-                                                        summary_label="isoform architecture map(s) — exon/intron tracks, site marked",
-                                                        open_by_default=False)
-                        figs += category_figure_gallery(class_figs_dir, ck, max_figs_per_category)
-                defs = definitions_html(column_definitions(cols), summary="Column definitions") if cols else ""
-                inner = dir_line + defs + tbl + figs
             defn = EVENT_DEFINITIONS.get(event, "")
+            dir_list = EVENT_DIRECTIONS.get(event, [])
+            if dir_list:
+                # Level 3: one collapsible subheader per direction, ALL enumerated (incl. zeros)
+                seen = set(dir_list)
+                extra = ([d for d in edf["direction"].fillna("").unique() if d and d not in seen]
+                         if (not edf.empty and "direction" in edf.columns) else [])
+                dirs_html = []
+                for direction in list(dir_list) + list(extra):
+                    ddf = (edf[edf["direction"].fillna("") == direction]
+                           if (not edf.empty and "direction" in edf.columns) else edf.iloc[0:0])
+                    n_d = len(ddf)
+                    ddef = DIRECTION_DEFINITIONS.get(direction, "")
+                    body = (render_sites(ddf, bucket, cols) if n_d
+                            else "<p class='muted'>No sites of this direction in this run.</p>")
+                    dirs_html.append(
+                        "<details class='report-subtree'>"
+                        f"<summary><h4>{html.escape(direction)} — {n_d} site{'s' if n_d != 1 else ''}</h4></summary>"
+                        f"<div class='section-body'><p class='section-intro'>{html.escape(ddef)}</p>{body}</div>"
+                        "</details>"
+                    )
+                inner = "".join(dirs_html)
+            else:
+                inner = (render_sites(edf, bucket, cols) if n_e
+                         else "<p class='muted'>No sites in this category in this run.</p>")
             events_html.append(
                 "<details class='report-subtree'>"
                 f"<summary><h3>{html.escape(event)} — {n_e} site{'s' if n_e != 1 else ''}</h3></summary>"
@@ -1318,6 +1585,13 @@ def main():
     partition_map_df = read_tsv(args.partition_map)
     zn_long_df = read_tsv(args.zn_long)
     zt_long_df = read_tsv(args.zt_long)
+    # Per-fragmentform (per-ZN) exon models, for the cis-SNP→mod stoichiometry per-fragmentform graphs.
+    snp_mod_iso = {}
+    if getattr(args, "assembled_gtf", "") and load_isoforms is not None and os.path.exists(args.assembled_gtf):
+        try:
+            snp_mod_iso, _snp_mod_genes = load_isoforms(args.assembled_gtf, tes_tol=25, inside_tol=50)
+        except Exception:
+            snp_mod_iso = {}
     diff_df = read_tsv(args.diff_results)
     # Data-driven "significance is cheap" callout, shown above every differential section.
     meta_df = read_tsv(args.sample_metadata) if getattr(args, "sample_metadata", "") else pd.DataFrame()
@@ -1327,7 +1601,6 @@ def main():
     candidate_snps_df = read_tsv(args.candidate_snps)
     snp_tx_assoc_df = read_tsv(args.snp_tx_assoc)
     snp_mod_assoc_df = read_tsv(args.snp_mod_assoc)
-    snp_tx_mod_assoc_df = read_tsv(args.snp_tx_mod_assoc)
     hap_blocks_df = read_tsv(args.hap_blocks)
     hap_tx_assoc_df = read_tsv(args.hap_tx_assoc)
     hap_mod_assoc_df = read_tsv(args.hap_mod_assoc)
@@ -1336,7 +1609,7 @@ def main():
     try:
         import snp_report_figures
         snp_galleries = snp_report_figures.build_snp_galleries(
-            snp_tx=snp_tx_assoc_df, snp_mod=snp_mod_assoc_df, snp_tx_mod=snp_tx_mod_assoc_df,
+            snp_tx=snp_tx_assoc_df, snp_mod=snp_mod_assoc_df,
             hap_tx=hap_tx_assoc_df, hap_mod=hap_mod_assoc_df,
             figs_dir=args.snp_figs_dir, max_figs=args.max_snp_figs,
         )
@@ -1452,16 +1725,6 @@ def main():
             ] if c in snp_mod_assoc_df.columns
         ]
         snp_mod_df_view = snp_mod_assoc_df[keep].sort_values(["p_adj_bh", "effect_abs_delta_mod_frac"], ascending=[True, False])
-
-    joint_df_view = pd.DataFrame()
-    if not snp_tx_mod_assoc_df.empty:
-        keep = [
-            c for c in [
-                "snp_id", "mod_site_id", "target_mod_code", "n_transcripts_tested",
-                "cmh_p_value", "cmh_p_adj_bh", "weighted_within_tx_effect", "classification"
-            ] if c in snp_tx_mod_assoc_df.columns
-        ]
-        joint_df_view = snp_tx_mod_assoc_df[keep].sort_values(["cmh_p_adj_bh", "weighted_within_tx_effect"], ascending=[True, False])
 
     hap_blocks_df_view = pd.DataFrame()
     if not hap_blocks_df.empty:
@@ -1579,7 +1842,7 @@ def main():
 
     sec_diff = section(
         "Sites with Differential Epitranscriptomic Modification Between Fragmentforms",
-        sig_box + diff_html + diff_fig_html,
+        diff_html + diff_fig_html,
         intro="Positions where the modification stoichiometry differs between the fragmentforms of a gene "
               "(across all detected mod codes; Fisher exact / chi-square with Benjamini-Hochberg FDR, keeping "
               "sites whose absolute stoichiometry difference clears the minimum effect). The effect threshold "
@@ -1669,7 +1932,7 @@ def main():
     if args.polya_fragmentform or args.taillength_diffs or args.taillength_mod:
         sec_polya = build_polya_section(polya_frag_df, taillength_diffs_df, taillength_mod_df, args.top_genes,
                                         diff_figs_dir=args.taillength_diff_figs, mod_figs_dir=args.taillength_mod_figs,
-                                        max_figs=int(getattr(args, "max_snp_figs", 12)), top_note=sig_box)
+                                        max_figs=int(getattr(args, "max_snp_figs", 12)))
 
     # --- Between-condition comparisons (conditional) ---
     sec_between = build_between_conditions_section(args.between_conditions_dir, args.top_genes, top_note=sig_box) if args.between_conditions_dir else None
@@ -1686,9 +1949,11 @@ def main():
         intro="Associations between segregating SNP alleles and fragmentform-partition usage.",
         definitions=definitions_html(column_definitions(list(snp_tx_df_view.columns)), summary="Column definitions") if not snp_tx_df_view.empty else "",
     )
+    snp_mod_ff_html = build_snp_mod_fragmentform_html(snp_mod_assoc_df, snp_mod_iso,
+                                                      getattr(args, "molecule_mod_calls", ""), args.max_snp_figs)
     sec_snp_mod = section(
         "cis SNP to Modification Stoichiometry Association",
-        (df_to_html(snp_mod_df_view, max_rows=args.top_genes) if not snp_mod_df_view.empty else "<p class='muted'>No cis SNP to modification-stoichiometry associations available.</p>") + snp_galleries.get("snp_mod", ""),
+        (df_to_html(snp_mod_df_view, max_rows=args.top_genes) if not snp_mod_df_view.empty else "<p class='muted'>No cis SNP to modification-stoichiometry associations available.</p>") + snp_galleries.get("snp_mod", "") + snp_mod_ff_html,
         intro="Associations between segregating SNP alleles and target modification states on the same molecules.",
         definitions=definitions_html(column_definitions(list(snp_mod_df_view.columns)), summary="Column definitions") if not snp_mod_df_view.empty else "",
     )
@@ -1735,13 +2000,6 @@ def main():
             definitions=definitions_html(column_definitions(list(mod_mod_df.columns)), summary="Column definitions") if not mod_mod_df.empty else "",
         )
 
-    sec_joint = section(
-        "Are cis SNP-driven Changes in Modification Stoichiometry Related Instead to Fragmentform Usage Changes",
-        (df_to_html(joint_df_view, max_rows=args.top_genes) if not joint_df_view.empty else "<p class='muted'>No joint SNP-fragmentform-epitranscriptome dependency results available.</p>") + snp_galleries.get("snp_tx_mod", ""),
-        intro="Fragmentform-conditioned (Cochran-Mantel-Haenszel) SNP/mod tests that distinguish a direct allelic "
-              "effect on modification from one that is really driven by the allele shifting which fragmentform is used.",
-        definitions=definitions_html(column_definitions(list(joint_df_view.columns)), summary="Column definitions") if not joint_df_view.empty else "",
-    )
     sec_hap_blocks = section(
         "Association of multiple cis SNPs into Haplotypes",
         df_to_html(hap_blocks_df_view, max_rows=args.top_genes) if not hap_blocks_df_view.empty else "<p class='muted'>No haplotype blocks available.</p>",
@@ -1775,7 +2033,7 @@ def main():
     body = [s for s in [
         sec_overview, sec_top_ff, sec_sample_stats, sec_read_funnel, sec_gene_sites, sec_overlap,
         sec_novel, sec_splice, sec_apa, sec_diff, sec_class, sec_seq, sec_polya, sec_between,
-        sec_snp_cand, sec_snp_ff, sec_snp_mod, sec_snp_mech, sec_modmod, sec_joint,
+        sec_snp_cand, sec_snp_ff, sec_snp_mod, sec_snp_mech, sec_modmod,
         sec_hap_blocks, sec_hap_assoc,
     ] if s]
 
@@ -1890,6 +2148,9 @@ def main():
     }}
     details.report-subtree > summary > h3 {{
       display:inline; margin:0; padding:0; font-size:17px; color:#17807f; font-weight:640;
+    }}
+    details.report-subtree > summary > h4 {{
+      display:inline; margin:0; padding:0; font-size:14px; color:#1f9a8f; font-weight:600; letter-spacing:.01em;
     }}
     details.report-subtree > .section-body {{ padding-left:20px; border-left:2px solid var(--line-soft); margin-left:4px; }}
     details.run-manifest {{ margin:16px 0 4px; }}
