@@ -77,6 +77,17 @@ COLUMN_DEFINITIONS = {
                     "(see input parameter `min_distal_anchor_reads`).",
     "anchor_frac": "Fraction of reachable suffix-family reads that exactly support the retained canonical fragmentform.",
     "assignment_mode": "Recorded suffix-family assignment policy used during fragmentform assembly.",
+    "single_gene_kept": "Reads in an overlapping-gene region where only ONE gene's fragmentforms survived the "
+                        "assembly/support filters, so the read is unambiguously assigned to that single gene — there "
+                        "was no cross-gene conflict left to resolve.",
+    "multi_gene_no_zt": "Reads spanning ≥2 overlapping genes' fragmentforms that carried NO fragmentform (ZT) tag: "
+                        "the read could not be pinned to a specific fragmentform, so it could not be resolved to one "
+                        "gene and was scrapped (`multi_gene_action`).",
+    "zero_gene_kept": "Reads in an overlapping-gene region where NO gene's fragmentforms passed the filters, so the "
+                      "read maps to zero retained fragmentforms and is scrapped.",
+    "total_potential_overlapping_gene_loci": "Number of metagenes that bundle ≥2 genes — i.e. the loci where genes "
+                                             "overlap on the same strand and cross-gene read resolution is potentially "
+                                             "needed (constant for the run; shown on every sample row).",
     "sample": "Sample identifier derived from the BAM filename.",
     "chrom": "Reference chromosome or contig containing the reported feature.",
     "pos1": "1-based genomic coordinate of the reported SNP locus.",
@@ -421,9 +432,12 @@ def mod_mod_concordance_png(df, top_n=12):
     n = len(sub)
     if n == 0:
         return ""
-    ncol = min(4, n)
+    # 3 columns with generously-sized panels + constrained layout: at the enlarged house fonts the
+    # per-panel titles need the extra width/height and the reflow to avoid overlapping neighbours.
+    ncol = min(3, n)
     nrow = (n + ncol - 1) // ncol
-    fig, axes = plt.subplots(nrow, ncol, figsize=(3.1 * ncol, 3.0 * nrow), squeeze=False)
+    fig, axes = plt.subplots(nrow, ncol, figsize=(4.6 * ncol, 4.2 * nrow), squeeze=False,
+                             layout="constrained")
     for idx, (_, r) in enumerate(sub.iterrows()):
         ax = axes[idx // ncol][idx % ncol]
         nreads = float(r["n_reads"]) or 1.0
@@ -452,8 +466,7 @@ def mod_mod_concordance_png(df, top_n=12):
     for k in range(n, nrow * ncol):
         axes[k // ncol][k % ncol].axis("off")
     fig.suptitle("Co-localized modifications: observed vs expected 2x2 (red = enriched over independence)",
-                 fontsize=10, y=1.0)
-    fig.tight_layout(rect=(0, 0, 1, 0.97))
+                 fontsize=10)
     _save_report_chart(fig, "mod_mod_concordance")
     buf = BytesIO()
     fig.savefig(buf, format="png", dpi=170, bbox_inches="tight")
@@ -521,7 +534,7 @@ def df_to_html(df, max_rows=25):
 
 
 def section(title, body, *, intro="", definitions=""):
-    intro_html = f"<p class='section-intro'>{html.escape(intro)}</p>" if intro else ""
+    intro_html = f"<p class='section-intro'>{intro}</p>" if intro else ""
     # Each section is a collapsible open/close panel: the header (h2) lives in the <summary>, and
     # everything after it collapses. Defaults open.
     return (
@@ -660,7 +673,7 @@ def build_between_conditions_section(bc_dir, top_n):
             parts.append(subsection(f"Contrast: {contrast}",
                                     df_to_html(pd.DataFrame(summary), max_rows=10) + "".join(blocks)))
     return section(
-        "Between-Condition Comparisons",
+        "Between-Condition Changes in Fragment-form Usage, Junction Usage, APA Usage, polyA Tail Length, and Modification Stoichiometries",
         "".join(parts),
         intro="Replicate-aware comparisons between conditions, from the samplesheet's `condition` column. "
               "Counts (modification and isoform/APA/junction usage) use a beta-binomial likelihood-ratio "
@@ -681,7 +694,7 @@ def build_between_conditions_section(bc_dir, top_n):
 def build_apa_motif_section(apa_df, top_n):
     """PAS motif support for every APA site, and the internal-priming artifact flag."""
     if apa_df is None or apa_df.empty or "apa_motif_class" not in apa_df.columns:
-        return section("APA Motifs (Polyadenylation Signals)",
+        return section("APA Motifs (Polyadenylation Signals) in Fragmentforms",
                        "<p class='muted'>No APA motif results available.</p>",
                        intro="Polyadenylation-signal support for each detected APA site.")
     counts = apa_df["apa_motif_class"].value_counts().to_dict()
@@ -693,6 +706,7 @@ def build_apa_motif_section(apa_df, top_n):
                                           caption="Polyadenylation-signal class per APA site."))
     n_pas = counts.get("PAS_CANONICAL", 0) + counts.get("PAS_VARIANT", 0)
     n_ip = counts.get("PAS_NONE_INTERNAL_PRIMING", 0)
+    parts.append("<h3>Summary Across All Measured APA Sites</h3>")
     parts.append(
         "<ul>"
         f"<li><b>{total:,}</b> APA sites checked — <b>{n_pas:,} ({100.0 * n_pas / total:.1f}%)</b> carry a polyadenylation signal</li>"
@@ -719,7 +733,7 @@ def build_apa_motif_section(apa_df, top_n):
                             "fragmentform_class", "read_support"] if c in ip.columns]
         parts.append(subsection("Sites flagged as likely internal priming", df_to_html(ip[cols], max_rows=top_n)))
     return section(
-        "APA Motifs (Polyadenylation Signals)",
+        "APA Motifs (Polyadenylation Signals) in Fragmentforms",
         "".join(parts),
         intro="Each fragmentform's TES is a cleavage/polyadenylation site. For every one, the genomic "
               "sequence around it is read in sense (fragmentform) orientation and scanned for a polyadenylation "
@@ -756,7 +770,7 @@ def build_sequence_elements_section(se_df, summ_df, top_n):
              "elements are scanned; 5'-anchored elements (Kozak/uORF/TOP/m6Am) sit where direct-RNA read "
              "coverage is sparsest, so their modification calls are coverage-limited.")
     if se_df is None or se_df.empty or "element_type" not in se_df.columns:
-        return section("Sequence Elements (cis-elements × modifications)",
+        return section("Modifications within RNA Sequence Elements",
                        "<p class='muted'>No sequence-element results available.</p>", intro=intro)
     parts = []
     n_inst = len(se_df)
@@ -801,7 +815,7 @@ def build_sequence_elements_section(se_df, summ_df, top_n):
         w = w[cols].drop_duplicates()
         parts.append(subsection("Elements carrying a modification (any code)",
                                 df_to_html(w, max_rows=max(top_n, 25))))
-    return section("Sequence Elements (cis-elements × modifications)", "".join(parts), intro=intro,
+    return section("Modifications within RNA Sequence Elements", "".join(parts), intro=intro,
                    definitions=definitions_html([
                        ("PAS", "Polyadenylation signal hexamer (AATAAA + variants) upstream of the 3' end."),
                        ("ARE", "AU-rich element (AUUUA), a 3'UTR stability determinant."),
@@ -819,7 +833,7 @@ def build_sequence_elements_section(se_df, summ_df, top_n):
 def build_snp_mechanism_section(mech_df, top_n):
     """Why a SNP changes a modification: positional ladder, m6A motif effect, direction concordance."""
     if mech_df is None or mech_df.empty or "positional_class" not in mech_df.columns:
-        return section("SNP to Modification Mechanism",
+        return section("Distance of cis SNP to Affected Modifications",
                        "<p class='muted'>No SNP-to-modification mechanism results available.</p>",
                        intro="Positional and motif-level explanation of each SNP x modification association.")
     parts = []
@@ -861,7 +875,7 @@ def build_snp_mechanism_section(mech_df, top_n):
         parts.append(subsection("Top causal cis m6A variants (DRACH disrupted, direction concordant)",
                                 df_to_html(causal[cols], max_rows=top_n)))
     return section(
-        "SNP to Modification Mechanism",
+        "Distance of cis SNP to Affected Modifications",
         "".join(parts),
         intro="A SNP whose alleles carry different modification rates gets explained on three axes: WHERE "
               "it sits relative to the modified base (at it / inside the DRACH 5-mer / inside the 9-mer / "
@@ -902,7 +916,7 @@ def build_polya_section(frag_df, diffs_df, mod_df, top_n, diff_figs_dir="", mod_
     """Poly(A) tail length as a first-class readout: distribution across fragmentforms,
     differential tail length between the fragmentforms of a gene, and tail x modification."""
     if (frag_df is None or frag_df.empty) and (diffs_df is None or diffs_df.empty) and (mod_df is None or mod_df.empty):
-        return section("Poly(A) Tail Length",
+        return section("Differential polyA Tail Length by Fragmentform and Modification Status",
                        "<p class='muted'>No poly(A) tail-length data. Requires reads basecalled with "
                        "dorado <code>--estimate-poly-a</code> (the <code>pt:i</code> tag).</p>",
                        intro="Per-read dorado poly(A) tail-length estimates, grouped by fragmentform.")
@@ -938,7 +952,7 @@ def build_polya_section(frag_df, diffs_df, mod_df, top_n, diff_figs_dir="", mod_
         parts.append(subsection("Poly(A) tail length vs modification state",
                                 df_to_html(mod_df[cols], max_rows=top_n) + gallery))
     return section(
-        "Poly(A) Tail Length",
+        "Differential polyA Tail Length by Fragmentform and Modification Status",
         "".join(parts),
         intro="Direct per-read poly(A) tail-length estimates from the dorado basecaller (pt:i tag), "
               "grouped by fragmentform (isoform). Tail length is mechanistically tied to m6A, RNA "
@@ -961,7 +975,7 @@ def build_classification_section(class_df, class_figs_dir, arch_figs_dir, max_fi
     key_candidates = [c for c in ("class_key", "structural_category", "category") if c in class_df.columns]
     if class_df is None or class_df.empty or not key_candidates:
         return section(
-            "Site Classification",
+            "Classification of Transcript Architecture Changes Associated with Differential Epitranscriptomic Modification",
             "<p class='muted'>No classified differential sites available.</p>",
             intro="Structural classification of significant between-fragmentform modification sites.",
         )
@@ -1079,11 +1093,11 @@ def build_classification_section(class_df, class_figs_dir, arch_figs_dir, max_fi
 
     body = overview + "".join(blocks)
     return section(
-        "Site Classification",
+        "Classification of Transcript Architecture Changes Associated with Differential Epitranscriptomic Modification",
         body,
         intro=(
             "Every significant between-fragmentform modification site (across all detected "
-            "mod_codes; BH-FDR and the &gt;10% absolute stoichiometry rule) is described on two "
+            "mod codes; BH-FDR and the >10% absolute-stoichiometry rule — the 10% is tunable, see input parameter classify_diffs.min_effect) is described on two "
             "orthogonal axes, anchored to the gene's longest-3'UTR isoform: (1) "
             "<b>structural_category</b> — the mechanism that makes the isoforms differ (tandem APA, "
             "intronic polyadenylation, EJC/splicing, cassette exon, alternative/intergenic terminal "
@@ -1324,115 +1338,134 @@ def main():
         open_by_default=True,
     )
 
-    body = []
-    body.append(
-        section(
-            "Overview",
-            (
-                "<div class='overview-layout'>"
-                "<div>"
-                f"<div class='cards'>{cards_html}</div>{overview_defs}"
-                "</div>"
-                f"<div class='hero'>{pca_html}</div>"
-                "</div>"
-            ),
-            intro="Total counts of the objects modulator assembled and tested in this run — fragmentforms, genes, "
-                  "metagenes, segregating SNPs — and the reads supporting them. Hover any tile for its definition.",
-        )
+    # ---- build each section into a variable, then assemble in the intended reading order ----
+    sec_overview = section(
+        "Overview",
+        (
+            "<div class='overview-layout'>"
+            "<div>"
+            f"<div class='cards'>{cards_html}</div>{overview_defs}"
+            "</div>"
+            f"<div class='hero'>{pca_html}</div>"
+            "</div>"
+        ),
+        intro="Total counts of the objects modulator assembled and tested in this run — fragmentforms, genes, "
+              "metagenes, segregating SNPs — and the reads supporting them.",
     )
-    body.append(
-        section(
-            "Top Fragmentform Partitions",
-            df_to_html(top_tx_df[top_tx_cols], max_rows=args.top_transcripts) if top_tx_cols else "<p class='muted'>No fragmentform summary columns available.</p>",
-            intro="Highest-support fragmentforms retained after assembly and reference classification.",
-            definitions=definitions_html(column_definitions(top_tx_cols), summary="Column definitions"),
-        )
+
+    # Read-length summaries, reordered to MATCH the "Most Expressed Fragmentforms" table (same
+    # fragmentforms, same highest-expression order) so the two line up row-for-row.
+    tx_lengths_ordered = tx_lengths_df
+    if (not tx_lengths_df.empty and "zt_label" in tx_lengths_df.columns
+            and not top_tx_df.empty and "zt_label" in top_tx_df.columns):
+        _have = set(tx_lengths_df["zt_label"])
+        _order = [z for z in top_tx_df["zt_label"].tolist() if z in _have]
+        if _order:
+            tx_lengths_ordered = tx_lengths_df.set_index("zt_label").reindex(_order).reset_index()
+    sec_top_ff = section(
+        "Most Expressed Fragmentforms",
+        (df_to_html(top_tx_df[top_tx_cols], max_rows=args.top_transcripts) if top_tx_cols
+         else "<p class='muted'>No fragmentform summary columns available.</p>")
+        + (subsection(
+            "Read Lengths for the Most Expressed Fragmentforms",
+            df_to_html(tx_lengths_ordered, max_rows=args.top_transcripts),
+            definitions=definitions_html(column_definitions(list(tx_lengths_ordered.columns)), summary="Column definitions"),
+          ) if not tx_lengths_ordered.empty else ""),
+        intro="The highest-support fragmentforms retained after assembly and reference classification, ordered by "
+              "assigned reads. The read-length table lists the SAME fragmentforms in the SAME order.",
+        definitions=definitions_html(column_definitions(top_tx_cols), summary="Column definitions"),
     )
-    body.append(
-        section(
-            "Sample Stats",
-            df_to_html(sample_stats_df, max_rows=100),
-            intro="Per-sample fragmentform assignment totals and detection breadth derived from the final retained fragmentforms.",
-            definitions=definitions_html(column_definitions(list(sample_stats_df.columns)), summary="Column definitions"),
-        )
+
+    sec_sample_stats = section(
+        "Per-Sample Fragmentform Statistics",
+        df_to_html(sample_stats_df, max_rows=100),
+        intro="Per-sample fragmentform assignment totals and detection breadth derived from the final retained fragmentforms.",
+        definitions=definitions_html(column_definitions(list(sample_stats_df.columns)), summary="Column definitions"),
     )
-    body.append(
-        section(
-            "Read Funnel",
-            (
-                subsection(
-                    "Read Retention Counts",
-                    df_to_html(read_stats_df[read_stats_counts_cols], max_rows=100) if read_stats_counts_cols else "<p class='muted'>No read-count funnel columns available.</p>",
-                    definitions=definitions_html(column_definitions(read_stats_counts_cols), summary="Column definitions") if read_stats_counts_cols else "",
-                ) +
-                subsection(
-                    "Read Length Summaries",
-                    df_to_html(read_stats_df[read_stats_length_cols], max_rows=100) if len(read_stats_length_cols) > 1 else "<p class='muted'>No read-length summary columns available.</p>",
-                    definitions=definitions_html(column_definitions(read_stats_length_cols), summary="Column definitions") if len(read_stats_length_cols) > 1 else "",
-                )
-            ),
-            intro="Sample-level retention across the primary read filters and fragmentform-assignment workflow.",
-        )
+
+    sec_read_funnel = section(
+        "Per-Sample Read Usage & Length Statistics",
+        (
+            subsection(
+                "Read Retention Counts",
+                df_to_html(read_stats_df[read_stats_counts_cols], max_rows=100) if read_stats_counts_cols else "<p class='muted'>No read-count funnel columns available.</p>",
+                definitions=definitions_html(column_definitions(read_stats_counts_cols), summary="Column definitions") if read_stats_counts_cols else "",
+            ) +
+            subsection(
+                "Read Length Summaries",
+                df_to_html(read_stats_df[read_stats_length_cols], max_rows=100) if len(read_stats_length_cols) > 1 else "<p class='muted'>No read-length summary columns available.</p>",
+                definitions=definitions_html(column_definitions(read_stats_length_cols), summary="Column definitions") if len(read_stats_length_cols) > 1 else "",
+            )
+        ),
+        intro="Sample-level retention across the primary read filters and fragmentform-assignment workflow.",
     )
-    body.append(
-        section(
-            "Partition Map",
-            df_to_html(partition_map_df, max_rows=args.top_transcripts),
-            intro="Mapping between human-readable fragmentform labels and the gene, metagene, and ZN identifiers used downstream.",
-            definitions=definitions_html(column_definitions(list(partition_map_df.columns)), summary="Column definitions"),
-        )
+
+    sec_gene_sites = section(
+        "Genes with the Most Number of Modified Sites",
+        df_to_html(top_gene_sites_df, max_rows=args.top_genes),
+        intro="Counts of unique genomic modification sites observed per gene and modification code in the ZN aggregation.",
+        definitions=definitions_html(column_definitions(list(top_gene_sites_df.columns)), summary="Column definitions"),
     )
-    body.append(
-        section(
-            "Assigned Read Lengths",
-            df_to_html(tx_lengths_df, max_rows=args.top_transcripts),
-            intro="Assigned-read length summaries for the most supported retained fragmentforms.",
-            definitions=definitions_html(column_definitions(list(tx_lengths_df.columns)), summary="Column definitions"),
-        )
+
+    # Overlap resolution: put `sample` first, drop the pseudo-metric header rows, and add the
+    # run-level count of potential overlapping-gene loci (metagenes bundling >=2 genes).
+    n_overlap_loci = 0
+    if not class_df.empty and {"metagene_index", "gene_index"} <= set(class_df.columns):
+        _g = class_df.groupby("metagene_index")["gene_index"].nunique()
+        n_overlap_loci = int((_g >= 2).sum())
+    if not overlap_df.empty:
+        overlap_view = overlap_df.drop(columns=[c for c in ["removed_reads_per_gene_id", "removed_reads_per_zt_label"] if c in overlap_df.columns])
+        _ocols = (["sample"] if "sample" in overlap_view.columns else []) + [c for c in overlap_view.columns if c != "sample"]
+        overlap_view = overlap_view[_ocols].copy()
+        overlap_view.insert(1 if "sample" in overlap_view.columns else 0,
+                            "total_potential_overlapping_gene_loci", n_overlap_loci)
+        overlap_body = df_to_html(overlap_view.fillna("0"), max_rows=100)
+        overlap_defs2 = definitions_html(column_definitions(list(overlap_view.columns)), summary="Column definitions")
+    else:
+        overlap_body = "<p class='muted'>No overlap-resolution summaries available.</p>"
+        overlap_defs2 = ""
+    sec_overlap = section(
+        "Resolution of Potential Overlapping Gene Loci",
+        overlap_body,
+        intro="Where genes overlap on the same strand, modulator merges them into one metagene and resolves each "
+              "read to a single gene by its fragmentform (ZT) assignment. This shows, per sample, how those reads "
+              "were resolved. total_potential_overlapping_gene_loci is the number of metagenes that bundle ≥2 genes "
+              "(see input parameter multi_gene_action).",
+        definitions=overlap_defs2,
     )
-    body.append(
-        section(
-            "Number of Modified Sites Per Gene (ZN)",
-            df_to_html(top_gene_sites_df, max_rows=args.top_genes),
-            intro="Counts of unique genomic modification sites observed per gene and modification code in the ZN aggregation.",
-            definitions=definitions_html(column_definitions(list(top_gene_sites_df.columns)), summary="Column definitions"),
-        )
+
+    sec_diff = section(
+        "Sites with Differential Epitranscriptomic Modification Between Fragmentforms",
+        diff_html + diff_fig_html,
+        intro="Positions where the modification stoichiometry differs between the fragmentforms of a gene "
+              "(across all detected mod codes; Fisher exact / chi-square with Benjamini-Hochberg FDR, keeping "
+              "sites whose absolute stoichiometry difference clears the minimum effect). The effect threshold "
+              "(default 10%) and the FDR are tunable — see input parameters classify_diffs.min_effect and "
+              "classify_diffs.fdr.",
+        definitions=definitions_html(column_definitions(diff_cols), summary="Result-column definitions") if diff_cols else "",
     )
-    body.append(
-        section(
-            "Overlap Resolution",
-            df_to_html(overlap_df.fillna("0"), max_rows=100) if not overlap_df.empty else "<p class='muted'>No overlap-resolution summaries available.</p>",
-            intro="Multigene-overlap outcomes from the optional read-resolution stage.",
-            definitions=definitions_html(column_definitions(list(overlap_df.columns)), summary="Column definitions") if not overlap_df.empty else "",
-        )
+
+    sec_class = build_classification_section(
+        classified_df, args.class_figs_dir, args.arch_figs_dir,
+        args.max_class_figs_per_category, args.max_class_figs_per_category,
     )
-    body.append(
-        section(
-            "Differential Sites",
-            diff_html + diff_fig_html,
-            intro="ZN sites where pooled fragmentform partitions differ in modified fraction after applying the ZN site filter.",
-            definitions=definitions_html(column_definitions(diff_cols), summary="Result-column definitions") if diff_cols else "",
-        )
-    )
-    body.append(
-        build_classification_section(
-            classified_df,
-            args.class_figs_dir,
-            args.arch_figs_dir,
-            args.max_class_figs_per_category,
-            args.max_class_figs_per_category,
-        )
-    )
+
     # --- Splice-junction repertoire (canonical vs non-canonical), read-derived ---
     splice_genes_df = read_tsv(args.splice_genes) if args.splice_genes else pd.DataFrame()
     splice_junc_df = read_tsv(args.splice_junctions) if args.splice_junctions else pd.DataFrame()
+    sec_splice = None
     if not splice_junc_df.empty and "junction_class" in splice_junc_df.columns:
         cls_counts = splice_junc_df["junction_class"].value_counts()
         total_j = int(cls_counts.sum())
-        overview = "<ul>" + "".join(
-            f"<li><b>{html.escape(str(k))}</b>: {int(v):,} ({100.0 * int(v) / total_j:.2f}%)</li>"
-            for k, v in cls_counts.items()
-        ) + "</ul>"
+        overview = (
+            "<h3>Summary Across All Measured Junctions</h3><ul>" + "".join(
+                f"<li><b>{html.escape(str(k))}</b>: {int(v):,} ({100.0 * int(v) / total_j:.2f}%)</li>"
+                for k, v in cls_counts.items()
+            ) + "</ul>"
+            + "<p class='muted'>The exact coordinates and donor/acceptor dinucleotide of every junction — and "
+              "the specific genes carrying non-canonical junctions — are in the per-gene summary and "
+              "non-canonical tables below.</p>"
+        )
         noncanon_genes = splice_genes_df[pd.to_numeric(
             splice_genes_df.get("has_noncanonical", 0), errors="coerce").fillna(0).astype(int) == 1] \
             if not splice_genes_df.empty and "has_noncanonical" in splice_genes_df.columns else pd.DataFrame()
@@ -1441,23 +1474,22 @@ def main():
             if not noncanon_genes.empty
             else "<p class='muted'>Every gene's junctions are canonical (GT-AG) or semi-canonical (GC-AG).</p>"
         )
-        body.append(
-            section(
-                "Splice Junction Repertoire",
-                overview
-                + (subsection("Per-gene summary", df_to_html(splice_genes_df, max_rows=args.top_genes)) if not splice_genes_df.empty else "")
-                + noncanon_html,
-                intro="Donor/acceptor dinucleotides of every assembled fragmentform intron, in fragmentform "
-                      "orientation. GT-AG is the major (U2) spliceosome; GC-AG is semi-canonical; AT-AC is the "
-                      "minor (U12) spliceosome; anything else is non-canonical and worth inspecting. Because the "
-                      "intron chains are read-derived, these are the junctions the reads actually support.",
-                definitions=definitions_html(column_definitions(list(splice_genes_df.columns)), summary="Column definitions") if not splice_genes_df.empty else "",
-            )
+        sec_splice = section(
+            "Splice Junctions in Fragmentforms",
+            overview
+            + (subsection("Per-gene summary", df_to_html(splice_genes_df, max_rows=args.top_genes)) if not splice_genes_df.empty else "")
+            + noncanon_html,
+            intro="Donor/acceptor dinucleotides of every assembled fragmentform intron, in fragmentform "
+                  "orientation. GT-AG is the major (U2) spliceosome; GC-AG is semi-canonical; AT-AC is the "
+                  "minor (U12) spliceosome; anything else is non-canonical and worth inspecting. Because the "
+                  "intron chains are read-derived, these are the junctions the reads actually support.",
+            definitions=definitions_html(column_definitions(list(splice_genes_df.columns)), summary="Column definitions") if not splice_genes_df.empty else "",
         )
 
-    # --- Novel loci (fragmentforms matching no reference gene) ---
+    # --- Novel gene loci (fragmentforms matching no reference gene) ---
     novel_loci_df = read_tsv(args.novel_loci) if args.novel_loci else pd.DataFrame()
     novel_ff_df = read_tsv(args.novel_fragmentforms) if args.novel_fragmentforms else pd.DataFrame()
+    sec_novel = None
     if args.novel_loci:
         if not novel_loci_df.empty:
             nl_body = (
@@ -1466,72 +1498,63 @@ def main():
             )
         else:
             nl_body = "<p class='muted'>No novel loci: every assembled fragmentform matched a reference gene.</p>"
-        body.append(
-            section(
-                "Novel Loci",
-                nl_body,
-                intro="Read-backed loci whose fragmentforms overlap no annotated gene in the reference GTF. Each locus "
-                      "is formed by merging overlapping novel fragmentforms on one strand and is given a unique, "
-                      "deterministic, coordinate-anchored name (NOVEL_<chrom>_<strand>_<n>_<start>_<end>), so two "
-                      "distinct novel loci on the same chromosome and strand can never be conflated.",
-                definitions=definitions_html(column_definitions(list(novel_loci_df.columns)), summary="Column definitions") if not novel_loci_df.empty else "",
-            )
+        sec_novel = section(
+            "Novel Gene Loci",
+            nl_body,
+            intro="Read-backed loci whose fragmentforms overlap no annotated gene in the reference GTF. Each locus "
+                  "is formed by merging overlapping novel fragmentforms on one strand and is given a unique, "
+                  "deterministic, coordinate-anchored name (NOVEL_<chrom>_<strand>_<n>_<start>_<end>), so two "
+                  "distinct novel loci on the same chromosome and strand can never be conflated.",
+            definitions=definitions_html(column_definitions(list(novel_loci_df.columns)), summary="Column definitions") if not novel_loci_df.empty else "",
         )
 
-    # --- Between-condition comparisons (samplesheet-driven; one subsection per contrast) ---
-    if args.between_conditions_dir:
-        body.append(build_between_conditions_section(args.between_conditions_dir, args.top_genes))
+    # --- APA motifs (conditional) ---
+    sec_apa = build_apa_motif_section(read_tsv(args.apa_motifs), args.top_genes) if args.apa_motifs else None
 
-    # --- APA motifs: polyadenylation-signal support for every APA site ---
-    if args.apa_motifs:
-        body.append(build_apa_motif_section(read_tsv(args.apa_motifs), args.top_genes))
+    # --- Sequence elements (conditional) ---
+    sec_seq = build_sequence_elements_section(
+        read_tsv(args.sequence_elements),
+        read_tsv(args.sequence_elements_summary) if args.sequence_elements_summary else pd.DataFrame(),
+        args.top_genes) if args.sequence_elements else None
 
-    # --- Sequence elements: cis-elements x modifications (unbiased across mod codes) ---
-    if args.sequence_elements:
-        body.append(build_sequence_elements_section(
-            read_tsv(args.sequence_elements),
-            read_tsv(args.sequence_elements_summary) if args.sequence_elements_summary else pd.DataFrame(),
-            args.top_genes))
-
-    # --- Poly(A) tail length (dorado pt:i), grouped by fragmentform ---
+    # --- Poly(A) tail length (conditional) ---
     polya_frag_df = read_tsv(args.polya_fragmentform) if args.polya_fragmentform else pd.DataFrame()
     taillength_diffs_df = read_tsv(args.taillength_diffs) if args.taillength_diffs else pd.DataFrame()
     taillength_mod_df = read_tsv(args.taillength_mod) if args.taillength_mod else pd.DataFrame()
+    sec_polya = None
     if args.polya_fragmentform or args.taillength_diffs or args.taillength_mod:
-        body.append(build_polya_section(polya_frag_df, taillength_diffs_df, taillength_mod_df, args.top_genes,
+        sec_polya = build_polya_section(polya_frag_df, taillength_diffs_df, taillength_mod_df, args.top_genes,
                                         diff_figs_dir=args.taillength_diff_figs, mod_figs_dir=args.taillength_mod_figs,
-                                        max_figs=int(getattr(args, "max_snp_figs", 12))))
+                                        max_figs=int(getattr(args, "max_snp_figs", 12)))
 
-    body.append(
-        section(
-            "Segregating SNP Candidates",
-            df_to_html(candidate_snps_df_view, max_rows=args.top_genes) if not candidate_snps_df_view.empty else "<p class='muted'>No segregating SNP candidates available.</p>",
-            intro="Read-supported non-reference loci discovered in the cleaned tagged BAMs.",
-            definitions=definitions_html(column_definitions(list(candidate_snps_df_view.columns)), summary="Column definitions") if not candidate_snps_df_view.empty else "",
-        )
-    )
-    body.append(
-        section(
-            "SNP to Fragmentform Associations",
-            (df_to_html(snp_tx_df_view, max_rows=args.top_genes) if not snp_tx_df_view.empty else "<p class='muted'>No SNP to fragmentform associations available.</p>") + snp_galleries.get("snp_tx", ""),
-            intro="Associations between segregating SNP alleles and fragmentform-partition usage.",
-            definitions=definitions_html(column_definitions(list(snp_tx_df_view.columns)), summary="Column definitions") if not snp_tx_df_view.empty else "",
-        )
-    )
-    body.append(
-        section(
-            "SNP to Epitranscriptome Associations",
-            (df_to_html(snp_mod_df_view, max_rows=args.top_genes) if not snp_mod_df_view.empty else "<p class='muted'>No SNP to epitranscriptome associations available.</p>") + snp_galleries.get("snp_mod", ""),
-            intro="Associations between segregating SNP alleles and target modification states on the same molecules.",
-            definitions=definitions_html(column_definitions(list(snp_mod_df_view.columns)), summary="Column definitions") if not snp_mod_df_view.empty else "",
-        )
-    )
-    # --- Why those SNP x modification associations exist (positional + motif mechanism) ---
-    if args.snp_mod_mechanism:
-        body.append(build_snp_mechanism_section(read_tsv(args.snp_mod_mechanism), args.top_genes))
+    # --- Between-condition comparisons (conditional) ---
+    sec_between = build_between_conditions_section(args.between_conditions_dir, args.top_genes) if args.between_conditions_dir else None
 
-    # --- Co-localized modifications (mod x mod dependency on shared molecules) ---
+    sec_snp_cand = section(
+        "Segregating cis SNP Candidates",
+        df_to_html(candidate_snps_df_view, max_rows=args.top_genes) if not candidate_snps_df_view.empty else "<p class='muted'>No segregating SNP candidates available.</p>",
+        intro="Read-supported non-reference loci discovered in the cleaned tagged BAMs.",
+        definitions=definitions_html(column_definitions(list(candidate_snps_df_view.columns)), summary="Column definitions") if not candidate_snps_df_view.empty else "",
+    )
+    sec_snp_ff = section(
+        "cis SNP to Fragmentform Usage Associations",
+        (df_to_html(snp_tx_df_view, max_rows=args.top_genes) if not snp_tx_df_view.empty else "<p class='muted'>No cis SNP to fragmentform-usage associations available.</p>") + snp_galleries.get("snp_tx", ""),
+        intro="Associations between segregating SNP alleles and fragmentform-partition usage.",
+        definitions=definitions_html(column_definitions(list(snp_tx_df_view.columns)), summary="Column definitions") if not snp_tx_df_view.empty else "",
+    )
+    sec_snp_mod = section(
+        "cis SNP to Modification Stoichiometry Association",
+        (df_to_html(snp_mod_df_view, max_rows=args.top_genes) if not snp_mod_df_view.empty else "<p class='muted'>No cis SNP to modification-stoichiometry associations available.</p>") + snp_galleries.get("snp_mod", ""),
+        intro="Associations between segregating SNP alleles and target modification states on the same molecules.",
+        definitions=definitions_html(column_definitions(list(snp_mod_df_view.columns)), summary="Column definitions") if not snp_mod_df_view.empty else "",
+    )
+
+    # --- Distance of cis SNP to affected modifications (positional + motif mechanism) ---
+    sec_snp_mech = build_snp_mechanism_section(read_tsv(args.snp_mod_mechanism), args.top_genes) if args.snp_mod_mechanism else None
+
+    # --- Single-molecule co-localized modifications (mod x mod dependency on shared molecules) ---
     mod_mod_df = read_tsv(args.mod_mod_assoc) if args.mod_mod_assoc else pd.DataFrame()
+    sec_modmod = None
     if args.mod_mod_assoc:
         if not mod_mod_df.empty:
             mm_view = mod_mod_df
@@ -1555,40 +1578,38 @@ def main():
             mm_body = header + fig_html + df_to_html(mm_view, max_rows=args.top_genes)
         else:
             mm_body = "<p class='muted'>No co-localized modification pairs passed the coverage thresholds.</p>"
-        body.append(
-            section(
-                "Co-localized Modifications",
-                mm_body,
-                intro="The modification analogue of the SNP-to-modification test: for every pair of nearby "
-                      "modification sites seen on shared reads, does the state of one predict the state of the "
-                      "other on the SAME molecule? effect_abs_delta_mod_frac is |P(B modified | A modified) - "
-                      "P(B modified | A unmodified)|; jaccard_both is co-modified reads / reads modified at either.",
-                definitions=definitions_html(column_definitions(list(mod_mod_df.columns)), summary="Column definitions") if not mod_mod_df.empty else "",
-            )
+        sec_modmod = section(
+            "Single-Molecule cis Co-Localized Modifications",
+            mm_body,
+            intro="For every pair of nearby modification sites seen on the SAME reads, does the state of one predict "
+                  "the state of the other? The 2x2 is tested conditional on reads covering both sites, and enrichment "
+                  "is judged against the expected co-occurrence given each site's own marginal stoichiometry — so a "
+                  "concordant call means the two are modified together MORE than their individual rates alone would "
+                  "predict, not merely that both are often modified. effect_abs_delta_mod_frac is "
+                  "|P(B modified | A modified) - P(B modified | A unmodified)|; jaccard_both is co-modified reads / "
+                  "reads modified at either.",
+            definitions=definitions_html(column_definitions(list(mod_mod_df.columns)), summary="Column definitions") if not mod_mod_df.empty else "",
         )
 
-    body.append(
-        section(
-            "SNP Fragmentform Epitranscriptome Dependency",
-            (df_to_html(joint_df_view, max_rows=args.top_genes) if not joint_df_view.empty else "<p class='muted'>No joint SNP-fragmentform-epitranscriptome dependency results available.</p>") + snp_galleries.get("snp_tx_mod", ""),
-            intro="Fragmentform-conditioned SNP/mod tests that distinguish direct epitranscriptome effects from fragmentform-composition shifts.",
-            definitions=definitions_html(column_definitions(list(joint_df_view.columns)), summary="Column definitions") if not joint_df_view.empty else "",
-        )
+    sec_joint = section(
+        "Are cis SNP-driven Changes in Modification Stoichiometry Related Instead to Fragmentform Usage Changes",
+        (df_to_html(joint_df_view, max_rows=args.top_genes) if not joint_df_view.empty else "<p class='muted'>No joint SNP-fragmentform-epitranscriptome dependency results available.</p>") + snp_galleries.get("snp_tx_mod", ""),
+        intro="Fragmentform-conditioned (Cochran-Mantel-Haenszel) SNP/mod tests that distinguish a direct allelic "
+              "effect on modification from one that is really driven by the allele shifting which fragmentform is used.",
+        definitions=definitions_html(column_definitions(list(joint_df_view.columns)), summary="Column definitions") if not joint_df_view.empty else "",
     )
-    body.append(
-        section(
-            "Haplotype Blocks",
-            df_to_html(hap_blocks_df_view, max_rows=args.top_genes) if not hap_blocks_df_view.empty else "<p class='muted'>No haplotype blocks available.</p>",
-            intro="Local read-backed SNP blocks retained for haplotype association testing.",
-            definitions=definitions_html(column_definitions(list(hap_blocks_df_view.columns)), summary="Column definitions") if not hap_blocks_df_view.empty else "",
-        )
+    sec_hap_blocks = section(
+        "Association of multiple cis SNPs into Haplotypes",
+        df_to_html(hap_blocks_df_view, max_rows=args.top_genes) if not hap_blocks_df_view.empty else "<p class='muted'>No haplotype blocks available.</p>",
+        intro="Local read-backed SNP blocks (co-occurring cis SNPs phased onto the same reads) retained for haplotype association testing.",
+        definitions=definitions_html(column_definitions(list(hap_blocks_df_view.columns)), summary="Column definitions") if not hap_blocks_df_view.empty else "",
     )
 
     hap_sections = []
     if not hap_tx_df_view.empty:
         hap_sections.append(
             subsection(
-                "Haplotype to Fragmentform",
+                "Haplotype to Fragmentform Usage",
                 df_to_html(hap_tx_df_view, max_rows=args.top_genes) + snp_galleries.get("hap_tx", ""),
                 definitions=definitions_html(column_definitions(list(hap_tx_df_view.columns)), summary="Column definitions"),
             )
@@ -1596,18 +1617,23 @@ def main():
     if not hap_mod_df_view.empty:
         hap_sections.append(
             subsection(
-                "Haplotype to Epitranscriptome",
+                "Haplotype to Modification Stoichiometry",
                 df_to_html(hap_mod_df_view, max_rows=args.top_genes) + snp_galleries.get("hap_mod", ""),
                 definitions=definitions_html(column_definitions(list(hap_mod_df_view.columns)), summary="Column definitions"),
             )
         )
-    body.append(
-        section(
-            "Haplotype Associations",
-            "".join(hap_sections) if hap_sections else "<p class='muted'>No haplotype associations available.</p>",
-            intro="Associations between local haplotype blocks and fragmentform or modification outcomes.",
-        )
+    sec_hap_assoc = section(
+        "Association between Haplotypes and Fragmentform Usage + Modification Stoichiometry",
+        "".join(hap_sections) if hap_sections else "<p class='muted'>No haplotype associations available.</p>",
+        intro="Associations between local haplotype blocks and fragmentform usage or modification stoichiometry.",
     )
+
+    body = [s for s in [
+        sec_overview, sec_top_ff, sec_sample_stats, sec_read_funnel, sec_gene_sites, sec_overlap,
+        sec_novel, sec_splice, sec_apa, sec_diff, sec_class, sec_seq, sec_polya, sec_between,
+        sec_snp_cand, sec_snp_ff, sec_snp_mod, sec_snp_mech, sec_modmod, sec_joint,
+        sec_hap_blocks, sec_hap_assoc,
+    ] if s]
 
     # --- header: modulator logo banner + a run manifest (command line + resolved inputs + config)
     logo_html = ""
@@ -1631,7 +1657,7 @@ def main():
     if _mtext.strip():
         manifest_html = (
             "<details class='run-manifest' open>"
-            "<summary>Run inputs &amp; parameters (command line, resolved inputs, full configuration)</summary>"
+            "<summary>Run inputs &amp; parameters</summary>"
             f"<pre class='manifest-pre'>{html.escape(_mtext)}</pre>"
             "</details>"
         )
@@ -1698,20 +1724,20 @@ def main():
     }}
     details.report-section > summary::-webkit-details-marker {{ display:none; }}
     details.report-section > summary::before {{
-      content:"\\25B8"; color:#d4a017; font-size:.72em; line-height:1;
+      content:"\\25B8"; color:#d4a017; font-size:.8em; line-height:1;
     }}
     details.report-section[open] > summary::before {{ content:"\\25BE"; }}
     details.report-section > summary > h2 {{
       display:inline; margin:0; padding:0; border:0;
-      font-size:31px;  /* 19px base + 12 */
+      font-size:28px; color:#17807f; font-weight:660;  /* green, matches the run-manifest header */
     }}
     details.run-manifest {{ margin:16px 0 4px; }}
     details.run-manifest > summary {{
-      cursor:pointer; font-weight:640; color:#17807f; letter-spacing:.01em;
-      font-size:14.5px; list-style:none; user-select:none;
+      cursor:pointer; font-weight:660; color:#17807f; letter-spacing:-.01em;
+      font-size:28px; list-style:none; user-select:none;
     }}
     details.run-manifest > summary::-webkit-details-marker {{ display:none; }}
-    details.run-manifest > summary::before {{ content:"\\25B8 "; color:#d4a017; }}
+    details.run-manifest > summary::before {{ content:"\\25B8 "; color:#d4a017; font-size:.8em; }}
     details.run-manifest[open] > summary::before {{ content:"\\25BE "; }}
     pre.manifest-pre {{
       max-height:600px; overflow:auto; margin:10px 0 0; padding:14px 16px;
