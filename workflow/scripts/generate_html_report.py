@@ -85,9 +85,38 @@ COLUMN_DEFINITIONS = {
                         "gene and was scrapped (`multi_gene_action`).",
     "zero_gene_kept": "Reads in an overlapping-gene region where NO gene's fragmentforms passed the filters, so the "
                       "read maps to zero retained fragmentforms and is scrapped.",
-    "total_potential_overlapping_gene_loci": "Number of metagenes that bundle ≥2 genes — i.e. the loci where genes "
-                                             "overlap on the same strand and cross-gene read resolution is potentially "
-                                             "needed (constant for the run; shown on every sample row).",
+    # --- per-sample read funnel (per_sample_read_stats) ---
+    "total_reads_bam": "Total alignment records in the input BAM for this sample.",
+    "total_mapped": "Reads with a mapped primary alignment.",
+    "total_unmapped": "Reads with no mapped alignment.",
+    "considered_reads": "Reads that passed every primary QC filter (mapped, primary, MAPQ, intron count, 3' soft-clip) and are eligible for fragmentform assignment.",
+    "failed_unmapped": "Number of reads filtered because they were unmapped.",
+    "failed_secondary_or_supp": "Number of reads filtered because they were secondary or supplementary alignments.",
+    "failed_low_mapq": "Number of reads filtered because their mapping quality was below the minimum (see input parameter min_mapq).",
+    "failed_low_introns": "Number of reads filtered because they had too few introns (see input parameter min_introns).",
+    "failed_low_softclip3p": "Number of reads filtered because their 3' soft-clip (candidate poly(A)) was too short (see input parameter min_softclip3p).",
+    "failed_reads_total": "Total reads removed by the primary QC filters (sum of the failed_* categories).",
+    "zt_tagged_exists": "Whether a ZT-tagged BAM (fragmentform assignments) was written for this sample.",
+    "zt_total_records": "Total alignment records in the ZT-tagged BAM.",
+    "zt_unmapped_records": "Unmapped records in the ZT-tagged BAM.",
+    "zt_mapped_records": "Mapped records in the ZT-tagged BAM.",
+    "zt_mapped_unassigned_reads": "Mapped reads in the ZT BAM that were not assigned to any retained fragmentform.",
+    "frac_mapped_of_total": "Fraction of BAM reads that are mapped (total_mapped / total_reads_bam).",
+    "frac_considered_of_total": "Fraction of BAM reads that passed QC (considered_reads / total_reads_bam).",
+    "frac_considered_of_mapped": "Fraction of mapped reads that passed QC (considered_reads / total_mapped).",
+    "frac_assigned_of_considered": "Fraction of QC-passing reads assigned to a fragmentform (assigned_reads / considered_reads).",
+    "frac_assigned_of_total": "Fraction of BAM reads assigned to a fragmentform (assigned_reads / total_reads_bam).",
+    "frac_failed_of_total": "Fraction of BAM reads removed by the QC filters.",
+    # --- per-gene splice-junction summary (gene_splice_summary) ---
+    "n_fragmentforms": "Number of assembled fragmentforms for this gene.",
+    "n_distinct_junctions": "Number of distinct splice junctions (donor–acceptor pairs) across the gene's fragmentforms.",
+    "n_canonical_GT_AG": "Junctions with canonical GT-AG dinucleotides (major U2 spliceosome).",
+    "n_semi_canonical_GC_AG": "Junctions with GC-AG dinucleotides (semi-canonical).",
+    "n_minor_AT_AC": "Junctions with AT-AC dinucleotides (minor U12 spliceosome).",
+    "n_noncanonical": "Junctions whose dinucleotides match none of the above — worth inspecting.",
+    "frac_canonical": "Fraction of the gene's junctions that are canonical GT-AG.",
+    "has_noncanonical": "1 if the gene carries at least one non-canonical junction, else 0.",
+    "intron_category": "Overall call for the gene: ALL_CANONICAL, CANONICAL_WITH_GC_AG, or HAS_NONCANONICAL.",
     "sample": "Sample identifier derived from the BAM filename.",
     "chrom": "Reference chromosome or contig containing the reported feature.",
     "pos1": "1-based genomic coordinate of the reported SNP locus.",
@@ -499,14 +528,43 @@ def visible_definitions(labels):
     return [(label, CARD_DEFINITIONS[label]) for label in labels if label in CARD_DEFINITIONS]
 
 
+_LEN_GROUP = {
+    "total": "all alignment records",
+    "considered": "reads passing the primary QC filters",
+    "assigned": "reads assigned to a retained fragmentform",
+    "zt_unassigned": "ZT-tagged reads not assigned to any fragmentform",
+}
+_LEN_STAT = {
+    "min": "Minimum", "max": "Maximum", "mean": "Mean",
+    "p25": "25th percentile", "p50": "Median (50th percentile)",
+    "p75": "75th percentile", "p90": "90th percentile",
+}
+
+
+def _derived_column_def(col):
+    """Definition for columns that follow a regular naming pattern (read-length percentiles, etc.)
+    so they need not be enumerated one-by-one. Returns None if there is no derived definition."""
+    for grp, gdesc in _LEN_GROUP.items():
+        pref = f"{grp}_len_"
+        if col.startswith(pref):
+            stat = col[len(pref):]
+            if stat in _LEN_STAT:
+                return f"{_LEN_STAT[stat]} of the read-length distribution (nt) over {gdesc}."
+    return None
+
+
 def column_definitions(columns):
+    # Only emit definitions we actually have (explicit or derived). Columns without one are left
+    # out entirely rather than shown with a filler "carried through" line.
     defs = []
     seen = set()
     for col in columns:
         if col in seen:
             continue
         seen.add(col)
-        defs.append((col, COLUMN_DEFINITIONS.get(col, f"Value carried through from the upstream `{col}` field.")))
+        desc = COLUMN_DEFINITIONS.get(col) or _derived_column_def(col)
+        if desc:
+            defs.append((col, desc))
     return defs
 
 
@@ -1372,7 +1430,7 @@ def main():
             definitions=definitions_html(column_definitions(list(tx_lengths_ordered.columns)), summary="Column definitions"),
           ) if not tx_lengths_ordered.empty else ""),
         intro="The highest-support fragmentforms retained after assembly and reference classification, ordered by "
-              "assigned reads. The read-length table lists the SAME fragmentforms in the SAME order.",
+              "assigned reads.",
         definitions=definitions_html(column_definitions(top_tx_cols), summary="Column definitions"),
     )
 
@@ -1407,30 +1465,22 @@ def main():
         definitions=definitions_html(column_definitions(list(top_gene_sites_df.columns)), summary="Column definitions"),
     )
 
-    # Overlap resolution: put `sample` first, drop the pseudo-metric header rows, and add the
-    # run-level count of potential overlapping-gene loci (metagenes bundling >=2 genes).
-    n_overlap_loci = 0
-    if not class_df.empty and {"metagene_index", "gene_index"} <= set(class_df.columns):
-        _g = class_df.groupby("metagene_index")["gene_index"].nunique()
-        n_overlap_loci = int((_g >= 2).sum())
+    # Overlap resolution: put `sample` first and drop the pseudo-metric header rows.
     if not overlap_df.empty:
         overlap_view = overlap_df.drop(columns=[c for c in ["removed_reads_per_gene_id", "removed_reads_per_zt_label"] if c in overlap_df.columns])
         _ocols = (["sample"] if "sample" in overlap_view.columns else []) + [c for c in overlap_view.columns if c != "sample"]
         overlap_view = overlap_view[_ocols].copy()
-        overlap_view.insert(1 if "sample" in overlap_view.columns else 0,
-                            "total_potential_overlapping_gene_loci", n_overlap_loci)
         overlap_body = df_to_html(overlap_view.fillna("0"), max_rows=100)
         overlap_defs2 = definitions_html(column_definitions(list(overlap_view.columns)), summary="Column definitions")
     else:
         overlap_body = "<p class='muted'>No overlap-resolution summaries available.</p>"
         overlap_defs2 = ""
     sec_overlap = section(
-        "Resolution of Potential Overlapping Gene Loci",
+        "Read Usage within Overlapping Gene Loci",
         overlap_body,
         intro="Where genes overlap on the same strand, modulator merges them into one metagene and resolves each "
-              "read to a single gene by its fragmentform (ZT) assignment. This shows, per sample, how those reads "
-              "were resolved. total_potential_overlapping_gene_loci is the number of metagenes that bundle ≥2 genes "
-              "(see input parameter multi_gene_action).",
+              "read to a single gene by its fragmentform (ZT) assignment. This shows, per sample, how the reads in "
+              "those overlapping-gene regions were used or scrapped (see input parameter multi_gene_action).",
         definitions=overlap_defs2,
     )
 
@@ -1656,10 +1706,10 @@ def main():
             _mtext = ""
     if _mtext.strip():
         manifest_html = (
-            "<details class='run-manifest' open>"
+            "<section><details class='run-manifest' open>"
             "<summary>Run inputs &amp; parameters</summary>"
             f"<pre class='manifest-pre'>{html.escape(_mtext)}</pre>"
-            "</details>"
+            "</details></section>"
         )
 
     html_doc = f"""<!doctype html>
@@ -1826,8 +1876,8 @@ def main():
     <header>
       {logo_html}
       <h1 class="report-title">Report</h1>
-      {manifest_html}
     </header>
+    {manifest_html}
     {''.join(body)}
   </main>
   <!-- Figures are plain <a class="image-link" target="_blank"> anchors: a left-click opens the
