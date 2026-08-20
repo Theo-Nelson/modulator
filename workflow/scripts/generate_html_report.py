@@ -1083,29 +1083,43 @@ def build_classification_section(class_df, class_figs_dir, arch_figs_dir, max_fi
     )
     summary_df["pct"] = (100.0 * summary_df["n_sites"] / total).map(lambda v: f"{v:.1f}%")
 
-    # structural_category x stoich_direction cross-tab -- the compact readable grid of the same key.
+    # The complete structural-mechanism taxonomy (the distinct structural_category values), always
+    # reported in full so every mechanism appears even with zero sites this run.
+    ALL_STRUCTURAL_MECHANISMS = [
+        "TANDEM_APA", "INTRONIC_POLYADENYLATION", "ALTERNATIVE_LAST_EXON",
+        "INTERGENIC_TERMINAL_EXON", "CASSETTE_EXON", "EJC_SPLICING",
+        "SHARED_TERMINAL_EXON", "SHARED_INTERNAL_EXON", "UNEXPLAINED",
+        "ARTIFACT", "UNCLASSIFIED",
+    ]
+    ALL_STOICH_DIRECTIONS = ["PROXIMAL_HIGHER", "DISTAL_HIGHER", "CO_TERMINAL"]
+
+    # structural_category x stoich_direction cross-tab -- always the FULL grid (every mechanism row
+    # and every direction column), 0 where nothing was seen this run.
     xtab_html = ""
     if has_axes:
         ct = pd.crosstab(class_df["structural_category"], class_df["stoich_direction"].fillna("(n/a)"))
-        dir_order = [d for d in ["PROXIMAL_HIGHER", "DISTAL_HIGHER", "CO_TERMINAL", "(n/a)"] if d in ct.columns]
-        other = [c for c in ct.columns if c not in dir_order]
-        ct = ct[dir_order + other]
-        ct = ct.loc[ct.sum(axis=1).sort_values(ascending=False).index]
+        extra_cols = [c for c in ct.columns if c not in ALL_STOICH_DIRECTIONS]  # e.g. "(n/a)"
+        ct = ct.reindex(columns=ALL_STOICH_DIRECTIONS + extra_cols, fill_value=0)
+        extra_rows = [m for m in ct.index if m not in ALL_STRUCTURAL_MECHANISMS]
+        ct = ct.reindex(index=ALL_STRUCTURAL_MECHANISMS + extra_rows, fill_value=0)
         ct.insert(len(ct.columns), "TOTAL", ct.sum(axis=1))
         ct = ct.reset_index()
         xtab_html = subsection(
             "Sites by structural category × stoichiometry direction",
-            "<p class='section-intro'>The class_key factored into its two components. Rows = structural "
-            "mechanism; columns = which fragmentform carries more modification (PROXIMAL_HIGHER = "
-            "shorter-3'UTR form; DISTAL_HIGHER = longer; CO_TERMINAL = same 3' end).</p>"
+            "<p class='section-intro'>The class_key factored into its two components, showing every "
+            "structural mechanism (0 where none were found this run). Rows = structural mechanism; "
+            "columns = which fragmentform carries more modification (PROXIMAL_HIGHER = shorter-3'UTR "
+            "form; DISTAL_HIGHER = longer; CO_TERMINAL = same 3' end).</p>"
             + df_to_html(ct, max_rows=len(ct)),
         )
 
-    key_defs = [(k, _def_for(k)) for k in list(summary_df["class_key"])]
+    # Define EVERY structural mechanism (the complete taxonomy), not only those present this run,
+    # so the mechanism reference is always complete.
+    mech_defs = [(m, CATEGORY_DEFINITIONS[m]) for m in ALL_STRUCTURAL_MECHANISMS if m in CATEGORY_DEFINITIONS]
     overview = (
         "<div class='overview-layout'>"
         f"<div>{df_to_html(summary_df, max_rows=len(summary_df))}"
-        f"{definitions_html(key_defs, summary='Structural-mechanism definitions', open_by_default=False)}</div>"
+        f"{definitions_html(mech_defs, summary='Structural-mechanism definitions (all mechanisms)', open_by_default=False)}</div>"
         f"<div class='hero'>{hero_html or '<p class=\"muted\">Distribution graph unavailable.</p>'}</div>"
         "</div>"
     ) + xtab_html
@@ -1162,8 +1176,7 @@ def build_classification_section(class_df, class_figs_dir, arch_figs_dir, max_fi
             "exon, shared exon); and (2) <b>stoich_direction</b> — which fragmentform carries more "
             "modification (proximal/shorter-3'UTR vs distal/longer, or co-terminal), with "
             "<b>stoich_tier</b> (effect magnitude) and <b>hi_stoich_level</b> (is the favored form "
-            "itself hyper- or hypo-modified). The cross-tab below is the primary view; the legacy "
-            "fused 14-label `category` is retained per site as fine detail and as the figure key. "
+            "itself hyper- or hypo-modified). The cross-tab below is the primary view. "
             "Each mechanism lists its top sites with an isoform architecture map (exon/intron tracks "
             "with the site marked) plus per-sample stoichiometry figures."
         ),
