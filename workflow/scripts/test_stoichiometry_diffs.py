@@ -246,9 +246,10 @@ def make_plot(df_site, per_tx, title, out_png):
     fig, (ax1, ax2) = plt.subplots(
         2,
         1,
-        figsize=(8.5, 7.4),
+        figsize=(8.5, 7.8),
         sharex=True,
         gridspec_kw={"height_ratios": [1.15, 1.0]},
+        layout="constrained",   # reflows at draw time -> absorbs the enlarged house-style fonts
     )
 
     handles = []
@@ -323,11 +324,12 @@ def make_plot(df_site, per_tx, title, out_png):
 
     if handles:
         legend_cols = min(3, len(handles))
+        # 'outside lower center' -> constrained_layout reserves a band for the legend below the
+        # axes, so it never overlaps the x-axis label (even at the enlarged house font sizes).
         fig.legend(
             handles=handles,
             labels=sample_names,
-            loc="lower center",
-            bbox_to_anchor=(0.5, 0.01),
+            loc="outside lower center",
             ncol=legend_cols,
             frameon=False,
             fontsize=8,
@@ -335,9 +337,8 @@ def make_plot(df_site, per_tx, title, out_png):
             columnspacing=1.2,
         )
 
-    fig.suptitle(title, y=0.98, fontsize=12)
-    fig.tight_layout(rect=[0, 0.05, 1, 0.95])
-    save_figure(fig, out_png, dpi=300, bbox_inches="tight")   # PNG + SVG
+    fig.suptitle(title, fontsize=12)
+    save_figure(fig, out_png, dpi=300, bbox_inches="tight")   # PNG + PDF + SVG
     plt.close(fig)
 
 

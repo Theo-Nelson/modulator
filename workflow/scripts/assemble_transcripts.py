@@ -1304,7 +1304,7 @@ def main():
         PC = U[:, :pcs] * S[:pcs] if pcs else np.zeros((X.shape[0], 0))
         var_expl = (S**2) / (S**2).sum() if S.size else np.zeros_like(S)
 
-        fig, ax = plt.subplots(figsize=(8.6, 6.8))
+        fig, ax = plt.subplots(figsize=(8.6, 6.8), layout="constrained")
         cmap = plt.get_cmap("tab10")
         colors = [cmap(i % cmap.N) for i in range(len(all_samples))]
         x = PC[:, 0] if pcs >= 1 else np.zeros(X.shape[0])
@@ -1336,9 +1336,10 @@ def main():
         ax.set_title("Sample PCA of log1p transcript counts")
 
         if all_samples:
-            ax.legend(
-                loc="upper center",
-                bbox_to_anchor=(0.5, -0.16),
+            # 'outside lower center' -> constrained_layout reserves a band below the axes for the
+            # legend, so it never collides with the x-axis label at the enlarged house font sizes.
+            fig.legend(
+                loc="outside lower center",
                 ncol=min(2, max(1, len(all_samples))),
                 frameon=False,
                 fontsize=8,
@@ -1346,8 +1347,7 @@ def main():
                 columnspacing=1.2,
             )
 
-        fig.tight_layout(rect=[0, 0.08, 1, 1])
-        save_figure(fig, pca_png, dpi=300, bbox_inches="tight")   # PNG + SVG
+        save_figure(fig, pca_png, dpi=300, bbox_inches="tight")   # PNG + PDF + SVG
         plt.close(fig)
     else:
         fig, ax = plt.subplots(figsize=(8.6, 6.8))

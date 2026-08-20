@@ -268,13 +268,17 @@ def embed_png(path):
     return f"data:image/png;base64,{encoded}"
 
 
-from plot_utils import save_figure
+from plot_utils import save_figure, setup_matplotlib_style, bump_fonts
 
-_REPORT_FIGS_DIR = None  # set by main(); when set, inline summary charts also write PNG + SVG files here
+_REPORT_FIGS_DIR = None  # set by main(); when set, inline summary charts also write PNG/PDF/SVG here
 
 
 def _save_report_chart(fig, name):
-    """Persist an inline report summary chart to disk as PNG + SVG (alongside its inline embed)."""
+    """Apply the house style (Arial-like + enlarged fonts) to an inline report summary chart, and
+    persist it to disk as PNG + PDF + SVG. Called before the chart's own base64 embed on the SAME
+    figure, so the inline copy inherits the identical font family + sizes."""
+    setup_matplotlib_style()
+    bump_fonts(fig)
     if _REPORT_FIGS_DIR:
         try:
             save_figure(fig, os.path.join(_REPORT_FIGS_DIR, name + ".png"), dpi=200, bbox_inches="tight")
@@ -1699,43 +1703,10 @@ def main():
     </header>
     {''.join(body)}
   </main>
-  <div id="img-lightbox" aria-hidden="true" role="dialog" aria-label="Enlarged figure">
-    <div class="lightbox-bar">
-      <a id="lightbox-open" href="#" target="_blank" rel="noopener noreferrer">Open in new tab ↗</a>
-      <button type="button" id="lightbox-close" aria-label="Close">Close ✕</button>
-    </div>
-    <img id="lightbox-img" src="" alt="Enlarged figure" />
-  </div>
-  <script>
-  (function () {{
-    var lb = document.getElementById('img-lightbox');
-    var img = document.getElementById('lightbox-img');
-    var openLink = document.getElementById('lightbox-open');
-    function show(src) {{
-      img.setAttribute('src', src);
-      openLink.setAttribute('href', src);
-      lb.classList.add('open');
-      lb.setAttribute('aria-hidden', 'false');
-    }}
-    function hide() {{
-      lb.classList.remove('open');
-      lb.setAttribute('aria-hidden', 'true');
-      img.removeAttribute('src');
-    }}
-    document.addEventListener('click', function (e) {{
-      var link = e.target && e.target.closest ? e.target.closest('a.image-link') : null;
-      if (link) {{
-        if (e.button !== 0 || e.metaKey || e.ctrlKey || e.shiftKey || e.altKey) return;
-        e.preventDefault();
-        var im = link.querySelector('img');
-        show(im ? im.getAttribute('src') : link.getAttribute('href'));
-        return;
-      }}
-      if (e.target === lb || (e.target && e.target.id === 'lightbox-close')) hide();
-    }});
-    document.addEventListener('keydown', function (e) {{ if (e.key === 'Escape') hide(); }});
-  }})();
-  </script>
+  <!-- Figures are plain <a class="image-link" target="_blank"> anchors: a left-click opens the
+       full-size image file (written next to this report by externalize_data_uris) in a NEW TAB.
+       No in-page lightbox/JS interception -- data: URIs cannot be opened as a top-level tab in
+       modern browsers, so the previous JS overlay is intentionally gone. -->
 </body>
 </html>
 """

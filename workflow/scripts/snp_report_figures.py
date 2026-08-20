@@ -240,14 +240,20 @@ def _gallery(df, kind, figs_dir, max_figs, min_reads):
         if not built:
             continue
         fig, caption = built
+        try:
+            from plot_utils import setup_matplotlib_style, bump_fonts
+            setup_matplotlib_style(); bump_fonts(fig)   # Arial-like + enlarged fonts
+        except Exception:
+            pass
         buf = BytesIO()
         fig.savefig(buf, format="png", dpi=160, bbox_inches="tight")
-        if out_dir:  # vector SVG companion, written from the live figure before it is closed
-            try:
-                fig.savefig(os.path.join(out_dir, f"rank{rank:02d}__{_safe(caption)}.svg"),
-                            format="svg", bbox_inches="tight")
-            except Exception:
-                pass
+        if out_dir:  # vector PDF + SVG companions, written from the live figure before it is closed
+            for _fmt in ("pdf", "svg"):
+                try:
+                    fig.savefig(os.path.join(out_dir, f"rank{rank:02d}__{_safe(caption)}.{_fmt}"),
+                                format=_fmt, bbox_inches="tight")
+                except Exception:
+                    pass
         plt.close(fig)
         png = buf.getvalue()
         if out_dir:

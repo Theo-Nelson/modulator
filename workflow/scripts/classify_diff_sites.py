@@ -576,7 +576,8 @@ def plot_locus_arch(rec, iso, genes, out_png):
     matplotlib.use("Agg")
     import matplotlib.pyplot as plt
     from plot_utils import save_figure
-    from matplotlib.patches import Rectangle
+    from matplotlib.patches import Rectangle, Patch
+    from matplotlib.lines import Line2D
 
     gene = rec['gene']; chrom = rec['chrom']; pos = int(rec['start0'])
     strand = rec['strand']; cat = rec['class_key']; mod = rec['mod']
@@ -604,7 +605,7 @@ def plot_locus_arch(rec, iso, genes, out_png):
     pad = max(span * 0.02, 200)
     x0, x1 = lo_g - pad, hi_g + pad
 
-    fig, ax = plt.subplots(figsize=(13, 0.7 * len(zns) + 1.6))
+    fig, ax = plt.subplots(figsize=(16.5, 0.85 * len(zns) + 3.4), layout="constrained")
     yh = 0.6
     for row, z in enumerate(zns):
         d = iso[(gene, z)]
@@ -644,20 +645,32 @@ def plot_locus_arch(rec, iso, genes, out_png):
         else:
             ax.plot([pos], [y], marker='x', ms=7, color='#b91c1c', mew=2, zorder=5)
 
-    # site marker + headline
-    ax.axvline(pos, color='red', ls='--', lw=1.2, zorder=3)
-    ax.text(pos, len(zns) + 0.7,
+    # site marker + headline. Stop the red guide line just BELOW the red coordinate label so the
+    # line and the text never overlap (the label reads as a callout above the line's tip); leave
+    # headroom above for the (enlarged) two-line label.
+    line_top = len(zns) + 0.55
+    ax.plot([pos, pos], [0.2, line_top], color='red', ls='--', lw=1.2, zorder=3)
+    ax.text(pos, line_top + 0.12,
             f"{mdisp} @ {chrom}:{pos}\nΔ={eff:.2f} (hi {hf:.2f} vs lo {lf:.2f})",
             color='red', ha='center', va='bottom', fontsize=8)
 
-    ax.set_xlim(x0, x1 + span * 0.9 + pad)
-    ax.set_ylim(0.2, len(zns) + 1.8)
+    ax.set_xlim(x0, x1 + span * 1.7 + pad)   # extra right room for the (enlarged) per-ZN labels
+    ax.set_ylim(0.2, len(zns) + 2.6)
     ax.set_yticks([])
     ax.set_xlabel(f"{chrom} genomic position ({strand} strand)")
-    ax.set_title(f"{cat}: {gene}  ({mdisp})  — blue=internal exon, orange=terminal exon/3'UTR; "
-                 f"site marker: green o=exonic (mature), red x=intronic/absent (NOT in mature RNA)",
-                 fontsize=9)
-    fig.tight_layout()
+    # Short headline (renders large under the house style); the colour/marker key is a real legend
+    # below the axes (constrained_layout reserves its band) instead of a long, clip-prone title.
+    ax.set_title(f"{cat}: {gene}  ({mdisp})", loc="left")
+    _key = [
+        Patch(facecolor='#2563eb', edgecolor='none', label='internal exon'),
+        Patch(facecolor='#d97706', edgecolor='none', label="terminal exon / 3'UTR"),
+        Line2D([0], [0], marker='o', color='none', markerfacecolor='#16a34a',
+               markeredgecolor='white', markersize=8, label='site: exonic (mature)'),
+        Line2D([0], [0], marker='x', color='#b91c1c', markersize=8, mew=2, lw=0,
+               label='site: intronic / absent'),
+    ]
+    fig.legend(handles=_key, loc='outside lower center', ncol=4, frameon=False,
+               fontsize=8, handletextpad=0.4, columnspacing=1.4)
     os.makedirs(os.path.dirname(out_png) or '.', exist_ok=True)
     save_figure(fig, out_png, dpi=140)   # PNG + SVG
     plt.close(fig)
