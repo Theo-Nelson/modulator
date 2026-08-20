@@ -238,6 +238,19 @@ def dist_to_junction(exons, pos):
     return min((abs(pos - j) for j in internal_junctions(exons)), default=10**9)
 
 
+def _intron_inside(exons, lo, hi):
+    """True if ``exons`` has an intron (the gap between two consecutive exons) lying ENTIRELY within
+    the open interval (lo, hi). Used to tell intron RETENTION (the other form splices out a whole
+    intron that this form's single exon spans) from a mere alternative donor/acceptor (a single
+    shifted boundary that still rejoins downstream)."""
+    for i in range(len(exons) - 1):
+        istart = exons[i][1]      # donor: end of exon i
+        iend = exons[i + 1][0]    # acceptor: start of exon i+1
+        if lo < istart and iend < hi:
+            return True
+    return False
+
+
 def is_proximal(tes_a, tes_b, strand):
     return (tes_a < tes_b) if strand == '+' else (tes_a > tes_b)
 
@@ -331,7 +344,8 @@ def exon_gap(a, b):
 # =============================================================================
 TAXONOMY = {
     "PRIVATE":       ["SKIPPED_EXON", "INTRONIC_POLYA", "ALT_LAST_EXON"],
-    "SHARED_LOCAL":  ["ALT_DONOR", "ALT_ACCEPTOR", "ALT_POLYA_SITE", "NEAR_ALT_JUNCTION"],
+    "SHARED_LOCAL":  ["ALT_DONOR", "ALT_ACCEPTOR", "ALT_POLYA_SITE", "RETAINED_INTRON",
+                      "IPA_EXTENSION", "NEAR_ALT_JUNCTION"],
     "SHARED_DISTAL": ["DISTAL_APA", "DISTAL_SPLICING"],
     "UNEXPLAINABLE": ["FIVE_PRIME_UNCERTAIN", "INTRON_READ_ARTIFACT", "NO_MODEL", "UNRESOLVED"],
 }
@@ -418,20 +432,49 @@ def classify_tree(gene, pos, hiZN, loZN, iso, *, tes_tol, ejc_nt):
         info['delta_nt'] = abs(ht - lt)
         return 'SHARED_LOCAL', 'ALT_POLYA_SITE', polar, info
 
-    # (b) the base's exon has a shifted acceptor / donor boundary (internal splice junctions only:
-    # the 5' end is the blind spot; the 3' end is the poly(A) site handled in (a)).
+    # (b) the base's OWN exon has a shifted boundary between the two forms. This stays LOCAL even when
+    # the base's exon is terminal in one form -- the change is at the base. We separate three
+    # mechanisms rather than lumping every longer exon into "alt donor":
+    #   IPA_EXTENSION   the longer form reads into the intron and polyadenylates there (its extended
+    #                   donor boundary == its own, more-proximal poly(A) site);
+    #   RETAINED_INTRON the shorter form splices out a whole intron that the longer form's single exon
+    #                   spans (both intron ends fall inside the longer exon);
+    #   ALT_DONOR / ALT_ACCEPTOR  a single shifted splice boundary that still rejoins downstream.
     if ehi and elo:
         if strand == '+':
             acc_hi, acc_lo, don_hi, don_lo = ehi[0], elo[0], ehi[1], elo[1]
         else:
             acc_hi, acc_lo, don_hi, don_lo = ehi[1], elo[1], ehi[0], elo[0]
-        exon_dir = 'LONGER_EXON_HIGHER' if (ehi[1] - ehi[0]) >= (elo[1] - elo[0]) else 'SHORTER_EXON_HIGHER'
-        if not (hi_first or lo_first) and acc_hi != acc_lo:
-            info['delta_nt'] = abs(acc_hi - acc_lo)
-            return 'SHARED_LOCAL', 'ALT_ACCEPTOR', exon_dir, info
-        if not (hi_last or lo_last) and don_hi != don_lo:
-            info['delta_nt'] = abs(don_hi - don_lo)
-            return 'SHARED_LOCAL', 'ALT_DONOR', exon_dir, info
+        len_hi, len_lo = ehi[1] - ehi[0], elo[1] - elo[0]
+        hi_longer = len_hi >= len_lo
+        long_exon = ehi if hi_longer else elo
+        short_exons = ilo['exons'] if hi_longer else ihi['exons']
+        long_don = don_hi if hi_longer else don_lo
+        long_tes = ht if hi_longer else lt
+        short_tes = lt if hi_longer else ht
+        exon_dir = 'LONGER_EXON_HIGHER' if hi_longer else 'SHORTER_EXON_HIGHER'
+        acc_diff = (acc_hi != acc_lo) and not (hi_first or lo_first)   # 5' end is the blind spot
+        don_diff = (don_hi != don_lo)
+        if acc_diff or don_diff:
+            # IPA_EXTENSION: the longer form's donor boundary IS its own poly(A) site (reads into the
+            # intron and terminates there), and it is NOT co-terminal with the other form.
+            not_coterm = long_tes is not None and (short_tes is None or abs(long_tes - short_tes) > tes_tol)
+            if don_diff and long_tes is not None and abs(long_don - long_tes) <= tes_tol and not_coterm:
+                info['delta_nt'] = abs(don_hi - don_lo)
+                d = 'EXTENDS_TO_PA_HIGHER' if hi_longer else 'EXTENDS_TO_PA_LOWER'
+                return 'SHARED_LOCAL', 'IPA_EXTENSION', d, info
+            # RETAINED_INTRON: the shorter form has a whole intron inside the longer form's base exon.
+            if _intron_inside(short_exons, long_exon[0], long_exon[1]):
+                info['delta_nt'] = abs(len_hi - len_lo)
+                d = 'INTRON_RETAINED_HIGHER' if hi_longer else 'INTRON_RETAINED_LOWER'
+                return 'SHARED_LOCAL', 'RETAINED_INTRON', d, info
+            # otherwise a single shifted splice boundary that rejoins downstream.
+            if acc_diff:
+                info['delta_nt'] = abs(acc_hi - acc_lo)
+                return 'SHARED_LOCAL', 'ALT_ACCEPTOR', exon_dir, info
+            if don_diff:
+                info['delta_nt'] = abs(don_hi - don_lo)
+                return 'SHARED_LOCAL', 'ALT_DONOR', exon_dir, info
 
     # (c) base near a junction present in one form but not the other (EJC window) -> NEAR_ALT_JUNCTION
     if (info['jd_hi'] <= ejc_nt) != (info['jd_lo'] <= ejc_nt):

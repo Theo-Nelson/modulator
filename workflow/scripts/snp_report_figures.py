@@ -158,18 +158,23 @@ def _fig_hap(row, plt):
         ax.set_ylim(0, 1.16); ax.set_ylabel(f"fraction modified ({row.get('target_mod_code','')})")
         title = f"block {block}  {row.get('mod_site_id','')}\nmethylation by haplotype"
     else:
-        # transcript usage: stacked proportion of each haplotype's reads across states (transcripts)
+        # fragmentform usage: stacked proportion of each haplotype's reads across the gene's fragmentforms
         rowsum = counts.sum(axis=1, keepdims=True); rowsum[rowsum == 0] = 1
         prop = counts / rowsum
         bottom = np.zeros(len(haps))
         cmap = plt.get_cmap("tab20")
         for j in range(prop.shape[1]):
             lbl = _short_zt(states[j]) if j < len(states) else f"s{j}"
+            if lbl.startswith("s") and lbl[1:].isdigit():   # generic state -> fragmentform label T1, T2, ...
+                lbl = f"T{int(lbl[1:]) + 1}"
             ax.bar(x, prop[:, j], 0.62, bottom=bottom, label=lbl, color=cmap(j % 20))
             bottom += prop[:, j]
-        ax.set_ylim(0, 1.0); ax.set_ylabel("transcript usage fraction")
-        ax.legend(fontsize=6.5, frameon=False, ncol=1, bbox_to_anchor=(1.01, 1), loc="upper left")
-        title = f"block {block}\ntranscript usage by haplotype"
+        ax.set_ylim(0, 1.0); ax.set_ylabel("fragmentform usage fraction")
+        ax.legend(fontsize=6.5, frameon=False, ncol=1, bbox_to_anchor=(1.01, 1), loc="upper left",
+                  title="fragmentform")
+        gene = str(row.get("gene_names", "") or "").split(",")[0]
+        title = (f"block {block} — {gene}\nfragmentform usage by haplotype" if gene
+                 else f"block {block}\nfragmentform usage by haplotype")
     ax.set_xticks(x); ax.set_xticklabels(haps, fontsize=8, rotation=20, ha="right")
     ax.set_title(title, fontsize=8.5)
     for sp in ("top", "right"):

@@ -1962,6 +1962,7 @@ class ModulatorPipeline:
             "--snp-mod-assoc", str(self.paths.geno_snp_mod) if self.paths.geno_snp_mod.exists() else "",
             "--assembled-gtf", str(self.paths.out_gtf) if self.paths.out_gtf.exists() else "",
             "--molecule-mod-calls", str(self.paths.geno_molecule_mod_calls) if self.paths.geno_molecule_mod_calls.exists() else "",
+            "--molecule-snps", str(self.paths.geno_molecule_snps) if self.paths.geno_molecule_snps.exists() else "",
             "--hap-blocks", str(self.paths.geno_hap_blocks) if self.paths.geno_hap_blocks.exists() else "",
             "--hap-tx-assoc", str(self.paths.geno_hap_tx) if self.paths.geno_hap_tx.exists() else "",
             "--hap-mod-assoc", str(self.paths.geno_hap_mod) if self.paths.geno_hap_mod.exists() else "",

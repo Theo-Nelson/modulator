@@ -57,6 +57,16 @@ CASES = [
       2: ([(1000, 1200), (2000, 3000)], 3000, 100)},
      2300, 1, 2, "SHARED_LOCAL", "ALT_POLYA_SITE"),
 
+    ("SHARED_LOCAL_IPA_EXTENSION",  # hi reads into the intron and polyadenylates there (IPA); lo splices on
+     {1: ([(1000, 1200), (2000, 2600)], 2600, 100),
+      2: ([(1000, 1200), (2000, 2300), (3000, 3500)], 3500, 100)},
+     2100, 1, 2, "SHARED_LOCAL", "IPA_EXTENSION"),
+
+    ("SHARED_LOCAL_RETAINED_INTRON", # co-terminal; hi retains a 3'UTR intron that lo splices out
+     {1: ([(1000, 1200), (2000, 3000)], 3000, 100),
+      2: ([(1000, 1200), (2000, 2300), (2600, 3000)], 3000, 100)},
+     2150, 1, 2, "SHARED_LOCAL", "RETAINED_INTRON"),
+
     ("SHARED_DISTAL_SPLICING",      # base's exon identical, SAME 3' end (tes 3500); forms differ only in the 5' exon
      {1: ([(1000, 1200), (2000, 2200), (3000, 3500)], 3500, 100),
       2: ([(1500, 1700), (2000, 2200), (3000, 3500)], 3500, 100)},

@@ -191,6 +191,7 @@ COLUMN_DEFINITIONS = {
     "support_reads": "Reads overlapping at least one SNP in the reported haplotype block.",
     "n_snps": "Number of SNPs represented in the reported haplotype block.",
     "block_id": "Identifier for the reported haplotype block.",
+    "block_region": "Genomic coordinates (chrom:start-end) spanned by the haplotype block.",
     "context_key": "Gene- or metagene-aware context key used to restrict genotype and modification joins to the same local feature family.",
     "haplotypes": "Observed allele strings for the retained read-backed haplotypes in the reported block.",
     "region": "Genomic span of the haplotype block as chrom:start-end (1-based; first to last SNP position).",
@@ -305,6 +306,9 @@ def parse_args():
     ap.add_argument("--molecule-mod-calls", default="",
                     help="per-read modification-call table (with ZN fragmentform tag); read-backs the "
                          "per-fragmentform stoichiometry graphs in the cis-SNP→mod section")
+    ap.add_argument("--molecule-snps", default="",
+                    help="per-read SNP genotype table (with ZN + allele_class); splits the "
+                         "per-fragmentform stoichiometry graphs by SNP allele")
     ap.add_argument("--hap-blocks", default="")
     ap.add_argument("--hap-tx-assoc", default="")
     ap.add_argument("--hap-mod-assoc", default="")
@@ -433,70 +437,116 @@ def _first_gene(g):
     return toks[0] if toks else ""
 
 
-def _scan_perff_mod_calls(mol_mods_path, sites):
-    """Scan the per-read mod-call table (chunked + filtered, so it stays bounded at genome scale) and
-    return {(chrom,start0,mod_code): {ZN: [n_modified, n_reads]}} for the requested sites only.
-
-    ZN is the fragmentform partition tag, so grouping the per-read calls at a site by ZN gives the TRUE
-    per-fragmentform stoichiometry (read-backed) — unlike the aggregate_zn FILTERED table, which drops
-    sites that do not clear the per-fragmentform coverage/fail filter."""
-    acc = {}
-    want = {(str(c), int(s), str(mc)) for (_g, c, s, mc) in sites}
-    if not mol_mods_path or not os.path.exists(mol_mods_path) or not want:
-        return acc
-    keep = ["chrom", "start0", "target_mod_code", "target_modified", "ZN", "usable"]
+def _parse_snp_alleles(snp_id):
+    """'chr17:7115293:A>G' -> ('A', 'G'); ('', '') if unparseable."""
     try:
-        reader = pd.read_csv(mol_mods_path, sep="\t", usecols=lambda c: c in keep,
-                             chunksize=200000, low_memory=False)
+        ref, alt = str(snp_id).split(":")[-1].split(">")
+        return ref.strip(), alt.strip()
+    except Exception:
+        return "", ""
+
+
+def _zn_int(z):
+    try:
+        return int(float(z))
+    except (TypeError, ValueError):
+        return None
+
+
+def _scan_perff_by_allele(mol_mods_path, mol_snps_path, sites):
+    """For each cis-SNP→mod hit, split every fragmentform's reads at the modified site BY the SNP allele
+    the read carries. Returns {(chrom,start0,mod_code): {ZN: {allele: [n_modified, n_reads]}}} with
+    allele in {'ref','alt','na'} ('na' = read covers the modification but not the SNP, or no SNP table).
+
+    Two chunked, site-filtered passes -- the per-read mod-call table (ZN + target_modified) and the
+    per-read SNP table (allele_class) -- joined by (sample, read id). Bounded at genome scale because
+    only the top-N hit sites are retained."""
+    acc = {}
+    mod_want = {(str(c), int(s), str(mc)) for (_g, c, s, mc, _snp) in sites}
+    site_snp = {(str(c), int(s), str(mc)): str(snp) for (_g, c, s, mc, snp) in sites}
+    snp_want = {str(snp) for (_g, _c, _s, _mc, snp) in sites if snp}
+    if not mol_mods_path or not os.path.exists(mol_mods_path) or not mod_want:
+        return acc
+    # pass 1: reads at each mod site -> {(sample,qname): (ZN_int, modified)}
+    reads_at = {k: {} for k in mod_want}
+    keep = ["sample", "qname", "chrom", "start0", "target_mod_code", "target_modified", "ZN", "usable"]
+    try:
+        for chunk in pd.read_csv(mol_mods_path, sep="\t", usecols=lambda c: c in keep,
+                                 chunksize=200000, low_memory=False):
+            if not {"chrom", "start0", "target_mod_code", "ZN", "qname"}.issubset(chunk.columns):
+                break
+            chunk = chunk.copy()
+            chunk["start0"] = pd.to_numeric(chunk["start0"], errors="coerce")
+            chunk = chunk.dropna(subset=["start0"])
+            chunk["start0"] = chunk["start0"].astype(int)
+            if "usable" in chunk.columns:
+                chunk = chunk[chunk["usable"].astype(str).str.lower().isin(("true", "1"))]
+            for (c, s, mc), grp in chunk.groupby(["chrom", "start0", "target_mod_code"]):
+                key = (str(c), int(s), str(mc))
+                if key not in reads_at:
+                    continue
+                for _, r in grp.iterrows():
+                    zi = _zn_int(r["ZN"])
+                    if zi is None:
+                        continue
+                    sq = (str(r.get("sample", "")), str(r["qname"]))
+                    reads_at[key][sq] = (zi, int(float(r.get("target_modified", 0) or 0)))
     except Exception:
         return acc
-    for chunk in reader:
-        if not {"chrom", "start0", "target_mod_code", "ZN"}.issubset(chunk.columns):
-            break
-        chunk = chunk.copy()
-        chunk["start0"] = pd.to_numeric(chunk["start0"], errors="coerce")
-        chunk = chunk.dropna(subset=["start0"])
-        chunk["start0"] = chunk["start0"].astype(int)
-        if "usable" in chunk.columns:
-            chunk = chunk[chunk["usable"].astype(str).str.lower().isin(("true", "1"))]
-        for (c, s, mc), grp in chunk.groupby(["chrom", "start0", "target_mod_code"]):
-            key = (str(c), int(s), str(mc))
-            if key not in want:
-                continue
-            per_zn = acc.setdefault(key, {})
-            for zn, zg in grp.groupby("ZN"):
-                try:
-                    zn_i = int(float(zn))
-                except (TypeError, ValueError):
-                    continue  # unassigned reads (blank ZN) belong to no fragmentform
-                nmod = pd.to_numeric(zg["target_modified"], errors="coerce").fillna(0).astype(float).sum()
-                cell = per_zn.setdefault(zn_i, [0.0, 0])
-                cell[0] += float(nmod); cell[1] += int(len(zg))
+    # pass 2: allele_class per read at each wanted SNP -> {snp_id: {(sample,qname): 'ref'/'alt'}}
+    allele_at = {snp: {} for snp in snp_want}
+    if mol_snps_path and os.path.exists(mol_snps_path) and snp_want:
+        skeep = ["sample", "qname", "snp_id", "allele_class"]
+        try:
+            for chunk in pd.read_csv(mol_snps_path, sep="\t", usecols=lambda c: c in skeep,
+                                     chunksize=200000, low_memory=False):
+                if not {"snp_id", "qname", "allele_class"}.issubset(chunk.columns):
+                    break
+                chunk = chunk[chunk["snp_id"].astype(str).isin(snp_want)]
+                for _, r in chunk.iterrows():
+                    a = str(r["allele_class"]).lower()
+                    if a in ("ref", "alt"):
+                        allele_at[str(r["snp_id"])][(str(r.get("sample", "")), str(r["qname"]))] = a
+        except Exception:
+            allele_at = {snp: {} for snp in snp_want}
+    # join
+    for key, rmap in reads_at.items():
+        amap = allele_at.get(site_snp.get(key, ""), {})
+        per_zn = acc.setdefault(key, {})
+        for sq, (zi, mod) in rmap.items():
+            allele = amap.get(sq, "na")
+            cell = per_zn.setdefault(zi, {}).setdefault(allele, [0.0, 0])
+            cell[0] += float(mod); cell[1] += 1
     return acc
 
 
-def snp_mod_fragmentform_png(gene, chrom, mod_start0, mod_code, iso, perff):
-    """Per-fragmentform modification stoichiometry at ONE cis-SNP-linked mod site. For every
-    fragmentform (ZN) of the gene: forms with reads at the position get a bar = read-backed
-    frac_modified (n = reads); forms whose assembled model does not include the position are drawn as a
-    grey hatched 'does not cover this position' band; forms that include it structurally but have no
-    reads here are flagged. ``perff`` is {ZN: [n_modified, n_reads]} for this site. base64 PNG or ''."""
+_ALLELE_STYLE = {"ref": ("#3b6ea5", "ref"), "alt": ("#c1121f", "alt"), "na": ("#17807f", "no SNP call")}
+
+
+def snp_mod_fragmentform_png(gene, chrom, mod_start0, mod_code, iso, perff, ref_base="", alt_base=""):
+    """Per-fragmentform modification stoichiometry at ONE cis-SNP→mod hit, each fragmentform's reads
+    SPLIT by the SNP allele they carry (grouped horizontal bars: ref vs alt, plus 'no SNP call' for
+    reads that miss the SNP). ``perff`` is {ZN: {allele: [n_modified, n_reads]}}. Fragmentforms with no
+    reads at the site are collapsed into one summary row. base64 PNG or ''."""
     if not iso or status_in is None:
         return ""
-
-    def _zn_int(z):
-        try:
-            return int(float(z))
-        except (TypeError, ValueError):
-            return None
-
     zns = [zn for (g, zn) in iso.keys() if g == gene]
     if not zns:
         return ""
-    zns.sort(key=lambda z: (_zn_int(z) is None, _zn_int(z) if _zn_int(z) is not None else 0, str(z)))
-    strand = iso[(gene, zns[0])]["strand"]
-    pos = int(mod_start0) + 1  # 1-based, to match the GTF exon coords used by status_in
     perff = perff or {}
+    # order plotted fragmentforms by total read support; collapse the rest
+    covered = []
+    n_other = 0
+    for zn in zns:
+        d = perff.get(_zn_int(zn), {})
+        tot = sum(v[1] for v in d.values())
+        if tot:
+            covered.append((zn, d, tot))
+        else:
+            n_other += 1
+    covered.sort(key=lambda t: t[2], reverse=True)
+    if not covered and not n_other:
+        return ""
     try:
         import matplotlib
         matplotlib.use("Agg")
@@ -504,42 +554,44 @@ def snp_mod_fragmentform_png(gene, chrom, mod_start0, mod_code, iso, perff):
         from io import BytesIO
     except Exception:
         return ""
-    # Classify every fragmentform; PLOT the ones that carry the site (reads, or in-model), and collapse
-    # the many that structurally do not cover it into a single summary row (keeps the figure readable
-    # on genes with dozens of partial fragmentforms).
-    with_reads, n_other = [], 0
-    for zn in zns:
-        nmod, nreads = perff.get(_zn_int(zn), (0.0, 0))  # perff is keyed by INTEGER ZN
-        if nreads:
-            with_reads.append((zn, nmod / nreads, int(nreads)))
-        else:
-            n_other += 1  # in the model but no reads here, or does not cover the site at all
-    with_reads.sort(key=lambda t: t[1], reverse=True)
-    rows = []  # (label, frac, kind, annotation)
-    for zn, frac, nreads in with_reads:
-        rows.append((f"ZN{zn}", frac, "reads", f"{frac*100:.0f}%  (n={nreads})"))
+    lab = {"ref": f"ref ({ref_base})" if ref_base else "ref",
+           "alt": f"alt ({alt_base})" if alt_base else "alt", "na": "no SNP call"}
+    # build a flat row list: for each fragmentform, one bar per allele present (ref, alt, na)
+    bars = []  # (y, frac, color, text, ztick_label_or_None)
+    yticks, ylabels = [], []
+    y = 0.0
+    order = ["ref", "alt", "na"]
+    for zn, d, _tot in covered:
+        present = [a for a in order if d.get(a, [0, 0])[1] > 0]
+        y0 = y
+        for a in present:
+            nmod, nreads = d[a]
+            frac = nmod / nreads if nreads else 0.0
+            bars.append((y, frac, _ALLELE_STYLE[a][0], f"{frac*100:.0f}%  (n={nreads})", lab[a]))
+            y += 1.0
+        yticks.append((y0 + y - 1.0) / 2.0); ylabels.append(f"ZN{zn}")
+        y += 0.6  # gap between fragmentforms
     if n_other:
-        rows.append((f"{n_other} other fragmentform{'s' if n_other != 1 else ''}", 1.0, "not_covered",
-                     "no reads at / do not cover this position"))
-    if not rows:
-        return ""
-    rows = rows[::-1]  # first (highest stoichiometry) at the TOP of the horizontal bar chart
-    height = max(2.0, 0.46 * len(rows) + 1.0)
-    fig, ax = plt.subplots(figsize=(8.4, height))
-    ypos = list(range(len(rows)))
-    for y, (_lab, frac, kind, _a) in zip(ypos, rows):
-        if kind == "reads":
-            ax.barh(y, frac, color="#17807f", edgecolor="#0f5c5b", linewidth=0.9)
-        elif kind == "not_covered":
-            ax.barh(y, 1.0, color="#ededed", edgecolor="#cfcfcf", linewidth=0.8, hatch="///")
-        # model_no_reads: no bar, just the annotation
-    ax.set_yticks(ypos); ax.set_yticklabels([r[0] for r in rows], fontsize=9)
+        bars.append((y, 1.0, "#ededed", f"{n_other} form{'s' if n_other != 1 else ''}: no reads here", None))
+        yticks.append(y); ylabels.append(f"{n_other} other")
+        y += 1.0
+    height = max(2.2, 0.34 * len(bars) + 0.5 * len(covered) + 1.2)
+    fig, ax = plt.subplots(figsize=(8.8, height))
+    for (yy, frac, color, text, _al) in bars:
+        hatch = "///" if color == "#ededed" else None
+        ax.barh(yy, frac if color != "#ededed" else 1.0, height=0.8, color=color,
+                edgecolor="#cfcfcf" if color == "#ededed" else "white", linewidth=0.6, hatch=hatch)
+        ax.text(min((frac + 0.02) if color != "#ededed" else 0.02, 0.72), yy, text,
+                va="center", ha="left", fontsize=7.5, color="#4a3f35" if color != "#ededed" else "#9a9a9a")
+    ax.set_yticks(yticks); ax.set_yticklabels(ylabels, fontsize=9)
+    ax.invert_yaxis()  # most-supported fragmentform at the top
     ax.set_xlim(0, 1.0); ax.set_xlabel("Modified fraction (stoichiometry)")
-    ax.set_title(f"{gene}  {chrom}:{pos} ({mod_code}) — per-fragmentform stoichiometry")
-    for y, (_lab, frac, kind, a) in zip(ypos, rows):
-        xt = min((frac + 0.02) if kind == "reads" else 0.02, 0.72)
-        ax.text(xt, y, a, va="center", ha="left", fontsize=8,
-                color="#4a3f35" if kind == "reads" else "#9a9a9a")
+    pos = int(mod_start0) + 1
+    ax.set_title(f"{gene}  {chrom}:{pos} ({mod_code}) — per-fragmentform stoichiometry, split by SNP allele")
+    # allele legend
+    from matplotlib.patches import Patch
+    handles = [Patch(facecolor=_ALLELE_STYLE[a][0], label=lab[a]) for a in ("ref", "alt", "na")]
+    ax.legend(handles=handles, fontsize=7.5, frameon=False, loc="lower right", ncol=3)
     ax.grid(True, axis="x", linestyle="--", linewidth=0.6, alpha=0.4)
     for sp in ("top", "right"):
         ax.spines[sp].set_visible(False)
@@ -551,17 +603,16 @@ def snp_mod_fragmentform_png(gene, chrom, mod_start0, mod_code, iso, perff):
     return "data:image/png;base64," + base64.b64encode(buf.getvalue()).decode("ascii")
 
 
-def build_snp_mod_fragmentform_html(snp_mod_df, iso, mol_mods_path, top_n):
+def build_snp_mod_fragmentform_html(snp_mod_df, iso, mol_mods_path, mol_snps_path, top_n):
     """For the top cis-SNP→modification hits, a per-fragmentform stoichiometry breakdown at each hit's
-    modified position, read-backed from the per-read mod-call table (ZN = fragmentform)."""
+    modified position, split by the SNP allele each read carries (read-backed; ZN = fragmentform)."""
     if snp_mod_df is None or snp_mod_df.empty or not iso or status_in is None:
         return ""
     if not {"chrom", "mod_start0", "target_mod_code"}.issubset(snp_mod_df.columns):
         return ""
     srt = snp_mod_df.sort_values("p_adj_bh", ascending=True) if "p_adj_bh" in snp_mod_df.columns else snp_mod_df
     iso_genes = {g for (g, _z) in iso.keys()}
-    # First pass: resolve the top-N target sites (gene + coordinates), then a single chunked scan.
-    sites, seen = [], set()
+    sites, snp_of, seen = [], {}, set()
     for _, r in srt.iterrows():
         ms0 = r.get("mod_start0")
         if pd.isna(ms0):
@@ -574,33 +625,38 @@ def build_snp_mod_fragmentform_html(snp_mod_df, iso, mol_mods_path, top_n):
         if key in seen:
             continue
         seen.add(key)
-        sites.append(key)
+        snp_id = str(r.get("snp_id", ""))
+        sites.append((gene, chrom, int(ms0), mc, snp_id))
+        snp_of[(gene, chrom, int(ms0), mc)] = snp_id
         if len(sites) >= top_n:
             break
     if not sites:
         return ""
-    perff_all = _scan_perff_mod_calls(mol_mods_path, sites)
+    perff_all = _scan_perff_by_allele(mol_mods_path, mol_snps_path, sites)
     cards = []
-    for (gene, chrom, ms0, mc) in sites:
+    for (gene, chrom, ms0, mc, snp_id) in sites:
         perff = perff_all.get((str(chrom), int(ms0), str(mc)), {})
-        img = snp_mod_fragmentform_png(gene, chrom, ms0, mc, iso, perff)
+        ref_b, alt_b = _parse_snp_alleles(snp_id)
+        img = snp_mod_fragmentform_png(gene, chrom, ms0, mc, iso, perff, ref_b, alt_b)
         if not img:
             continue
         cards.append(clickable_image_html(
-            img, f"Per-fragmentform stoichiometry at {gene} {chrom}:{ms0+1} ({mc})",
-            caption=f"{gene} {chrom}:{ms0+1} ({mc}): the target modification's read-backed stoichiometry in "
-                    "each fragmentform (ZN partition) that has reads at the site (bar = modified fraction, "
-                    "n = reads). The single grey hatched bar collapses every remaining fragmentform of the "
-                    "gene that has no reads here — either because its model does not cover the position or "
-                    "because it is unsampled at it."))
+            img, f"Per-fragmentform stoichiometry at {gene} {chrom}:{ms0+1} ({mc}) split by {snp_id}",
+            caption=f"{gene} {chrom}:{ms0+1} ({mc}), SNP {snp_id}: within each fragmentform (ZN), the "
+                    "target modification's read-backed stoichiometry is split by the SNP allele the read "
+                    "carries — ref vs alt (bar = modified fraction, n = reads). Comparing ref vs alt WITHIN "
+                    "a fragmentform isolates the direct allelic effect from the allele merely shifting "
+                    "fragmentform usage. 'no SNP call' = reads covering the modification but not the SNP; "
+                    "fragmentforms with no reads at the site are collapsed into one row."))
     if not cards:
         return ""
-    return ("<h3>Per-fragmentform breakdown at top cis-SNP-linked modification sites</h3>"
+    return ("<h3>Per-fragmentform breakdown at top cis-SNP-linked modification sites (split by SNP allele)</h3>"
             "<p class='section-intro'>For each top hit, the target modification's stoichiometry is broken "
-            "down across every fragmentform (ZN partition) of the gene, computed directly from the per-read "
-            "modification calls. A fragmentform is only comparable where its assembled transcript model "
-            "places the site in its mature RNA; forms that do not cover the position are labelled as "
-            "such.</p>" + "".join(cards))
+            "down across every fragmentform (ZN partition) of the gene AND split by SNP allele, computed "
+            "directly from the per-read modification calls joined to the per-read SNP genotypes. Comparing "
+            "ref vs alt within the same fragmentform is the direct allelic-effect read-out — it tells apart "
+            "a variant that changes modification from one that merely shifts which fragmentform is "
+            "used.</p>" + "".join(cards))
 
 
 def _save_report_chart(fig, name):
@@ -923,7 +979,7 @@ def polya_distribution_png(frag_df):
     has_cls = "classification" in frag_df.columns and frag_df["classification"].notna().any()
     # constrained layout + a taller canvas so the enlarged house fonts / rotated tick labels don't
     # overlap the axis labels (build-time tight_layout can't account for the +12 bump).
-    fig, axes = plt.subplots(1, 2 if has_cls else 1, figsize=(13 if has_cls else 7.0, 5.2),
+    fig, axes = plt.subplots(1, 2 if has_cls else 1, figsize=(13 if has_cls else 7.0, 6.0),
                              layout="constrained")
     axes = axes if has_cls else [axes]
     axes[0].hist(med.values, bins=40, color="#3b6ea5", edgecolor="white", linewidth=0.4)
@@ -939,7 +995,7 @@ def polya_distribution_png(frag_df):
         data = [pd.to_numeric(frag_df.loc[frag_df["classification"] == c, "median_tail"],
                               errors="coerce").dropna().values for c in order]
         axes[1].boxplot(data, labels=order, showfliers=False)
-        axes[1].set_ylabel("fragmentform median tail (nt)")
+        axes[1].set_ylabel("median tail (nt)")  # short label so the +12 font bump doesn't clip it
         axes[1].set_xlabel("fragmentform class")
         for t in axes[1].get_xticklabels():
             t.set_rotation(25); t.set_ha("right")
@@ -1187,9 +1243,9 @@ def build_snp_mechanism_section(mech_df, top_n):
         "<ul>"
         f"<li><b>{len(mech_df):,}</b> SNP x modification pairs classified</li>"
         f"<li><b>{n_art_sig:,}</b> of the <b>{len(sig):,}</b> significant (FDR&lt;0.05) pairs are "
-        f"<b>self-reporting artifacts</b> — the variant and the modification are the same physical event</li>"
+        f"<b>self-reporting artifacts</b> — the variant and the modification are potentially the same physical event</li>"
         + (f"<li>Motif prediction matches the observed allelic direction in <b>{rate:.1f}%</b> of "
-           f"testable m6A pairs (n={len(conc)}) — the mechanism is internally consistent</li>" if len(conc) else "")
+           f"testable motif-bearing pairs (n={len(conc)}) — the mechanism is internally consistent</li>" if len(conc) else "")
         + "</ul>"
     )
     if "artifact_flag" in mech_df.columns:
@@ -1200,32 +1256,33 @@ def build_snp_mechanism_section(mech_df, top_n):
     if not me.empty:
         mt = me["motif_effect"].value_counts().reset_index()
         mt.columns = ["motif_effect", "n_pairs"]
-        parts.append(subsection("m6A DRACH motif effect (SNPs inside the 5-mer)", df_to_html(mt, max_rows=8)))
+        parts.append(subsection("Motif effect (SNPs inside the 5-mer)", df_to_html(mt, max_rows=8)))
     causal = clean[clean["motif_effect"].eq("MOTIF_DISRUPTED") & clean["direction_concordance"].eq("CONCORDANT")] \
         if "motif_effect" in clean.columns else pd.DataFrame()
     if not causal.empty:
         cols = [c for c in ["snp_id", "gene_names", "mod_site_id", "distance_bp", "ref_5mer", "alt_5mer",
                             "ref_mod_rate", "alt_mod_rate", "p_adj_bh"] if c in causal.columns]
         causal = causal.assign(_p=pd.to_numeric(causal["p_adj_bh"], errors="coerce")).sort_values("_p")
-        parts.append(subsection("Top causal cis m6A variants (DRACH disrupted, direction concordant)",
+        parts.append(subsection("Top causal cis variants (motif disrupted, direction concordant)",
                                 df_to_html(causal[cols], max_rows=top_n)))
     return section(
         "Distance of cis SNP to Affected Modifications",
         "".join(parts),
         intro="A SNP whose alleles carry different modification rates gets explained on three axes: WHERE "
-              "it sits relative to the modified base (at it / inside the DRACH 5-mer / inside the 9-mer / "
-              "proximal / distal cis), whether it DISRUPTS or CREATES the m6A DRACH consensus, and whether "
-              "the observed allelic direction matches what the motif predicts. DRACH is only applied to m6A "
-              "— pseudouridine and inosine have no comparable 5-mer consensus, so they get positional "
-              "context only.",
+              "it sits relative to the modified base (at it / inside the 5-mer / inside the 9-mer / "
+              "proximal / distal cis), whether the alt allele DISRUPTS or CREATES the modification's "
+              "sequence motif, and whether the observed allelic direction matches what the motif predicts. "
+              "A sequence motif is used only where the modification has one (the DRACH consensus for m6A); "
+              "modifications without a comparable motif (e.g. pseudouridine, inosine) get positional context "
+              "only.",
         definitions=definitions_html([
             ("AT_MOD_BASE", "The SNP is the modified base itself."),
-            ("IN_MOTIF_CORE / IN_MOTIF_EXTENDED", "Inside the DRACH 5-mer (<=2 nt) / the 9-mer (<=4 nt) around the modified base."),
+            ("IN_MOTIF_CORE / IN_MOTIF_EXTENDED", "Inside the 5-mer (<=2 nt) / the 9-mer (<=4 nt) around the modified base."),
             ("PROXIMAL_CIS / DISTAL_CIS", "Near (default <=50 nt) vs far from the modified base, same locus."),
-            ("MOTIF_DISRUPTED / MOTIF_CREATED", "The alt allele breaks / creates the DRACH consensus — predicting less / more modification on alt."),
-            ("MOTIF_ABSENT_BOTH", "Neither allele is DRACH, which makes the m6A call itself suspect."),
-            ("EDITING_SELF_REPORT / PSEU_SELF_REPORT", "The 'SNP' IS the modification: A-to-I editing basecalls as G, and pseudouridine causes a U-to-C error, so each gets called as a variant at its own site. The association is circular, not regulatory."),
-            ("MOD_BASE_ABLATED", "SNP at an m6A base whose alt allele is not an A — there is no substrate to methylate, so the association is definitional."),
+            ("MOTIF_DISRUPTED / MOTIF_CREATED", "The alt allele breaks / creates the modification's sequence motif — predicting less / more modification on alt."),
+            ("MOTIF_ABSENT_BOTH", "Neither allele matches the modification's motif, which makes the modification call itself suspect."),
+            ("EDITING_SELF_REPORT / PSEU_SELF_REPORT", "The 'SNP' may itself BE the modification: A-to-I editing basecalls as G, and pseudouridine causes a U-to-C basecall error, so each can get called as a variant at its own site. The association is then circular rather than regulatory."),
+            ("MOD_BASE_ABLATED", "SNP at a modified base whose alt allele cannot carry the modification (e.g. an m6A site whose alt allele is not an A) — there is no substrate to modify, so the association is definitional."),
             ("direction_concordance", "Does the observed allelic direction match the motif's prediction? CONCORDANT = coherent causal cis variant."),
         ], summary="Category definitions"),
     )
@@ -1307,7 +1364,8 @@ def build_polya_section(frag_df, diffs_df, mod_df, top_n, diff_figs_dir="", mod_
 
 CLASS_TAXONOMY = {
     "PRIVATE":       ["SKIPPED_EXON", "INTRONIC_POLYA", "ALT_LAST_EXON"],
-    "SHARED_LOCAL":  ["ALT_DONOR", "ALT_ACCEPTOR", "ALT_POLYA_SITE", "NEAR_ALT_JUNCTION"],
+    "SHARED_LOCAL":  ["ALT_DONOR", "ALT_ACCEPTOR", "ALT_POLYA_SITE", "RETAINED_INTRON",
+                      "IPA_EXTENSION", "NEAR_ALT_JUNCTION"],
     "SHARED_DISTAL": ["DISTAL_APA", "DISTAL_SPLICING"],
     "UNEXPLAINABLE": ["FIVE_PRIME_UNCERTAIN", "INTRON_READ_ARTIFACT", "NO_MODEL", "UNRESOLVED"],
 }
@@ -1322,6 +1380,8 @@ EVENT_DIRECTIONS = {
     "ALT_DONOR":            ["LONGER_EXON_HIGHER", "SHORTER_EXON_HIGHER"],
     "ALT_ACCEPTOR":         ["LONGER_EXON_HIGHER", "SHORTER_EXON_HIGHER"],
     "ALT_POLYA_SITE":       ["PROXIMAL_HIGHER", "DISTAL_HIGHER"],
+    "RETAINED_INTRON":      ["INTRON_RETAINED_HIGHER", "INTRON_RETAINED_LOWER"],
+    "IPA_EXTENSION":        ["EXTENDS_TO_PA_HIGHER", "EXTENDS_TO_PA_LOWER"],
     "NEAR_ALT_JUNCTION":    ["JUNCTION_REMOVED_HIGHER", "JUNCTION_PRESENT_HIGHER"],
     "DISTAL_APA":           ["PROXIMAL_HIGHER", "DISTAL_HIGHER"],
     "DISTAL_SPLICING":      ["CO_TERMINAL_HIGHER"],
@@ -1337,6 +1397,10 @@ DIRECTION_DEFINITIONS = {
     "SHORTER_EXON_HIGHER":     "The more-modified fragmentform carries the SHORTER version of the base's exon.",
     "PROXIMAL_HIGHER":         "The more-modified fragmentform uses the PROXIMAL (upstream, shorter-3'UTR) poly(A) site.",
     "DISTAL_HIGHER":           "The more-modified fragmentform uses the DISTAL (downstream, longer-3'UTR) poly(A) site.",
+    "INTRON_RETAINED_HIGHER":  "The more-modified fragmentform is the one that RETAINS the intron (its exon spans it); the other splices it out.",
+    "INTRON_RETAINED_LOWER":   "The LESS-modified fragmentform is the one that retains the intron; the more-modified one splices it out.",
+    "EXTENDS_TO_PA_HIGHER":    "The more-modified fragmentform is the one that reads into the intron and polyadenylates there (its exon is the extended, intronic-polyadenylation exon).",
+    "EXTENDS_TO_PA_LOWER":     "The LESS-modified fragmentform is the one that reads into the intron and polyadenylates there.",
     "JUNCTION_REMOVED_HIGHER": "The more-modified fragmentform is the one in which the nearby splice junction has been REMOVED (EJC relief).",
     "JUNCTION_PRESENT_HIGHER": "The more-modified fragmentform is the one that still has the nearby splice junction.",
     "CO_TERMINAL_HIGHER":      "The two fragmentforms share the same 3' end; the more-modified one differs only in an internal / 5' splicing choice elsewhere.",
@@ -1344,7 +1408,7 @@ DIRECTION_DEFINITIONS = {
 CLASS_BUCKET_ORDER = ["PRIVATE", "SHARED_LOCAL", "SHARED_DISTAL", "UNEXPLAINABLE"]
 BUCKET_DEFINITIONS = {
     "PRIVATE": "The modified base exists (exonically) ONLY in the more-modified fragmentform — it is intronic or absent in the other form's assembled model, so the difference is structurally trivial: the base is physically missing from one isoform. (Called from transcript-model coordinates, guarded against the 5' blind spot.)",
-    "SHARED_LOCAL": "The base is exonic in BOTH fragmentforms, and the structural difference between them lies ON / adjacent to the base's own exon (a shifted splice site, an alternative poly(A) site, or a nearby differential junction).",
+    "SHARED_LOCAL": "The base is exonic in BOTH fragmentforms, and the structural difference between them lies ON / adjacent to the base's own exon — a shifted splice site (ALT_DONOR/ALT_ACCEPTOR), an alternative poly(A) site, a retained intron, an intronic-polyadenylation extension, or a nearby differential junction. This holds even when the base's exon is the terminal exon in one form.",
     "SHARED_DISTAL": "The base is exonic in both, in an IDENTICAL local context; the fragmentforms differ only ELSEWHERE in the transcript, so the modification difference tracks isoform identity rather than any feature at the base.",
     "UNEXPLAINABLE": "The difference cannot be attributed to structure: the 5' blind spot (direct-RNA truncation), an intron / soft-clip read artifact, or too few covered isoforms to compare.",
 }
@@ -1355,6 +1419,8 @@ EVENT_DEFINITIONS = {
     "ALT_DONOR": "The base's exon uses a different 5' splice site (donor) in the two forms, changing that exon's length (structural_delta_nt).",
     "ALT_ACCEPTOR": "The base's exon uses a different 3' splice site (acceptor) in the two forms, changing that exon's length (structural_delta_nt).",
     "ALT_POLYA_SITE": "Same last exon, different poly(A) cleavage sites (tandem APA); the base is in the shared body of the last exon.",
+    "RETAINED_INTRON": "The base's own exon spans an intron in one form that the other form splices out — intron retention right at the base (both forms share the same 3' end).",
+    "IPA_EXTENSION": "The base's own exon is extended in one form because it reads into the downstream intron and polyadenylates there (intronic polyadenylation), while the other form splices on to a more distal 3' end.",
     "NEAR_ALT_JUNCTION": "The base sits within the exon-junction-complex footprint of a splice junction present in one form and removed in the other (EJC relief).",
     "DISTAL_APA": "The base's local exon is identical in both forms, but the forms end at DIFFERENT poly(A) sites (a distal alternative-polyadenylation choice); methylation tracks which 3' end the isoform uses.",
     "DISTAL_SPLICING": "The base's local exon is identical AND the forms share the same 3' end; they differ only in an internal / 5' splicing choice ELSEWHERE, so methylation tracks that distal splicing decision.",
@@ -1731,15 +1797,29 @@ def main():
         keep = [c for c in ["block_id", "gene_names", "context_key", "chrom", "region", "span_bp", "n_snps", "snp_coords", "support_reads", "complete_reads", "haplotypes"] if c in hap_blocks_df.columns]
         hap_blocks_df_view = hap_blocks_df[keep].sort_values(["complete_reads", "n_snps"], ascending=False)
 
+    # block_id -> genomic coordinate string, so the association tables can carry the hapblock's location
+    block_region = {}
+    if not hap_blocks_df.empty and "block_id" in hap_blocks_df.columns:
+        for _, b in hap_blocks_df.iterrows():
+            if "region" in hap_blocks_df.columns and pd.notna(b.get("region")):
+                block_region[b["block_id"]] = str(b["region"])
+            elif {"chrom", "start1", "end1"}.issubset(hap_blocks_df.columns):
+                block_region[b["block_id"]] = f"{b['chrom']}:{int(b['start1'])}-{int(b['end1'])}"
+
+    def _with_region(df):
+        out = df.copy()
+        out.insert(1, "block_region", out["block_id"].map(block_region).fillna(""))
+        return out
+
     hap_tx_df_view = pd.DataFrame()
     if not hap_tx_assoc_df.empty:
         keep = [c for c in ["block_id", "n_transcripts_tested", "p_value", "p_adj_bh", "effect_max_abs_tx_frac_diff"] if c in hap_tx_assoc_df.columns]
-        hap_tx_df_view = hap_tx_assoc_df[keep].sort_values(["p_adj_bh", "effect_max_abs_tx_frac_diff"], ascending=[True, False])
+        hap_tx_df_view = _with_region(hap_tx_assoc_df[keep]).sort_values(["p_adj_bh", "effect_max_abs_tx_frac_diff"], ascending=[True, False])
 
     hap_mod_df_view = pd.DataFrame()
     if not hap_mod_assoc_df.empty:
         keep = [c for c in ["block_id", "mod_site_id", "target_mod_code", "p_value", "p_adj_bh", "effect_max_abs_mod_rate_diff"] if c in hap_mod_assoc_df.columns]
-        hap_mod_df_view = hap_mod_assoc_df[keep].sort_values(["p_adj_bh", "effect_max_abs_mod_rate_diff"], ascending=[True, False])
+        hap_mod_df_view = _with_region(hap_mod_assoc_df[keep]).sort_values(["p_adj_bh", "effect_max_abs_mod_rate_diff"], ascending=[True, False])
 
     cards_html = "".join(
         f"<div class='card'><div class='label'>{html.escape(label)}</div><div class='value'>{html.escape(value)}</div></div>"
@@ -1950,7 +2030,8 @@ def main():
         definitions=definitions_html(column_definitions(list(snp_tx_df_view.columns)), summary="Column definitions") if not snp_tx_df_view.empty else "",
     )
     snp_mod_ff_html = build_snp_mod_fragmentform_html(snp_mod_assoc_df, snp_mod_iso,
-                                                      getattr(args, "molecule_mod_calls", ""), args.max_snp_figs)
+                                                      getattr(args, "molecule_mod_calls", ""),
+                                                      getattr(args, "molecule_snps", ""), args.max_snp_figs)
     sec_snp_mod = section(
         "cis SNP to Modification Stoichiometry Association",
         (df_to_html(snp_mod_df_view, max_rows=args.top_genes) if not snp_mod_df_view.empty else "<p class='muted'>No cis SNP to modification-stoichiometry associations available.</p>") + snp_galleries.get("snp_mod", "") + snp_mod_ff_html,

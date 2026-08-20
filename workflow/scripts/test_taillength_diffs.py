@@ -75,6 +75,9 @@ def _plot_gene(df, mg, gene, p_adj, min_reads, path, max_forms=12):
     ax.set_xticklabels(labels, fontsize=8)
     ax.set_ylabel("poly(A) tail length (nt)")
     ax.set_title(f"{gene} — tail length by fragmentform  (p_adj={p_adj:.1e})", fontsize=10)
+    # add headroom above the boxes so the n= labels sit clear of the top whisker/box
+    ymin, ymax = ax.get_ylim()
+    ax.set_ylim(ymin, ymax + 0.10 * (ymax - ymin))
     top = ax.get_ylim()[1]
     for i, (_, v) in enumerate(groups):
         ax.text(i + 1, top, f"n={v.size}", ha="center", va="top", fontsize=6, color="#5b6773")
