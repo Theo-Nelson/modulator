@@ -30,66 +30,84 @@ def mod_display(code):
 
 
 CARD_DEFINITIONS = {
-    "Assembled transcripts": "Final transcript models retained after transcript assembly, support, and poly(A)-related filters.",
-    "Gene buckets": "Distinct gene-level transcript groups represented in the final classification summary.",
-    "Metagenes": "Overlapping gene groups used for shared ZN partitioning.",
-    "Max ZN partitions / metagene": "Largest number of non-overlapping ZN partitions required by any one metagene.",
-    "Assigned reads": "Total reads assigned to retained transcript models in the classification summary.",
-    "Exact-chain reads": "Assigned reads that exactly match the retained canonical intron chain.",
-    "Truncation-assigned reads": "Assigned reads absorbed into a retained transcript from suffix-compatible shorter chains.",
-    "Segregating SNPs": "Candidate SNP loci retained for genotype-aware association testing.",
+    "Fragmentforms": "Read-backed partial transcripts kept after assembly, read-support, and poly(A) filters. "
+                     "One fragmentform = one distinct (intron chain + clustered 3' end) supported by at least "
+                     "`min_reads` reads whose 3' ends fall within `apa_window` of each other "
+                     "(see input parameters `min_reads`, `apa_window`).",
+    "Genes": "Distinct genes represented across the retained fragmentforms (reference gene where the fragmentform "
+             "matched the annotation, otherwise an assembled locus).",
+    "Metagenes": "Connected groups of genes whose exons overlap on the same strand, merged so their overlapping "
+                 "fragmentforms can be placed on separate ZN partitions. Every gene belongs to exactly one metagene, "
+                 "so the number of metagenes is always ≤ the number of genes (a gene overlapping nothing is its "
+                 "own metagene of one).",
+    "Max ZN partitions / metagene": "The largest number of ZN partitions any single metagene needed in order to "
+                                    "separate all of its overlapping genes and fragmentforms onto their own track, so "
+                                    "their modification pileups are never pooled together.",
+    "Assigned reads": "Total reads assigned to retained fragmentforms in the classification summary.",
+    "Exact-chain reads": "Assigned reads that exactly match a retained fragmentform's canonical intron chain.",
+    "Truncation-assigned reads": "Assigned reads absorbed into a retained fragmentform from suffix-compatible shorter "
+                                 "chains (a read that is a 3' truncation of the fragmentform).",
+    "Segregating SNPs": "Candidate SNP loci (read-backed variants passing the genotype discovery thresholds) retained "
+                        "for genotype-aware association testing (see input parameters `genotype.min_alt_reads`, "
+                        "`genotype.min_alt_frac`).",
     "Haplotype blocks": "Local read-backed SNP blocks retained for haplotype association testing.",
 }
 
 
 COLUMN_DEFINITIONS = {
-    "zt_label": "Human-readable transcript code used in transcript-level outputs and BAM tags.",
-    "code": "Transcript code or grouping identifier written by the relevant upstream stage.",
-    "gtf_gene_name": "Reference gene name matched to the assembled transcript when available.",
+    "zt_label": "Human-readable fragmentform code used in fragmentform-level outputs and BAM tags.",
+    "code": "Fragmentform code or grouping identifier written by the relevant upstream stage.",
+    "gtf_gene_name": "Reference gene name matched to the assembled fragmentform when available.",
     "gene_name": "Gene label assigned to the reported row or site.",
     "gene_names": "Gene labels associated with the reported SNP or molecule row.",
     "gene_ids": "Reference or assembled gene identifiers associated with the reported SNP or molecule row.",
-    "gene_index": "Assembly-local gene bucket index assigned during transcript summarization.",
-    "transcript_index": "Within-gene transcript rank assigned after transcript sorting.",
-    "metagene_index": "Overlapping gene group index used for ZN partitioning.",
+    "gene_index": "Assembly-local gene index assigned during fragmentform summarization.",
+    "transcript_index": "Within-gene fragmentform rank assigned after fragmentform sorting.",
+    "metagene_index": "Index of the metagene (a connected group of same-strand overlapping genes) this row belongs to; genes that do not overlap each form their own metagene, so metagenes ≤ genes.",
     "metagene_indices": "Metagene labels associated with the reported SNP or molecule row.",
-    "zn_index": "ZN partition index assigned within a metagene.",
-    "metagene_partition_count": "Total number of ZN partitions required for the corresponding metagene.",
-    "read_support": "Total reads assigned to the transcript or partition.",
-    "exact_chain_reads": "Assigned reads whose intron chain exactly matches the retained transcript model.",
-    "trunc_assigned_reads": "Reads assigned to the transcript after suffix-compatible truncation absorption.",
-    "anchor_reads": "Exact reads supporting the transcript-specific distal anchor used in support-first assignment.",
-    "anchor_frac": "Fraction of reachable suffix-family reads that exactly support the retained canonical transcript.",
-    "assignment_mode": "Recorded suffix-family assignment policy used during transcript assembly.",
+    "zn_index": "ZN partition index within the metagene — the track this fragmentform is placed on so its modification pileup is never pooled with an overlapping fragmentform.",
+    "metagene_partition_count": "Number of ZN partitions this metagene needed to separate all of its overlapping genes/fragmentforms onto their own tracks.",
+    "read_support": "Total reads assigned to the fragmentform or partition.",
+    "exact_chain_reads": "Assigned reads whose intron chain exactly matches the retained fragmentform.",
+    "trunc_assigned_reads": "Reads assigned to the fragmentform after suffix-compatible truncation absorption.",
+    "anchor_reads": "Number of reads that exactly span this fragmentform's distal (5'-most) anchor point. "
+                    "Support-first assignment: a fragmentform's 5' boundary is only extended to the longest intron "
+                    "chain that has at least `min_distal_anchor_reads` reads demonstrably reaching it — the boundary "
+                    "is driven by read support, not by the single longest read — which limits run-through across loci "
+                    "(see input parameter `min_distal_anchor_reads`).",
+    "anchor_frac": "Fraction of reachable suffix-family reads that exactly support the retained canonical fragmentform.",
+    "assignment_mode": "Recorded suffix-family assignment policy used during fragmentform assembly.",
     "sample": "Sample identifier derived from the BAM filename.",
     "chrom": "Reference chromosome or contig containing the reported feature.",
     "pos1": "1-based genomic coordinate of the reported SNP locus.",
     "mod_start0": "0-based inclusive start coordinate of the reported modification site.",
     "mod_end0": "0-based exclusive end coordinate of the reported modification site.",
-    "total_reads": "Total assigned transcript reads for the sample.",
-    "n_transcripts": "Number of transcripts detected in the sample.",
-    "median_reads_per_tx": "Median assigned read count across transcripts detected in the sample.",
-    "input_total_reads": "Total BAM alignments encountered before transcript assignment filtering.",
+    "total_reads": "Total assigned fragmentform reads for the sample.",
+    "n_transcripts": "Number of fragmentforms detected in the sample.",
+    "median_reads_per_tx": "Median assigned read count across fragmentforms detected in the sample.",
+    "input_total_reads": "Total BAM alignments encountered before fragmentform assignment filtering.",
     "primary_reads": "Reads retained after removing secondary and supplementary alignments.",
     "mapq_reads": "Reads retained after applying the minimum MAPQ filter.",
     "intronic_reads": "Reads retained after the minimum intron-count filter.",
-    "tagged_reads": "Reads written to the ZT-tagged BAM after transcript assignment.",
-    "assigned_fraction": "Fraction of qualifying reads assigned to a retained transcript.",
-    "assigned_reads": "Number of reads contributing to the reported transcript-length summary.",
+    "tagged_reads": "Reads written to the ZT-tagged BAM after fragmentform assignment.",
+    "assigned_fraction": "Fraction of qualifying reads assigned to a retained fragmentform.",
+    "assigned_reads": "Number of reads contributing to the reported fragmentform-length summary.",
     "mean_read_length": "Mean assigned read length in nucleotides.",
     "median_read_length": "Median assigned read length in nucleotides.",
     "min_read_length": "Shortest assigned read length in nucleotides.",
     "max_read_length": "Longest assigned read length in nucleotides.",
-    "tes": "Transcript end site reported for the retained transcript model.",
+    "tes": "3' end (TES) reported for the retained fragmentform.",
     "mod_code": "Modification code reported by modkit or downstream aggregation.",
     "n_sites": "Number of unique genomic modification sites observed for the gene and modification code.",
     "p_value": "Nominal p-value from the reported hypothesis test.",
     "p_adj_bh": "Benjamini-Hochberg false-discovery-rate adjusted p-value.",
-    "effect_max_abs_frac_diff": "Maximum absolute difference in pooled modified fraction across tested transcript partitions.",
-    "effect_max_abs_tx_frac_diff": "Maximum absolute difference in transcript usage or stoichiometry between tested groups.",
+    "effect_max_abs_frac_diff": "Maximum absolute difference in pooled modified fraction across tested fragmentform partitions.",
+    "effect_max_abs_tx_frac_diff": "Maximum absolute difference in fragmentform usage or stoichiometry between tested groups.",
     "effect_abs_delta_mod_frac": "Absolute difference in modified-site rate between the tested allele groups.",
-    "weighted_within_tx_effect": "Coverage-weighted within-transcript SNP/mod effect size after transcript conditioning.",
-    "classification": "Stage-specific label summarizing the inferred outcome for the reported row.",
+    "weighted_within_tx_effect": "Coverage-weighted within-fragmentform SNP/mod effect size after fragmentform conditioning.",
+    "classification": "How this fragmentform compares to the reference annotation (`reference_gtf`): EXACT (matches "
+                      "an annotated transcript's chain + 3' end), NOVEL_APA (annotated chain, novel 3' end / APA site), "
+                      "or NOVEL_CHAIN (intron chain not in the annotation). See input parameter `reference_gtf`.",
     "snp_id": "Canonical SNP identifier in `chrom:pos:ref>alt` format.",
     "mod_site_id": "Canonical modification-site identifier in `chrom:start-end:strand:mod` format.",
     "target_mod_code": "Modification code tested at the reported site.",
@@ -98,8 +116,8 @@ COLUMN_DEFINITIONS = {
     "n_reads": "Total reads contributing to the reported test.",
     "n_modified": "Reads classified as modified for the target mod code.",
     "n_not_target": "Reads classified as canonical or as another modification state for the target site.",
-    "n_transcripts_tested": "Number of transcript partitions retained in the reported test.",
-    "cmh_p_value": "Cochran-Mantel-Haenszel p-value after stratifying by transcript.",
+    "n_transcripts_tested": "Number of fragmentform partitions retained in the reported test.",
+    "cmh_p_value": "Cochran-Mantel-Haenszel p-value after stratifying by fragmentform.",
     "cmh_p_adj_bh": "Benjamini-Hochberg adjusted CMH p-value.",
     "complete_reads": "Reads covering every SNP in the reported haplotype block.",
     "support_reads": "Reads overlapping at least one SNP in the reported haplotype block.",
@@ -126,7 +144,7 @@ COLUMN_DEFINITIONS = {
     "start0": "0-based inclusive start coordinate of the reported modification site.",
     "end0": "0-based exclusive end coordinate of the reported modification site.",
     "strand": "Genomic strand of the reported feature.",
-    "n_tx_tested": "Number of transcript (ZN) partitions retained in the differential test at the site.",
+    "n_tx_tested": "Number of fragmentform (ZN) partitions retained in the differential test at the site.",
     "hi_ZN": "ZN partition index of the higher-stoichiometry isoform in the classified contrast.",
     "hi_arch": "3' architecture of the higher-stoichiometry isoform versus the gene's longest-3'UTR anchor (IPA / TANDEM_APA / FULL_LENGTH / DISTAL_EXT / REFERENCE / AMBIGUOUS).",
     "hi_frac": "Pooled modified fraction (stoichiometry) of the higher isoform at the site.",
@@ -148,14 +166,14 @@ CATEGORY_DEFINITIONS = {
     "TANDEM_APA": "Tandem alternative polyadenylation: both isoforms share the same last exon (same acceptor) but cleave at different 3' ends; the site differs between the shorter- and longer-3'UTR forms.",
     "ALTERNATIVE_LAST_EXON": "The two isoforms are both terminal at the site but their terminal exons begin at DIFFERENT acceptor sites (distinct last exons).",
     "INTERGENIC_TERMINAL_EXON": "A non-IPA terminal exon that is genomically disjoint and far (≥ intergenic-gap) from the comparator's terminal exon.",
-    "INTRONIC_POLYADENYLATION": "The high isoform terminates within an intron of the longer form (IPA); the modified base exists only in the mature IPA transcript (IPA-private, or IPA-vs-full-length with EJC relief).",
+    "INTRONIC_POLYADENYLATION": "The high isoform terminates within an intron of the longer form (IPA); the modified base exists only in the mature IPA isoform (IPA-private, or IPA-vs-full-length with EJC relief).",
     "EJC_SPLICING": "A shared base whose modification tracks removal of a nearby splice junction / exon-junction-complex (EJC) footprint in one isoform.",
     "CASSETTE_EXON": "The base sits in an internal/cassette exon included in one isoform and spliced out (or absent) in the other.",
     "SHARED_TERMINAL_EXON": "Both isoforms share the same terminal exon AND the same 3' end; modification tracks isoform identity, not APA/EJC.",
     "SHARED_INTERNAL_EXON": "The base is in a constitutive internal exon with no junction asymmetry between the isoforms.",
     "UNEXPLAINED": "Residual: terminal in the high isoform, internal in the low, with no nearby differential junction.",
     "ARTIFACT": "The high isoform does not structurally contain the base (intronic/absent) — the 'high' stoichiometry is likely intron-read noise.",
-    "IPA_UNIQUE": "High isoform is an IPA (intronic polyadenylation) isoform; the A is exonic-terminal in it but intronic/absent in the longer anchor — the modified A only exists in the mature IPA transcript. Cleavage-dependent, IPA-private.",
+    "IPA_UNIQUE": "High isoform is an IPA (intronic polyadenylation) isoform; the A is exonic-terminal in it but intronic/absent in the longer anchor — the modified A only exists in the mature IPA isoform. Cleavage-dependent, IPA-private.",
     "SPLICED_EXON_UNIQUE": "The A sits in an internal/cassette exon present in the high isoform but spliced out (intronic) or absent in the comparator/anchor.",
     "LAST_EXON_DISTAL_ONLY": "The A is in the anchor's distal 3'UTR but the low (proximal) isoform's cleavage site is upstream of it — a distal-3'UTR-private A.",
     "IPA_SHARED_EJC": "High isoform is IPA; the A is shared (exonic in both) but exonic-terminal in IPA versus exonic-internal in the long anchor — the A gains m6A in IPA because the downstream exon-junction complex is removed. Cleavage-dependent.",
@@ -184,6 +202,8 @@ def parse_args():
     ap.add_argument("--partition-map", required=True)
     ap.add_argument("--out-html", required=True)
     ap.add_argument("--title", required=True)
+    ap.add_argument("--run-manifest", default="",
+                    help="Run manifest TXT (command line, resolved inputs, full config) to embed.")
     ap.add_argument("--zn-long", default="")
     ap.add_argument("--zt-long", default="")
     ap.add_argument("--diff-results", default="")
@@ -695,7 +715,7 @@ def build_apa_motif_section(apa_df, top_n):
         "APA Motifs (Polyadenylation Signals)",
         "".join(parts),
         intro="Each fragmentform's TES is a cleavage/polyadenylation site. For every one, the genomic "
-              "sequence around it is read in transcript orientation and scanned for a polyadenylation "
+              "sequence around it is read in sense (fragmentform) orientation and scanned for a polyadenylation "
               "signal (canonical AATAAA or a known variant hexamer, normally 10-30 nt upstream) plus a "
               "downstream U/GU-rich element. This both annotates the site and filters artifacts: a site "
               "with no PAS whose downstream genome is A-rich was most likely produced by an oligo-dT "
@@ -753,7 +773,7 @@ def build_sequence_elements_section(se_df, summ_df, top_n):
     if summ_df is not None and not summ_df.empty:
         parts.append(subsection("Elements by type (and how many carry a modification)",
                                 df_to_html(summ_df, max_rows=20)))
-    # per-gene rollup: how many of each gene's transcripts have a MODIFIED element of each type
+    # per-gene rollup: how many of each gene's fragmentforms have a MODIFIED element of each type
     if not with_mod.empty and "gene_name" in with_mod.columns:
         tx_col = "zt_label" if "zt_label" in with_mod.columns else None
         if tx_col:
@@ -763,7 +783,7 @@ def build_sequence_elements_section(se_df, summ_df, top_n):
             piv = with_mod.groupby(["gene_name", "element_type"]).size().unstack(fill_value=0)
         piv = piv.reset_index()
         parts.append(subsection(
-            "Per-gene rollup — transcripts with a MODIFIED element of each type",
+            "Per-gene rollup — fragmentforms with a MODIFIED element of each type",
             df_to_html(piv, max_rows=max(top_n, 25))))
     # the modification-carrying elements themselves (deduped across repeated fragmentforms)
     if not with_mod.empty:
@@ -936,7 +956,7 @@ def build_classification_section(class_df, class_figs_dir, arch_figs_dir, max_fi
         return section(
             "Site Classification",
             "<p class='muted'>No classified differential sites available.</p>",
-            intro="Structural classification of significant between-transcript modification sites.",
+            intro="Structural classification of significant between-fragmentform modification sites.",
         )
 
     # The single primary key is class_key = structural_category__stoich_direction (mechanism + which
@@ -1055,7 +1075,7 @@ def build_classification_section(class_df, class_figs_dir, arch_figs_dir, max_fi
         "Site Classification",
         body,
         intro=(
-            "Every significant between-transcript modification site (across all detected "
+            "Every significant between-fragmentform modification site (across all detected "
             "mod_codes; BH-FDR and the &gt;10% absolute stoichiometry rule) is described on two "
             "orthogonal axes, anchored to the gene's longest-3'UTR isoform: (1) "
             "<b>structural_category</b> — the mechanism that makes the isoforms differ (tandem APA, "
@@ -1160,8 +1180,8 @@ def main():
     trunc_reads = class_df["trunc_assigned_reads"].astype(float).sum() if "trunc_assigned_reads" in class_df.columns and not class_df.empty else 0
     exact_reads = class_df["exact_chain_reads"].astype(float).sum() if "exact_chain_reads" in class_df.columns and not class_df.empty else 0
     overview_cards.extend([
-        ("Assembled transcripts", fmt_int(n_tx)),
-        ("Gene buckets", fmt_int(n_genes)),
+        ("Fragmentforms", fmt_int(n_tx)),
+        ("Genes", fmt_int(n_genes)),
         ("Metagenes", fmt_int(n_metagenes)),
         ("Max ZN partitions / metagene", fmt_int(max_partitions)),
         ("Assigned reads", fmt_int(total_reads)),
@@ -1309,14 +1329,15 @@ def main():
                 f"<div class='hero'>{pca_html}</div>"
                 "</div>"
             ),
-            intro="Top-level counts summarize the final assembled and downstream-tested objects written by the current modulator run.",
+            intro="Total counts of the objects modulator assembled and tested in this run — fragmentforms, genes, "
+                  "metagenes, segregating SNPs — and the reads supporting them. Hover any tile for its definition.",
         )
     )
     body.append(
         section(
-            "Top Transcript Partitions",
-            df_to_html(top_tx_df[top_tx_cols], max_rows=args.top_transcripts) if top_tx_cols else "<p class='muted'>No transcript summary columns available.</p>",
-            intro="Highest-support transcript models retained after assembly and reference classification.",
+            "Top Fragmentform Partitions",
+            df_to_html(top_tx_df[top_tx_cols], max_rows=args.top_transcripts) if top_tx_cols else "<p class='muted'>No fragmentform summary columns available.</p>",
+            intro="Highest-support fragmentforms retained after assembly and reference classification.",
             definitions=definitions_html(column_definitions(top_tx_cols), summary="Column definitions"),
         )
     )
@@ -1324,7 +1345,7 @@ def main():
         section(
             "Sample Stats",
             df_to_html(sample_stats_df, max_rows=100),
-            intro="Per-sample transcript assignment totals and detection breadth derived from the final retained transcript models.",
+            intro="Per-sample fragmentform assignment totals and detection breadth derived from the final retained fragmentforms.",
             definitions=definitions_html(column_definitions(list(sample_stats_df.columns)), summary="Column definitions"),
         )
     )
@@ -1343,14 +1364,14 @@ def main():
                     definitions=definitions_html(column_definitions(read_stats_length_cols), summary="Column definitions") if len(read_stats_length_cols) > 1 else "",
                 )
             ),
-            intro="Sample-level retention across the primary read filters and transcript-assignment workflow.",
+            intro="Sample-level retention across the primary read filters and fragmentform-assignment workflow.",
         )
     )
     body.append(
         section(
             "Partition Map",
             df_to_html(partition_map_df, max_rows=args.top_transcripts),
-            intro="Mapping between human-readable transcript labels and the gene, metagene, and ZN identifiers used downstream.",
+            intro="Mapping between human-readable fragmentform labels and the gene, metagene, and ZN identifiers used downstream.",
             definitions=definitions_html(column_definitions(list(partition_map_df.columns)), summary="Column definitions"),
         )
     )
@@ -1358,7 +1379,7 @@ def main():
         section(
             "Assigned Read Lengths",
             df_to_html(tx_lengths_df, max_rows=args.top_transcripts),
-            intro="Assigned-read length summaries for the most supported retained transcript models.",
+            intro="Assigned-read length summaries for the most supported retained fragmentforms.",
             definitions=definitions_html(column_definitions(list(tx_lengths_df.columns)), summary="Column definitions"),
         )
     )
@@ -1382,7 +1403,7 @@ def main():
         section(
             "Differential Sites",
             diff_html + diff_fig_html,
-            intro="ZN sites where pooled transcript partitions differ in modified fraction after applying the ZN site filter.",
+            intro="ZN sites where pooled fragmentform partitions differ in modified fraction after applying the ZN site filter.",
             definitions=definitions_html(column_definitions(diff_cols), summary="Result-column definitions") if diff_cols else "",
         )
     )
@@ -1419,7 +1440,7 @@ def main():
                 overview
                 + (subsection("Per-gene summary", df_to_html(splice_genes_df, max_rows=args.top_genes)) if not splice_genes_df.empty else "")
                 + noncanon_html,
-                intro="Donor/acceptor dinucleotides of every assembled fragmentform intron, in transcript "
+                intro="Donor/acceptor dinucleotides of every assembled fragmentform intron, in fragmentform "
                       "orientation. GT-AG is the major (U2) spliceosome; GC-AG is semi-canonical; AT-AC is the "
                       "minor (U12) spliceosome; anything else is non-canonical and worth inspecting. Because the "
                       "intron chains are read-derived, these are the junctions the reads actually support.",
@@ -1442,7 +1463,7 @@ def main():
             section(
                 "Novel Loci",
                 nl_body,
-                intro="Read-backed loci whose fragmentforms overlap no transcript in the reference GTF. Each locus "
+                intro="Read-backed loci whose fragmentforms overlap no annotated gene in the reference GTF. Each locus "
                       "is formed by merging overlapping novel fragmentforms on one strand and is given a unique, "
                       "deterministic, coordinate-anchored name (NOVEL_<chrom>_<strand>_<n>_<start>_<end>), so two "
                       "distinct novel loci on the same chromosome and strand can never be conflated.",
@@ -1484,9 +1505,9 @@ def main():
     )
     body.append(
         section(
-            "SNP to Transcript Associations",
-            (df_to_html(snp_tx_df_view, max_rows=args.top_genes) if not snp_tx_df_view.empty else "<p class='muted'>No SNP to transcript associations available.</p>") + snp_galleries.get("snp_tx", ""),
-            intro="Associations between segregating SNP alleles and transcript-partition usage.",
+            "SNP to Fragmentform Associations",
+            (df_to_html(snp_tx_df_view, max_rows=args.top_genes) if not snp_tx_df_view.empty else "<p class='muted'>No SNP to fragmentform associations available.</p>") + snp_galleries.get("snp_tx", ""),
+            intro="Associations between segregating SNP alleles and fragmentform-partition usage.",
             definitions=definitions_html(column_definitions(list(snp_tx_df_view.columns)), summary="Column definitions") if not snp_tx_df_view.empty else "",
         )
     )
@@ -1541,9 +1562,9 @@ def main():
 
     body.append(
         section(
-            "SNP Transcript Epitranscriptome Dependency",
-            (df_to_html(joint_df_view, max_rows=args.top_genes) if not joint_df_view.empty else "<p class='muted'>No joint SNP-transcript-epitranscriptome dependency results available.</p>") + snp_galleries.get("snp_tx_mod", ""),
-            intro="Transcript-conditioned SNP/mod tests that distinguish direct epitranscriptome effects from transcript-composition shifts.",
+            "SNP Fragmentform Epitranscriptome Dependency",
+            (df_to_html(joint_df_view, max_rows=args.top_genes) if not joint_df_view.empty else "<p class='muted'>No joint SNP-fragmentform-epitranscriptome dependency results available.</p>") + snp_galleries.get("snp_tx_mod", ""),
+            intro="Fragmentform-conditioned SNP/mod tests that distinguish direct epitranscriptome effects from fragmentform-composition shifts.",
             definitions=definitions_html(column_definitions(list(joint_df_view.columns)), summary="Column definitions") if not joint_df_view.empty else "",
         )
     )
@@ -1560,7 +1581,7 @@ def main():
     if not hap_tx_df_view.empty:
         hap_sections.append(
             subsection(
-                "Haplotype to Transcript",
+                "Haplotype to Fragmentform",
                 df_to_html(hap_tx_df_view, max_rows=args.top_genes) + snp_galleries.get("hap_tx", ""),
                 definitions=definitions_html(column_definitions(list(hap_tx_df_view.columns)), summary="Column definitions"),
             )
@@ -1577,9 +1598,36 @@ def main():
         section(
             "Haplotype Associations",
             "".join(hap_sections) if hap_sections else "<p class='muted'>No haplotype associations available.</p>",
-            intro="Associations between local haplotype blocks and transcript or modification outcomes.",
+            intro="Associations between local haplotype blocks and fragmentform or modification outcomes.",
         )
     )
+
+    # --- header: modulator logo banner + a run manifest (command line + resolved inputs + config)
+    logo_html = ""
+    try:
+        _logo_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "images",
+                                  "modulator_banner.png")
+        with open(_logo_path, "rb") as _lf:
+            _logo_uri = "data:image/png;base64," + base64.b64encode(_lf.read()).decode("ascii")
+        logo_html = f"<img class='report-logo' src='{_logo_uri}' alt='modulator' />"
+    except Exception:
+        logo_html = "<h1>modulator</h1>"
+
+    manifest_html = ""
+    _mtext = ""
+    if getattr(args, "run_manifest", "") and os.path.exists(args.run_manifest):
+        try:
+            with open(args.run_manifest) as _mf:
+                _mtext = _mf.read()
+        except Exception:
+            _mtext = ""
+    if _mtext.strip():
+        manifest_html = (
+            "<details class='run-manifest' open>"
+            "<summary>Run inputs &amp; parameters (command line, resolved inputs, full configuration)</summary>"
+            f"<pre class='manifest-pre'>{html.escape(_mtext)}</pre>"
+            "</details>"
+        )
 
     html_doc = f"""<!doctype html>
 <html lang="en">
@@ -1618,6 +1666,32 @@ def main():
     h1 {{
       font-size:clamp(26px,3.4vw,36px); line-height:1.1; margin:0 0 6px;
       font-weight:680; letter-spacing:-.022em; text-wrap:balance;
+    }}
+    /* Logo banner + "Report" wordmark, styled to vibe with the modulator logo (teal #17807f /
+       gold #d4a017, rounded-geometric face). */
+    .report-logo {{ display:block; width:100%; max-width:620px; height:auto; margin:2px 0 6px; }}
+    h1.report-title {{
+      font-family:"Century Gothic","Futura","Avenir Next","Trebuchet MS","Segoe UI",system-ui,sans-serif;
+      font-size:clamp(30px,4.4vw,48px); font-weight:700; letter-spacing:.10em;
+      color:#17807f; line-height:1; margin:0; text-transform:uppercase;
+    }}
+    h1.report-title::after {{
+      content:""; display:block; width:64px; height:5px; border-radius:3px;
+      margin-top:10px; background:#d4a017;
+    }}
+    details.run-manifest {{ margin:16px 0 4px; }}
+    details.run-manifest > summary {{
+      cursor:pointer; font-weight:640; color:#17807f; letter-spacing:.01em;
+      font-size:14.5px; list-style:none; user-select:none;
+    }}
+    details.run-manifest > summary::-webkit-details-marker {{ display:none; }}
+    details.run-manifest > summary::before {{ content:"\\25B8 "; color:#d4a017; }}
+    details.run-manifest[open] > summary::before {{ content:"\\25BE "; }}
+    pre.manifest-pre {{
+      max-height:600px; overflow:auto; margin:10px 0 0; padding:14px 16px;
+      background:var(--panel); border:1px solid var(--line); border-radius:10px;
+      font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;
+      font-size:12px; line-height:1.5; white-space:pre; color:var(--ink-soft);
     }}
     h2 {{
       font-size:19px; font-weight:660; letter-spacing:-.012em; margin:0 0 4px;
@@ -1698,8 +1772,9 @@ def main():
 <body>
   <main>
     <header>
-      <h1>{html.escape(args.title)}</h1>
-      <p class="muted">Generated from the supplied modulator outputs in the current run context.</p>
+      {logo_html}
+      <h1 class="report-title">Report</h1>
+      {manifest_html}
     </header>
     {''.join(body)}
   </main>

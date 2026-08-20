@@ -1333,7 +1333,7 @@ def main():
 
         ax.set_xlabel(f"PC1 ({var_expl[0]*100:.1f}% variance)" if pcs >= 1 else "PC1")
         ax.set_ylabel(f"PC2 ({var_expl[1]*100:.1f}% variance)" if pcs >= 2 else "PC2")
-        ax.set_title("Sample PCA of log1p transcript counts")
+        ax.set_title("Sample PCA of log1p fragmentform counts")
 
         if all_samples:
             # 'outside lower center' -> constrained_layout reserves a band below the axes for the

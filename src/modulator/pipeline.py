@@ -778,7 +778,60 @@ class ModulatorPipeline:
             if merged:
                 fh.write(f"{summary_label}\t{format(summary_fn(list(merged.values())), fmt)}\n")
 
+    def _write_run_manifest(self) -> "Path | None":
+        """Write a human-readable record of exactly how this run was invoked -- timestamp, command
+        line, resolved inputs (with the paths they came from), the sample sheet, and the fully
+        merged configuration -- so the report can show precisely where every input and parameter
+        originated. Returns the manifest path (or None if it could not be written)."""
+        try:
+            import datetime
+            stamp = datetime.datetime.now().astimezone().strftime("%Y-%m-%d %H:%M:%S %Z").strip()
+        except Exception:
+            stamp = "(unavailable)"
+        L = ["modulator run manifest", "=" * 64,
+             f"Run date / time : {stamp}",
+             f"Prefix          : {self.prefix}",
+             f"Project root    : {self.root}",
+             f"Command         : {sys.executable} {' '.join(sys.argv)}",
+             "",
+             "Resolved inputs", "-" * 64,
+             f"reference_fa    : {self.reference_fa}",
+             f"reference_gtf   : {self.reference_gtf}",
+             f"bams_dir        : {self.bams_dir}",
+             f"bam_glob        : {self.bam_glob}",
+             f"samplesheet     : {self.config.get('samplesheet') or '(none — bams_dir/bam_glob discovery)'}",
+             f"threads         : {self.config.get('threads')}",
+             f"jobs            : {self.config.get('jobs', '(default)')}",
+             ""]
+        try:
+            paths = sorted(glob.glob(str(self.bams_dir / self.bam_glob)))
+            meta = getattr(self, "sample_meta", {}) or {}
+            L += [f"Samples ({len(paths)})", "-" * 64]
+            for p in paths:
+                s = Path(p).stem
+                m = meta.get(s, {})
+                extra = ("  " + "  ".join(f"{k}={v}" for k, v in m.items())) if m else ""
+                L.append(f"  {s}{extra}  ->  {os.path.realpath(p)}")
+            L.append("")
+        except Exception:
+            pass
+        L += ["Fully-resolved configuration (base config + every --set override)", "-" * 64]
+        try:
+            import yaml
+            L.append(yaml.safe_dump(self.config, sort_keys=False, default_flow_style=False).rstrip())
+        except Exception:
+            import json
+            L.append(json.dumps(self.config, indent=2, default=str))
+        try:
+            out = self.paths.results / f"{self.prefix}_run_manifest.txt"
+            out.parent.mkdir(parents=True, exist_ok=True)
+            out.write_text("\n".join(L) + "\n")
+            return out
+        except Exception:
+            return None
+
     def run(self, stages: list[str] | None = None) -> None:
+        self._write_run_manifest()
         selected = STAGE_ORDER if not stages else [stage for stage in STAGE_ORDER if stage in stages]
         timings: list[tuple[str, float]] = []
         mem_peaks: list[tuple[str, float]] = []
@@ -1854,6 +1907,7 @@ class ModulatorPipeline:
             "--partition-map", str(self.paths.partition_map),
             "--out-html", str(self.paths.report_html),
             "--title", str(report_cfg.get("title", f"modulator report: {self.prefix}")),
+            "--run-manifest", str(self.paths.results / f"{self.prefix}_run_manifest.txt"),
             "--max-diff-figs", str(int(report_cfg.get("max_diff_figs", 6))),
             "--top-transcripts", str(int(report_cfg.get("top_transcripts", 20))),
             "--top-genes", str(int(report_cfg.get("top_genes", 20))),
