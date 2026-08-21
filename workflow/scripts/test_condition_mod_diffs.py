@@ -16,6 +16,7 @@ diffstats.py for the model, the calibration, and the validation numbers.
 Counts are summed over transcript partitions first: the question is about the SITE, not the isoform.
 """
 import argparse
+import json
 import os
 import sys
 
@@ -25,11 +26,21 @@ import pandas as pd
 import diffstats
 from genotype_utils import benjamini_hochberg
 
-_WANT = ["sample", "chrom", "start0", "end0", "strand", "mod_code",
+_WANT = ["sample", "ZN_transcript_index", "chrom", "start0", "end0", "strand", "mod_code",
          "Nvalid_cov", "Nmod", "gene_name"]
+# ZN_transcript_index is inserted after gene_name only in --by-transcript mode (see build_out_cols).
 OUT_COLS = ["contrast", "chrom", "start0", "end0", "strand", "mod_code", "gene_name",
             "n_reference", "n_test", "reads_reference", "reads_test",
-            "mu_reference", "mu_test", "delta", "dispersion", "lrt_stat", "p_value", "p_adj_bh"]
+            "mu_reference", "mu_test", "delta", "dispersion", "lrt_stat", "p_value", "p_adj_bh",
+            "per_replicate_json"]
+
+
+def build_out_cols(by_transcript):
+    if not by_transcript:
+        return list(OUT_COLS)
+    cols = list(OUT_COLS)
+    cols.insert(cols.index("gene_name") + 1, "ZN_transcript_index")
+    return cols
 
 
 def parse_args():
@@ -50,6 +61,10 @@ def parse_args():
                          "size, so heterogeneous large cohorts aren't over-shrunk), or a fixed number "
                          "(1 = legacy behaviour).")
     ap.add_argument("--mod-filter", nargs="*", default=None, help="restrict to these mod codes")
+    ap.add_argument("--by-transcript", action="store_true",
+                    help="Test each site PER TRANSCRIPT PARTITION (ZN) instead of summing partitions: "
+                         "compares the SAME transcript between conditions. Lower per-test coverage but "
+                         "resolves which fragmentform carries the change.")
     ap.add_argument("--verbose", action="store_true")
     return ap.parse_args()
 
@@ -82,8 +97,14 @@ def main():
         pd.DataFrame(columns=OUT_COLS).to_csv(args.out_tsv, sep="\t", index=False)
         return
 
-    # One row per (site, sample): sum over transcript partitions -- the question is about the site.
-    key = ["chrom", "start0", "end0", "strand", "mod_code"]
+    # Genomic key. In --by-transcript mode the transcript partition (ZN) joins the key, so each
+    # (site, ZN) is tested independently -- "the SAME transcript between conditions". Otherwise the
+    # partitions are summed and the question is about the site.
+    by_tx = args.by_transcript and "ZN_transcript_index" in df.columns
+    base_key = ["chrom", "start0", "end0", "strand", "mod_code"]
+    key = base_key + (["ZN_transcript_index"] if by_tx else [])
+    out_cols = build_out_cols(by_tx)
+
     agg = df.groupby(key + ["sample"], sort=False, observed=True)[["Nvalid_cov", "Nmod"]].sum().reset_index()
     genes = df.groupby(key, sort=False, observed=True)["gene_name"].first() if "gene_name" in df.columns else None
 
@@ -95,42 +116,55 @@ def main():
 
     keep = cov.notna().all(axis=1) & (cov.min(axis=1) >= args.min_cov)
     cov, mod = cov[keep], mod[keep]
+    unit = "site x transcript" if by_tx else "site"
     if args.verbose:
-        print(f"[condition_mod] {name}: {len(cov):,} sites with >={args.min_cov}x in all "
+        print(f"[condition_mod] {name}: {len(cov):,} {unit}s with >={args.min_cov}x in all "
               f"{len(samples)} samples ({len(ref_s)} {args.reference} vs {len(test_s)} {args.test})", flush=True)
     if cov.empty:
-        pd.DataFrame(columns=OUT_COLS).to_csv(args.out_tsv, sep="\t", index=False)
+        pd.DataFrame(columns=out_cols).to_csv(args.out_tsv, sep="\t", index=False)
         return
 
     K, N = mod.to_numpy(dtype=float), cov.to_numpy(dtype=float)
+    ref_names = [s for s in samples if s in ref_s]
+    test_names = [s for s in samples if s in test_s]
     sites = [(i, K[i], N[i], gidx) for i in range(K.shape[0])]
     res = diffstats.beta_binomial_diff(sites, prior_weight=args.prior_weight,
                                        min_group_samples=args.min_samples_per_group,
                                        ref_df=args.ref_df, calibrate=False,
                                        site_weight=diffstats.parse_site_weight(args.site_weight))
     if not res:
-        pd.DataFrame(columns=OUT_COLS).to_csv(args.out_tsv, sep="\t", index=False)
+        pd.DataFrame(columns=out_cols).to_csv(args.out_tsv, sep="\t", index=False)
         return
 
     idx = cov.index
     rows = []
     for r in res:
-        chrom, start0, end0, strand, mod_code = idx[r["key"]]
-        rows.append({
-            "contrast": name, "chrom": chrom, "start0": start0, "end0": end0, "strand": strand,
-            "mod_code": mod_code,
-            "gene_name": (genes.loc[(chrom, start0, end0, strand, mod_code)] if genes is not None else ""),
+        i = r["key"]
+        kv = dict(zip(key, idx[i] if isinstance(idx[i], tuple) else (idx[i],)))
+        # per-replicate observed modified fractions, so the report can plot the replicate spread
+        with np.errstate(divide="ignore", invalid="ignore"):
+            mu_i = np.where(N[i] > 0, K[i] / N[i], np.nan)
+        per_rep = {"reference": {s: round(float(mu_i[j]), 4) for j, s in enumerate(samples) if s in ref_s},
+                   "test": {s: round(float(mu_i[j]), 4) for j, s in enumerate(samples) if s in test_s}}
+        row = {
+            "contrast": name, "chrom": kv["chrom"], "start0": kv["start0"], "end0": kv["end0"],
+            "strand": kv["strand"], "mod_code": kv["mod_code"],
+            "gene_name": (genes.loc[idx[i]] if genes is not None else ""),
             "n_reference": r["n_reference"], "n_test": r["n_test"],
             "reads_reference": r["reads_reference"], "reads_test": r["reads_test"],
             "mu_reference": round(r["mu_reference"], 5), "mu_test": round(r["mu_test"], 5),
             "delta": round(r["delta"], 5), "dispersion": round(r["dispersion"], 6),
             "lrt_stat": round(r["lrt_stat"], 4), "p_value": r["p_value"],
-        })
+            "per_replicate_json": json.dumps(per_rep, separators=(",", ":")),
+        }
+        if by_tx:
+            row["ZN_transcript_index"] = kv["ZN_transcript_index"]
+        rows.append(row)
     out = pd.DataFrame(rows)
     out["p_adj_bh"] = benjamini_hochberg(out["p_value"].values)
     out["_abs"] = out["delta"].abs()
     out = out.sort_values(["p_adj_bh", "_abs"], ascending=[True, False]).drop(columns="_abs")
-    out = out[OUT_COLS].reset_index(drop=True)
+    out = out[out_cols].reset_index(drop=True)
     os.makedirs(os.path.dirname(args.out_tsv) or ".", exist_ok=True)
     out.to_csv(args.out_tsv, sep="\t", index=False)
     if args.verbose:

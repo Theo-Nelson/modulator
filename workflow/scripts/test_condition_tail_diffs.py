@@ -27,7 +27,7 @@ from genotype_utils import benjamini_hochberg
 
 OUT_COLS = ["contrast", "level", "feature", "gene_name", "n_reference", "n_test",
             "reads_reference", "reads_test", "median_tail_reference", "median_tail_test",
-            "delta_nt", "stat", "p_value", "p_adj_bh", "per_sample_json"]
+            "delta_nt", "stat", "p_value", "p_adj_bh", "per_sample_json", "per_replicate_json"]
 
 
 def parse_args():
@@ -105,6 +105,10 @@ def main():
             "delta_nt": round(r["delta"], 2), "stat": round(r["stat"], 4), "p_value": r["p_value"],
             "per_sample_json": json.dumps({s: [round(float(m[s]), 1), int(n[s])] for s in sorted(m)},
                                           separators=(",", ":")),
+            "per_replicate_json": json.dumps(
+                {"reference": {s: round(float(m[s]), 1) for s in ref_s if s in m},
+                 "test": {s: round(float(m[s]), 1) for s in test_s if s in m}},
+                separators=(",", ":")),
         })
     out = pd.DataFrame(rows)
     if out.empty:

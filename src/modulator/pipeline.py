@@ -1911,6 +1911,10 @@ class ModulatorPipeline:
                         "--min-cov", str(int(cfg.get("min_cov", 20))), *common, *common_stat]
                 if mod_filter:
                     args += ["--mod-filter", *mod_filter]
+                # Resolve the differential modification PER TRANSCRIPT PARTITION (ZN) by default, so the
+                # report shows which fragmentform carries the between-condition change (not just the site).
+                if as_bool(cfg.get("mod_by_transcript", True), True):
+                    args.append("--by-transcript")
                 self.run_python_script("test_condition_mod_diffs.py", args,
                                        label=f"condition_mod_diffs:{name}")
                 # Flag between-condition sites that sit on a segregating SNP at the modified base

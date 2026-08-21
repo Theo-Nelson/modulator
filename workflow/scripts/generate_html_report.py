@@ -761,6 +761,95 @@ def category_distribution_png(counts, mod_label=None):
     return f"data:image/png;base64,{encoded}"
 
 
+def _bc_feature_label(row):
+    """Compact y-axis label for a between-condition feature, adapting to the analysis:
+    modification (per-transcript) -> 'GENE ZNk chr:pos mod'; usage/tail -> 'GENE feature'."""
+    g = str(row.get("gene_name", "") or "").strip()
+    zn = row.get("ZN_transcript_index", None)
+    if zn is not None and pd.notna(zn) and str(row.get("start0", "")) != "":
+        try:
+            lab = f"{g} ZN{int(zn)} {row.get('chrom', '')}:{int(row['start0'])} {row.get('mod_code', '')}"
+        except Exception:
+            lab = g
+    elif str(row.get("feature", "")).strip():
+        lab = f"{g} {row.get('feature', '')}"
+    else:
+        lab = g or "?"
+    return lab if len(lab) <= 46 else lab[:44] + "…"
+
+
+def between_cond_topn_png(df, eff_col, title, xlabel, ref_name, test_name, chart_name,
+                          per_rep_col="per_replicate_json", top_n=10, is_fraction=True):
+    """Top-N between-condition features by |effect|, as a dumbbell + per-replicate dot plot: for each
+    feature the reference-condition replicate values and the test-condition replicate values are drawn
+    as dots, with the two group means joined by a line -- so the shift AND the replicate spread are
+    both visible (the whole point of the replicate-aware test). base64 data URI, or ''."""
+    if df is None or df.empty or per_rep_col not in df.columns or eff_col not in df.columns:
+        return ""
+    try:
+        import matplotlib
+        matplotlib.use("Agg")
+        import matplotlib.pyplot as plt
+        import numpy as np
+        from io import BytesIO
+    except Exception:
+        return ""
+    d = df.copy()
+    d["_e"] = pd.to_numeric(d[eff_col], errors="coerce").abs()
+    d = d[d["_e"].notna()].sort_values("_e", ascending=False).head(top_n)
+    if d.empty:
+        return ""
+    d = d.iloc[::-1].reset_index(drop=True)   # largest effect on top
+    REF_C, TEST_C = "#4c72b0", "#c1121f"
+    rows_ok = []
+    for _, row in d.iterrows():
+        try:
+            pr = json.loads(row[per_rep_col]) if isinstance(row[per_rep_col], str) else {}
+        except Exception:
+            pr = {}
+        rv = [float(v) for v in (pr.get("reference") or {}).values() if v is not None and np.isfinite(float(v))]
+        tv = [float(v) for v in (pr.get("test") or {}).values() if v is not None and np.isfinite(float(v))]
+        if rv or tv:
+            rows_ok.append((_bc_feature_label(row), rv, tv))
+    if not rows_ok:
+        return ""
+    n = len(rows_ok)
+    fig, ax = plt.subplots(figsize=(8.8, max(2.4, 0.5 * n + 1.2)))
+    for y, (_lab, rv, tv) in enumerate(rows_ok):
+        mr = np.mean(rv) if rv else np.nan
+        mt = np.mean(tv) if tv else np.nan
+        if np.isfinite(mr) and np.isfinite(mt):
+            ax.plot([mr, mt], [y, y], color="#9aa4ad", lw=1.4, zorder=1)
+        ax.scatter(rv, [y] * len(rv), s=26, color=REF_C, alpha=0.75, zorder=2, edgecolor="none")
+        ax.scatter(tv, [y] * len(tv), s=26, color=TEST_C, alpha=0.75, zorder=2, edgecolor="none")
+        if np.isfinite(mr):
+            ax.scatter([mr], [y], s=95, marker="D", color=REF_C, zorder=3, edgecolor="white", linewidth=0.8)
+        if np.isfinite(mt):
+            ax.scatter([mt], [y], s=95, marker="D", color=TEST_C, zorder=3, edgecolor="white", linewidth=0.8)
+    ax.set_yticks(range(n))
+    ax.set_yticklabels([lab for lab, _, _ in rows_ok], fontsize=8)
+    ax.set_ylim(-0.6, n - 0.4)
+    ax.set_xlabel(xlabel)
+    if is_fraction:
+        ax.set_xlim(-0.02, 1.02)
+    ax.set_title(title, fontsize=10)
+    ax.grid(True, axis="x", linestyle="--", linewidth=0.6, alpha=0.4)
+    for spine in ("top", "right"):
+        ax.spines[spine].set_visible(False)
+    from matplotlib.lines import Line2D
+    ax.legend(handles=[Line2D([0], [0], marker="D", color="w", markerfacecolor=REF_C, markersize=9,
+                              label=f"{ref_name} (reference)"),
+                       Line2D([0], [0], marker="D", color="w", markerfacecolor=TEST_C, markersize=9,
+                              label=f"{test_name} (test)")],
+              loc="lower right", fontsize=8, framealpha=0.9)
+    fig.tight_layout()
+    _save_report_chart(fig, chart_name)
+    buf = BytesIO()
+    fig.savefig(buf, format="png", dpi=200, bbox_inches="tight")
+    plt.close(fig)
+    return "data:image/png;base64," + base64.b64encode(buf.getvalue()).decode("ascii")
+
+
 def sequence_elements_png(summ_df):
     """Stacked horizontal bar per element type: instances carrying a modification
     (dark) vs. not (light). base64 data URI, or '' if unavailable."""
@@ -1054,7 +1143,8 @@ def build_between_conditions_section(bc_dir, top_n, top_note=""):
     """Replicate-aware between-condition results, one subsection per contrast."""
     if not bc_dir or not os.path.isdir(bc_dir):
         return ""
-    kinds = [("mod_diffs", "Differential modification", ["gene_name", "chrom", "start0", "strand", "mod_code",
+    kinds = [("mod_diffs", "Differential modification", ["gene_name", "ZN_transcript_index", "chrom", "start0",
+                                                         "strand", "mod_code",
                                                          "mu_reference", "mu_test", "delta", "p_adj_bh"], "delta"),
              ("isoform_usage_diffs", "Differential isoform usage", ["gene_name", "feature", "mu_reference",
                                                                     "mu_test", "delta", "p_adj_bh"], "delta"),
@@ -1079,6 +1169,9 @@ def build_between_conditions_section(bc_dir, top_n, top_note=""):
     parts = []
     for contrast, by_kind in found.items():
         summary, blocks = [], []
+        # direction is fixed by the contrast name "{test}_vs_{reference}"; used for figure legends too
+        _cv = contrast.split("_vs_")
+        _test_raw, _ref_raw = (_cv[0], _cv[1]) if len(_cv) == 2 else ("test", "reference")
         for suffix, title, cols, eff in kinds:
             df = by_kind.get(suffix)
             if df is None or df.empty:
@@ -1093,11 +1186,27 @@ def build_between_conditions_section(bc_dir, top_n, top_note=""):
                             "effect_threshold": f"|{eff}| >= {thr:g}" + (" nt" if eff == "delta_nt" else ""),
                             "FDR<0.05 & above threshold": int(((padj < 0.05) & (e >= thr)).sum())})
             sig = df[(padj < 0.05)].copy()
+            block_parts = []
             if not sig.empty:
                 sig["_e"] = pd.to_numeric(sig[eff], errors="coerce").abs()
                 sig = sig.sort_values("_e", ascending=False).drop(columns="_e")
-                blocks.append(subsection(f"{title} — top by effect size",
-                                         df_to_html(sig[[c for c in cols if c in sig.columns]], max_rows=top_n)))
+                block_parts.append(df_to_html(sig[[c for c in cols if c in sig.columns]], max_rows=top_n))
+            # top-10-by-effect figure with per-replicate spread (the whole df, so a figure always shows)
+            is_frac = (eff != "delta_nt")
+            xlabel = ("modified fraction per replicate" if suffix == "mod_diffs" else
+                      "median poly(A) tail per replicate (nt)" if suffix == "tail_diffs" else
+                      "usage fraction per replicate")
+            fig = between_cond_topn_png(df, eff, f"{title} — top {top_n} by effect size", xlabel,
+                                        _ref_raw, _test_raw, f"bc_{contrast}_{suffix}",
+                                        top_n=top_n, is_fraction=is_frac)
+            if fig:
+                block_parts.append(clickable_image_html(
+                    fig, f"{title} top {top_n}",
+                    caption=(f"Top {top_n} by |effect|. Diamonds = condition means (joined line = the shift); "
+                             f"small dots = individual replicates, so overlapping replicate clouds flag a "
+                             f"weak/non-significant change.")))
+            if block_parts:
+                blocks.append(subsection(f"{title} — top by effect size", "".join(block_parts)))
         if summary:
             # spell out the direction explicitly: the contrast name is "{test}_vs_{reference}" and every
             # delta is mu_test - mu_reference, so the reader never has to guess the sign convention.
@@ -1122,11 +1231,19 @@ def build_between_conditions_section(bc_dir, top_n, top_note=""):
               "test with dispersion shrinkage across features; poly(A) tail length is continuous and is "
               "compared with Welch's t-test across per-replicate medians. Reads are never pooled across "
               "replicates -- the biological unit is the replicate, and pooling would make trivial "
-              "differences look overwhelmingly significant.",
+              "differences look overwhelmingly significant. Differential modification is resolved PER "
+              "TRANSCRIPT PARTITION (ZN), so the same fragmentform is compared across conditions and you "
+              "can see which transcript carries the change. Each analysis shows a top-by-effect figure "
+              "with the individual replicate values, so effect size and replicate agreement are visible "
+              "together.",
         definitions=definitions_html([
+            ("ZN_transcript_index", "Transcript partition the modification site belongs to (differential "
+                                    "modification is tested per transcript, not pooled across the site)."),
             ("mu_reference / mu_test", "Fitted modified (or usage) fraction in the reference and test condition."),
             ("delta", "mu_test - mu_reference: the effect size, in fraction units (delta_nt = nucleotides of tail)."),
             ("p_adj_bh", "Benjamini-Hochberg FDR over all features in that analysis."),
+            ("per_replicate_json", "Per-replicate observed value in each condition ({reference:{...}, "
+                                   "test:{...}}); drives the top-by-effect dot plots."),
         ], summary="Column definitions"),
     )
 

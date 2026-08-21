@@ -15,6 +15,7 @@ beta-binomial LRT with dispersion shrinkage used for differential modification (
 Never pools reads across replicates (that would be pseudoreplication; measured 62% FPR).
 """
 import argparse
+import json
 import os
 import sys
 
@@ -26,7 +27,8 @@ from genotype_utils import benjamini_hochberg
 
 OUT_COLS = ["contrast", "feature_type", "feature", "gene_name",
             "n_reference", "n_test", "reads_reference", "reads_test",
-            "mu_reference", "mu_test", "delta", "dispersion", "lrt_stat", "p_value", "p_adj_bh"]
+            "mu_reference", "mu_test", "delta", "dispersion", "lrt_stat", "p_value", "p_adj_bh",
+            "per_replicate_json"]
 
 
 def parse_args():
@@ -144,7 +146,12 @@ def main():
                                        site_weight=diffstats.parse_site_weight(args.site_weight))
     rows = []
     for r in res:
-        gene, feature = idx[r["key"]]
+        i = r["key"]
+        gene, feature = idx[i]
+        with np.errstate(divide="ignore", invalid="ignore"):
+            frac_i = np.where(tot[i] > 0, K[i] / tot[i], np.nan)
+        per_rep = {"reference": {s: round(float(frac_i[j]), 4) for j, s in enumerate(samples) if s in ref_s},
+                   "test": {s: round(float(frac_i[j]), 4) for j, s in enumerate(samples) if s in test_s}}
         rows.append({
             "contrast": name, "feature_type": args.feature, "feature": feature, "gene_name": gene,
             "n_reference": r["n_reference"], "n_test": r["n_test"],
@@ -152,6 +159,7 @@ def main():
             "mu_reference": round(r["mu_reference"], 5), "mu_test": round(r["mu_test"], 5),
             "delta": round(r["delta"], 5), "dispersion": round(r["dispersion"], 6),
             "lrt_stat": round(r["lrt_stat"], 4), "p_value": r["p_value"],
+            "per_replicate_json": json.dumps(per_rep, separators=(",", ":")),
         })
     out = pd.DataFrame(rows)
     if out.empty:
