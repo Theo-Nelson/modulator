@@ -149,8 +149,14 @@ def load_isoforms(gtf_path, tes_tol, inside_tol):
     is absent. (A single GTF is internally consistent: every line either has
     ``zn_index`` or none do, so the per-line fallback never mixes the two.)
     """
-    exons = defaultdict(list)
-    meta = {}
+    # Accumulate per TRANSCRIPT (unique), NOT per (gene, zn). A zn_index is a display/aggregation
+    # TRACK that non-overlapping fragmentforms are allowed to SHARE (metagene_partition_count < number
+    # of transcripts), so keying exons by (gene, zn) would MERGE two disjoint transcripts into one
+    # corrupt Frankenstein model. We group by (gene, zn) afterwards, keeping a primary model plus the
+    # other track members as 'variants' that _iso_at() resolves per site.
+    tx_exons = defaultdict(list)
+    tx_meta = {}
+    tx_zn = {}
     with open(gtf_path) as fh:
         for line in fh:
             if line.startswith('#'):
@@ -161,27 +167,40 @@ def load_isoforms(gtf_path, tes_tol, inside_tol):
             typ = f[2]; attr = f[8]
             g = _attr(attr, 'ref_gene_name') or _attr(attr, 'gene_id')
             zn = _attr(attr, 'zn_index') or _attr(attr, 'transcript_index')
+            tx = _attr(attr, 'transcript_index') or zn   # unique-per-transcript within a gene
             if not g or not zn:
                 continue
-            key = (g, zn)
+            tkey = (g, tx)
+            tx_zn[tkey] = zn
             if typ == 'exon':
-                exons[key].append((int(f[3]), int(f[4])))
+                tx_exons[tkey].append((int(f[3]), int(f[4])))
             elif typ == 'transcript':
                 tes = _attr(attr, 'tes'); rs = _attr(attr, 'read_support')
-                meta[key] = dict(strand=f[6], chrom=f[0],
-                                 tes=int(tes) if tes and tes.lstrip('-').isdigit() else None,
-                                 rs=int(rs) if rs and rs.isdigit() else 0)
-    iso = {}
-    for key, exl in exons.items():
+                tx_meta[tkey] = dict(strand=f[6], chrom=f[0],
+                                     tes=int(tes) if tes and tes.lstrip('-').isdigit() else None,
+                                     rs=int(rs) if rs and rs.isdigit() else 0)
+    # build one model per transcript
+    grouped = defaultdict(list)
+    for tkey, exl in tx_exons.items():
         exl.sort()
-        m = meta.get(key, {})
+        m = tx_meta.get(tkey, {})
         strand = m.get('strand', '+')
         tes = m.get('tes')
         if tes is None:
             tes = exl[-1][1] if strand == '+' else exl[0][0]
-        iso[key] = dict(strand=strand, chrom=m.get('chrom'), tes=tes, exons=exl,
-                        rs=m.get('rs', 0), arch=None)
-    # per-gene reference (longest 3'UTR) + architecture
+        model = dict(strand=strand, chrom=m.get('chrom'), tes=tes, exons=exl,
+                     rs=m.get('rs', 0), arch=None)
+        grouped[(tkey[0], tx_zn[tkey])].append(model)
+    # per (gene, zn): primary = highest read-support; keep all track members as variants
+    iso = {}
+    for key, models in grouped.items():
+        models.sort(key=lambda d: -d['rs'])
+        primary = models[0]
+        if len(models) > 1:
+            primary = dict(primary)
+            primary['variants'] = models
+        iso[key] = primary
+    # per-gene reference (longest 3'UTR) + architecture (computed for EVERY track member)
     genes = defaultdict(list)
     for (g, zn) in iso:
         genes[g].append(zn)
@@ -193,10 +212,30 @@ def load_isoforms(gtf_path, tes_tol, inside_tol):
             ref = min(zns, key=lambda z: (iso[(g, z)]['tes'], -iso[(g, z)]['rs']))
         rd = iso[(g, ref)]
         for zn in zns:
-            d = iso[(g, zn)]
-            d['arch'] = 'REFERENCE' if zn == ref else classify_arch(
-                d['tes'], d['exons'], strand, rd['tes'], rd['exons'], tes_tol, inside_tol)
+            for d in [iso[(g, zn)]] + iso[(g, zn)].get('variants', []):
+                d['arch'] = 'REFERENCE' if (zn == ref and d is iso[(g, zn)]) else classify_arch(
+                    d['tes'], d['exons'], strand, rd['tes'], rd['exons'], tes_tol, inside_tol)
     return iso, genes
+
+
+def _iso_at(iso, gene, zn, pos):
+    """Resolve the (gene, zn) TRACK to the specific fragmentform model that contains ``pos``. When a
+    zn track holds several non-overlapping fragmentforms (see load_isoforms), pick the one in which the
+    base is exonic; else the one whose span brackets it; else the highest-support (primary) model."""
+    d = iso.get((gene, zn))
+    if d is None:
+        return None
+    variants = d.get('variants')
+    if not variants:
+        return d
+    exonic = [m for m in variants
+              if status_in(m['exons'], m['strand'], pos) in ('exonic_terminal', 'exonic_internal')]
+    if exonic:
+        return max(exonic, key=lambda m: m['rs'])
+    spanning = [m for m in variants if m['exons'][0][0] <= pos <= m['exons'][-1][1]]
+    if spanning:
+        return max(spanning, key=lambda m: m['rs'])
+    return d
 
 
 def status_in(exons, strand, pos):
@@ -378,7 +417,11 @@ def classify_tree(gene, pos, hiZN, loZN, iso, *, tes_tol, ejc_nt):
     """Assign the site to (bucket, event, direction). Uses only transcript-MODEL coordinates -- a
     PRIVATE call means the base is intronic/absent in the low form's assembled model (no spanning-
     read requirement), guarded only against the 5' blind spot where the model is unreliable."""
-    ihi = iso[(gene, hiZN)]; ilo = iso[(gene, loZN)]
+    # resolve each ZN TRACK to the fragmentform that actually contains this base (tracks can hold
+    # several non-overlapping fragmentforms; a merged model would be structurally meaningless here)
+    ihi = _iso_at(iso, gene, hiZN, pos); ilo = _iso_at(iso, gene, loZN, pos)
+    if ihi is None or ilo is None:
+        return 'UNEXPLAINABLE', 'NO_MODEL', '', dict(status_hi='', status_lo='', jd_hi=10**9, jd_lo=10**9, delta_nt='')
     strand = ihi['strand']
     sh = status_in(ihi['exons'], strand, pos)
     sl = status_in(ilo['exons'], strand, pos)
@@ -421,7 +464,7 @@ def classify_tree(gene, pos, hiZN, loZN, iso, *, tes_tol, ejc_nt):
     # 3'UTR-length polarity of the higher form (used by the shared events)
     ht, lt = ihi['tes'], ilo['tes']
     if ht is None or lt is None or abs(ht - lt) <= tes_tol:
-        polar = 'CO_TERMINAL_HIGHER'
+        polar = 'SAME_3PRIME_END'
     elif is_proximal(ht, lt, strand):
         polar = 'PROXIMAL_HIGHER'
     else:
@@ -493,7 +536,7 @@ def classify_tree(gene, pos, hiZN, loZN, iso, *, tes_tol, ejc_nt):
     # by WHERE it is: a different 3' end (distal APA) or a splicing difference elsewhere (same 3' end).
     if ht is not None and lt is not None and abs(ht - lt) > tes_tol:
         return 'SHARED_DISTAL', 'DISTAL_APA', polar, info
-    return 'SHARED_DISTAL', 'DISTAL_SPLICING', 'CO_TERMINAL_HIGHER', info
+    return 'SHARED_DISTAL', 'DISTAL_SPLICING', 'SAME_3PRIME_END', info
 
 
 CATEGORY_ORDER = [
@@ -544,7 +587,7 @@ def scan_private_sites(zn_long_path, iso, genes, *, min_frac, min_cov):
             continue
         present, absent = [], []
         for z in gene_zns:
-            exons = iso[(g, z)]['exons']
+            exons = _iso_at(iso, g, z, pos)['exons']
             st = status_in(exons, strand, pos)
             if st in ('exonic_terminal', 'exonic_internal'):
                 present.append(z)
@@ -560,12 +603,12 @@ def scan_private_sites(zn_long_path, iso, genes, *, min_frac, min_cov):
             continue
         carriers.sort(key=lambda t: t[1], reverse=True)   # highest modified fraction first
         cz, cfrac, ccov = carriers[0]
-        ihi = iso[(g, cz)]; sh = status_in(ihi['exons'], strand, pos)
+        ihi = _iso_at(iso, g, cz, pos); sh = status_in(ihi['exons'], strand, pos)
         if ihi['arch'] == 'IPA' and sh == 'exonic_terminal':
             event, direction, delta = 'INTRONIC_POLYA', 'IPA_TRANSCRIPT_HIGHER', ''
         elif sh == 'exonic_terminal':
             event, direction = 'ALT_LAST_EXON', ''
-            th = terminal_exon(ihi['exons'], strand); tl = terminal_exon(iso[(g, absent[0])]['exons'], strand)
+            th = terminal_exon(ihi['exons'], strand); tl = terminal_exon(_iso_at(iso, g, absent[0], pos)['exons'], strand)
             delta = exon_gap(th, tl)
             direction = 'LONGER_EXON_HIGHER' if (th[1] - th[0]) >= (tl[1] - tl[0]) else 'SHORTER_EXON_HIGHER'
         else:
@@ -649,6 +692,10 @@ def render_category_figures(fig_records, zn_long_path, figs_dir, per_category,
     """
     if not fig_records or per_category <= 0:
         return {}
+    # clear any figures from a previous run so a reclassified/reranked site cannot leave a stale
+    # rankNN figure behind (which would make a category show more/duplicate figures than it has sites)
+    import shutil
+    shutil.rmtree(figs_dir, ignore_errors=True)
     by_cat = defaultdict(list)
     for rec in fig_records:
         by_cat[rec['class_key']].append(rec)
@@ -884,6 +931,8 @@ def render_arch_figures(fig_records, iso, genes, figs_dir, per_category, verbose
         print(f"[classify] WARN cannot import matplotlib for arch figures ({e}); skipping",
               file=sys.stderr)
         return {}
+    import shutil
+    shutil.rmtree(figs_dir, ignore_errors=True)  # drop stale figures from a previous run (see above)
     by_cat = defaultdict(list)
     for rec in fig_records:
         by_cat[rec['class_key']].append(rec)
@@ -1002,8 +1051,8 @@ def main():
             gene, mod, r['chrom'], pos, r.get('end0', pos + 1), strand,
             class_key, bucket, event, direction, info.get('delta_nt', ''),
             r.get('n_tx_tested', ''), f"{eff:.4f}", f"{padj:.3e}",
-            hiZN, iso[(gene, hiZN)]['arch'], f"{hi['frac']:.4f}",
-            loZN, iso[(gene, loZN)]['arch'], f"{lo['frac']:.4f}",
+            hiZN, (_iso_at(iso, gene, hiZN, cpos) or {}).get('arch', ''), f"{hi['frac']:.4f}",
+            loZN, (_iso_at(iso, gene, loZN, cpos) or {}).get('arch', ''), f"{lo['frac']:.4f}",
             anchorZN or '',
             info.get('status_hi', ''), info.get('status_lo', ''),
             jd_hi if jd_hi != '' and jd_hi != 10**9 else '',

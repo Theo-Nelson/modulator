@@ -1416,7 +1416,7 @@ EVENT_DIRECTIONS = {
     "IPA_EXTENSION":        ["EXTENDS_TO_PA_HIGHER", "EXTENDS_TO_PA_LOWER"],
     "NEAR_ALT_JUNCTION":    ["JUNCTION_REMOVED_HIGHER", "JUNCTION_PRESENT_HIGHER"],
     "DISTAL_APA":           ["PROXIMAL_HIGHER", "DISTAL_HIGHER"],
-    "DISTAL_SPLICING":      ["CO_TERMINAL_HIGHER"],
+    "DISTAL_SPLICING":      ["SAME_3PRIME_END"],
     "FIVE_PRIME_UNCERTAIN": [],
     "INTRON_READ_ARTIFACT": [],
     "NO_MODEL":             [],
@@ -1435,7 +1435,7 @@ DIRECTION_DEFINITIONS = {
     "EXTENDS_TO_PA_LOWER":     "The LESS-modified fragmentform is the one that reads into the intron and polyadenylates there.",
     "JUNCTION_REMOVED_HIGHER": "The more-modified fragmentform is the one in which the nearby splice junction has been REMOVED (EJC relief).",
     "JUNCTION_PRESENT_HIGHER": "The more-modified fragmentform is the one that still has the nearby splice junction.",
-    "CO_TERMINAL_HIGHER":      "The two fragmentforms share the same 3' end; the more-modified one differs only in an internal / 5' splicing choice elsewhere.",
+    "SAME_3PRIME_END":         "Both fragmentforms end at the same 3' position (same last exon / poly(A) site); the more-modified one differs only in an internal or 5' splicing choice further upstream.",
 }
 CLASS_BUCKET_ORDER = ["PRIVATE", "SHARED_LOCAL", "SHARED_DISTAL", "UNEXPLAINABLE"]
 BUCKET_DEFINITIONS = {
@@ -1515,16 +1515,17 @@ def build_classification_section(class_df, private_df, class_figs_dir, arch_figs
             m &= df["event"] == event
         return int(m.sum())
 
-    # Which rows the known bucket/event enumeration will actually render (PRIVATE from private_df,
-    # the rest from class_df). Anything NOT covered here is a taxonomy-drift row (e.g. the classifier
-    # emitted a newer label than this report knows) — surface it in a catch-all rather than let it
-    # vanish and skew the denominator.
-    def _rendered_mask(df, buckets):
+    # A row is "recognized" iff its (bucket, event) is a valid taxonomy pair — regardless of which
+    # source frame it came from. The tree renders PRIVATE from private_df and the rest from class_df,
+    # so a PRIVATE row that happens to sit in class_df (the differential test also emits PRIVATE calls)
+    # is still recognized and must NOT be dumped into the catch-all. Only genuinely-unknown labels
+    # (taxonomy drift: the classifier emitted a newer label than the report knows) go to UNRECOGNIZED.
+    def _recognized_mask(df):
         if df is None or df.empty or "bucket" not in df.columns:
             return None
         m = pd.Series(False, index=df.index)
-        for b in buckets:
-            for e in CLASS_TAXONOMY.get(b, []):
+        for b in CLASS_BUCKET_ORDER:
+            for e in CLASS_TAXONOMY[b]:
                 sub = (df["bucket"] == b)
                 if "event" in df.columns:
                     sub &= (df["event"] == e)
@@ -1532,12 +1533,10 @@ def build_classification_section(class_df, private_df, class_figs_dir, arch_figs
         return m
 
     leftover_frames = []
-    pr = _rendered_mask(private_df, ["PRIVATE"])
-    if pr is not None and (~pr).any():
-        leftover_frames.append(private_df[~pr])
-    cr = _rendered_mask(class_df, [b for b in CLASS_BUCKET_ORDER if b != "PRIVATE"])
-    if cr is not None and (~cr).any():
-        leftover_frames.append(class_df[~cr])
+    for _df in (private_df, class_df):
+        rm = _recognized_mask(_df)
+        if rm is not None and (~rm).any():
+            leftover_frames.append(_df[~rm])
     leftover_df = pd.concat(leftover_frames, ignore_index=True) if leftover_frames else pd.DataFrame()
 
     known_total = sum(count(b, e) for b in CLASS_BUCKET_ORDER for e in CLASS_TAXONOMY[b])
