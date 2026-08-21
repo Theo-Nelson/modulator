@@ -123,8 +123,10 @@ def main():
     gidx = np.array([0 if s in ref_s else 1 for s in samples], dtype=int)
 
     keep = (tot.min(axis=1) >= args.min_gene_reads)
-    # a feature that is the gene's ONLY one is 100% by construction -> nothing to compare
-    varies = ~np.isclose(K, tot).all(axis=1)
+    # a feature that is the gene's ONLY one is 100% by construction -> nothing to compare. Use an EXACT
+    # integer compare (K == tot): np.isclose's default rtol=1e-5 would wrongly drop a feature that is
+    # 99.999% (off by 1-2 reads) at very high coverage.
+    varies = ~(K == tot).all(axis=1)
     keep &= varies
     K, tot = K[keep], tot[keep]
     idx = feat.index[keep]

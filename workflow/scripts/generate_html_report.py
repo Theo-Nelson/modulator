@@ -134,6 +134,7 @@ COLUMN_DEFINITIONS = {
     "mod_codes_seen": "Modification codes found within this element type, with a count per code.",
     "n_mod_sites": "Number of distinct modification sites overlapping this element instance.",
     "matched_seq": "The mature-mRNA sequence matched for this element instance.",
+    "spans_junction": "1 if the element crosses an exon-exon junction, so its elem_gstart0..elem_gend0 span includes the spliced-out intron (not a contiguous genomic locus); 0 otherwise.",
     "mod_codes": "Modification codes overlapping this element instance.",
     "modifications": "Per-modification detail for the element: code@genomic-position (stoichiometry).",
     # --- poly(A) tail tables ---

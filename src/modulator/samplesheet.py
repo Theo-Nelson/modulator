@@ -97,8 +97,10 @@ def resolve_bam(entry: str, bams_dir: Path) -> Path:
 
 
 def _find_index(bam: Path) -> Path | None:
-    for suffix in _BAM_INDEX_SUFFIXES:
-        cand = Path(str(bam.with_suffix("")) + suffix) if suffix == ".bai" else Path(str(bam) + ".bai")
+    stem = str(bam.with_suffix(""))            # ".../x"  for  ".../x.bam"
+    # accept both BAI and CSI (CSI is required for chromosomes > 512 Mbp), in either naming convention
+    for cand in (Path(str(bam) + ".bai"), Path(stem + ".bai"),
+                 Path(str(bam) + ".csi"), Path(stem + ".csi")):
         if cand.exists():
             return cand
     return None
@@ -129,7 +131,9 @@ def stage_bams(rows: list[dict], staging_dir: str | Path, bams_dir: str | Path) 
         _link(bam, staging / f"{sample}.bam")
         idx = _find_index(bam)
         if idx is not None:
-            _link(idx, staging / f"{sample}.bam.bai")
+            # preserve the index type (.csi must not be linked as .bam.bai, or readers mis-handle it)
+            ext = ".bam.csi" if idx.suffix == ".csi" else ".bam.bai"
+            _link(idx, staging / f"{sample}{ext}")
         samples.append(sample)
     return samples
 

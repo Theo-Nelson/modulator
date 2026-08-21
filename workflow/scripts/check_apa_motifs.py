@@ -32,7 +32,7 @@ OUT_COLS = ["zt_label", "gene_name", "chrom", "strand", "tes", "fragmentform_cla
             "apa_motif_class", "pas_motif", "pas_distance_nt", "downstream_a_frac",
             "downstream_u_frac", "downstream_gu_frac", "upstream_seq", "downstream_seq"]
 
-_COMP = str.maketrans("ACGTNacgtn", "TGCANtgcan")
+_COMP = str.maketrans("ACGTRYKMSWBDHVNacgtrykmswbdhvn", "TGCAYRMKSWVHDBNtgcayrmkswvhdbn")  # full IUPAC
 
 
 def revcomp(s):

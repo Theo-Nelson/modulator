@@ -371,6 +371,25 @@ class ModulatorPipeline:
         self.root = find_project_root(workdir)
         ensure_mpl_config_dir(self.root)
         self.config = config
+        # Guard against a config dict-block being replaced by a scalar (e.g. `--set genotype=false`
+        # instead of `genotype.enable=false`). Every block below is read as `.get("blk", {}).get(...)`,
+        # so a scalar there would raise AttributeError at construction. Coerce a bool to {enable: bool}
+        # (honoring the likely "disable this stage" intent) and any other scalar to {} with a warning.
+        _DICT_BLOCKS = ("aggregate_outputs", "aggregation", "apa_motifs", "assembler",
+                        "between_conditions", "classify_diffs", "filters", "genotype",
+                        "hierarchical_stoich", "modkit", "multigene_filter", "novel_loci", "polya",
+                        "preflight", "report", "sequence_elements", "splice_junctions", "test_diffs",
+                        "toggles")
+        for _blk in _DICT_BLOCKS:
+            if _blk in self.config and not isinstance(self.config[_blk], dict):
+                _val = self.config[_blk]
+                if isinstance(_val, bool):
+                    self.config[_blk] = {"enable": _val}
+                else:
+                    print(f"[modulator] warning: config block '{_blk}' should be a mapping, got "
+                          f"{type(_val).__name__} ({_val!r}); ignoring it. Use '{_blk}.<key>=...'.",
+                          file=sys.stderr)
+                    self.config[_blk] = {}
         self.jobs = max(1, int(jobs))
         self.verbose = verbose
         self.resume = bool(resume)
@@ -388,7 +407,10 @@ class ModulatorPipeline:
         self.samples = self._discover_samples()
         self.reference_fa = self._resolve_reference("reference_fa", ("reference", "fasta"))
         self.reference_gtf = self._resolve_reference("reference_gtf", ("reference", "gtf"))
-        self.top_threads = int(config.get("threads", 1))
+        try:
+            self.top_threads = max(1, int(config.get("threads", 1)))
+        except (ValueError, TypeError):
+            self.top_threads = 1  # 'auto'/'' or other non-int -> fall back to a safe default
         self._validate_config()
 
     def _load_samplesheet(self) -> None:
@@ -525,6 +547,19 @@ class ModulatorPipeline:
                     warnings.append(
                         f"{len(realpaths)} distinct BAMs share an identical size ({sz} bytes): "
                         f"{names}; verify these are not accidental copies of one library."
+                    )
+            # distinct BAMs from different dirs that share a basename derive the SAME sample id
+            # (Path(path).stem), so their sample-keyed outputs would silently overwrite each other.
+            by_stem: dict[str, list[str]] = {}
+            for p in paths:
+                by_stem.setdefault(Path(p).stem, []).append(p)
+            for stem, plist in by_stem.items():
+                if len({os.path.realpath(x) for x in plist}) > 1:
+                    names = ", ".join(sorted(plist))
+                    problems.append(
+                        f"duplicate sample name '{stem}': distinct BAMs share this basename ({names}); "
+                        f"they collapse to one sample id and overwrite each other's outputs. Rename them "
+                        f"or use a samplesheet to give each an explicit sample name."
                     )
 
         if as_bool(pf.get("check_bam_index", True), True):

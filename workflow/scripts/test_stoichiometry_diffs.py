@@ -120,7 +120,7 @@ def benjamini_hochberg(pvals):
     adj_sorted = np.minimum.accumulate(adj[order][::-1])[::-1]
     adj_final = np.empty(m, dtype=float)
     adj_final[order] = adj_sorted
-    out[idx] = np.minimum(adj_final, 1.0)
+    out[idx] = np.clip(adj_final, 0.0, 1.0)
     return out
 
 

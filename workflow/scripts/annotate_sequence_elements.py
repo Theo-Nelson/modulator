@@ -41,7 +41,7 @@ PAS_VARIANTS = ["ATTAAA", "TATAAA", "AGTAAA", "AAGAAA", "AATATA", "AATACA",
                 "CATAAA", "GATAAA", "AATGAA", "ACTAAA", "AATAGA"]
 STOP_CODONS = {"TAA", "TAG", "TGA"}
 G4_RE = re.compile(r"G{3,}[ACGTN]{1,7}G{3,}[ACGTN]{1,7}G{3,}[ACGTN]{1,7}G{3,}")
-COMP = str.maketrans("ACGTN", "TGCAN")
+COMP = str.maketrans("ACGTRYKMSWBDHVNacgtrykmswbdhvn", "TGCAYRMKSWVHDBNtgcayrmkswvhdbn")  # full IUPAC
 
 
 def log(*a):
@@ -275,7 +275,7 @@ def main():
         log(f"{len(tx)} fragmentforms, {sum(len(v) for v in mods.values())} mod sites")
 
     cols = ["zt_label", "gene_name", "chrom", "strand", "element_type", "element_subclass",
-            "elem_gstart0", "elem_gend0", "matched_seq", "region", "detail",
+            "elem_gstart0", "elem_gend0", "spans_junction", "matched_seq", "region", "detail",
             "n_mod_sites", "mod_codes", "mods_json"]
     rows = []
     per_type = defaultdict(lambda: [0, 0])       # element_type -> [instances, instances_with_mod]
@@ -322,6 +322,10 @@ def main():
         for etype, (subclass, t0, t1, extra), region in elements:
             gpos = [tg[i] for i in range(t0, min(t1, L))]
             gs, ge = (min(gpos), max(gpos) + 1) if gpos else (-1, -1)
+            # gs..ge is the min/max genomic span; when the element crosses an exon-exon junction the
+            # spliced-out intron sits inside it, so [gs,ge) is NOT a contiguous element locus. Flag it
+            # so downstream BED/overlap consumers don't treat the intron as part of the element.
+            spans_junction = bool(gpos) and (max(gpos) - min(gpos) + 1) != len(gpos)
             hit_mods = []
             for g in gpos:
                 for (code, frac, cov) in site_map.get(g, []):
@@ -333,7 +337,7 @@ def main():
                 for cc in codes:
                     per_type_codes[etype][cc] += 1
             rows.append([
-                zt, d["gene_name"], chrom, strand, etype, subclass, gs, ge,
+                zt, d["gene_name"], chrom, strand, etype, subclass, gs, ge, int(spans_junction),
                 mrna[t0:min(t1, L)], region,
                 json.dumps({k: v for k, v in extra.items()}) if extra else "",
                 len(hit_mods), ",".join(codes), json.dumps(hit_mods) if hit_mods else "",
