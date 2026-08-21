@@ -847,8 +847,12 @@ def plot_locus_arch(rec, iso, genes, out_png):
     if not zns:
         return False
 
-    lo_g = min(iso[(gene, z)]['exons'][0][0] for z in zns)
-    hi_g = max(iso[(gene, z)]['exons'][-1][1] for z in zns)
+    # A ZN track can hold several non-overlapping fragmentforms; draw the one that actually contains
+    # this base (as classify_tree does), so the figure never shows the wrong co-track form (e.g. a
+    # form in which the base is 'absent / intron-read-derived' when the covering form has it exonic).
+    models = {z: (_iso_at(iso, gene, z, pos) or iso[(gene, z)]) for z in zns}
+    lo_g = min(models[z]['exons'][0][0] for z in zns)
+    hi_g = max(models[z]['exons'][-1][1] for z in zns)
     span = max(hi_g - lo_g, 1)
     pad = max(span * 0.02, 200)
     x0, x1 = lo_g - pad, hi_g + pad
@@ -856,7 +860,8 @@ def plot_locus_arch(rec, iso, genes, out_png):
     fig, ax = plt.subplots(figsize=(16.5, 0.85 * len(zns) + 3.4), layout="constrained")
     yh = 0.6
     for row, z in enumerate(zns):
-        d = iso[(gene, z)]
+        d = models[z]
+        is_cotrack = d is not iso[(gene, z)]   # a co-track variant was resolved (not the primary form)
         y = len(zns) - row
         # intron line spanning the transcript body
         ax.plot([d['exons'][0][0], d['exons'][-1][1]], [y, y], color='0.6', lw=1, zorder=1)
@@ -883,9 +888,10 @@ def plot_locus_arch(rec, iso, genes, out_png):
         tag = []
         if z == hiZN: tag.append('HIGH')
         if z == loZN: tag.append('LOW')
-        if z == anchorZN: tag.append('ANCHOR/longest')
+        if z == anchorZN and not is_cotrack: tag.append('ANCHOR/longest')  # anchor is a primary-form property
         tagstr = (' [' + ','.join(tag) + ']') if tag else ''
-        ax.text(x1 + pad * 0.3, y, f"ZN{z}/{d['arch']}{tagstr}  @site={st_short}   {lab}",
+        cotrack_note = "  (co-track form)" if is_cotrack else ""
+        ax.text(x1 + pad * 0.3, y, f"ZN{z}/{d['arch']}{tagstr}  @site={st_short}   {lab}{cotrack_note}",
                 va='center', ha='left', fontsize=8, color=color)
         # marker AT the site on this isoform row
         if st in ('exonic_terminal', 'exonic_internal'):
