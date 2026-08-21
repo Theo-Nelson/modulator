@@ -183,15 +183,32 @@ def test_preflight():
 
 def test_nfail_score_k():
     """NFail-SCORE k-ratio site filter (aggregate_by_gene.row_pass_filter): keep a site iff
-    k = Nmod/(Nfail+1) >= nfail_score_k, on top of the Ndiff and mod_fail_margin guards."""
+    k = Nmod/(Nfail+1) >= nfail_score_k. This is now the sole confident-call guard (it replaced the
+    old Nmod > Nfail + mod_fail_margin rule; k=1 == margin=0). Also covers the per-mod spec parser."""
     import aggregate_by_gene as agg
-    P = agg.row_pass_filter
+    P = agg.row_pass_filter          # signature: (cov, nmod, nfail, ndiff, count_diff_factor, k)
+    parse, resolve = agg.parse_nfail_score_k, agg.resolve_nfail_score_k
+    # per-mod spec: 'a' calibrated loose (0.4), pseU strict (1.0), everything else default 1.0
+    dflt, per = parse("a=0.4,17802=1.0,default=1.0")
     checks = [
-        ("k=0 disables the k-ratio filter (legacy behaviour)", P(100, 10, 4, 0, 3, 1, 0.0) is True),
-        ("clean site passes at k=0.4 (k=10/5=2.0)", P(100, 10, 4, 0, 3, 1, 0.4) is True),
-        ("error-prone site (Nmod=3,Nfail=40 -> k=0.07) fails at k=0.4", P(100, 3, 40, 0, 3, 1, 0.4) is False),
-        ("stricter k=1.5 rejects a borderline site (Nmod=6,Nfail=4 -> k=1.2)", P(100, 6, 4, 0, 3, 1, 1.5) is False),
-        ("Ndiff guard still applies regardless of k", P(100, 50, 0, 400, 3, 1, 0.4) is False),
+        ("k=0 disables the k-ratio filter", P(100, 10, 4, 0, 3, 0.0) is True),
+        ("k=1 == old margin=0: Nmod=5,Nfail=4 (k=1.0) passes", P(100, 5, 4, 0, 3, 1.0) is True),
+        ("k=1: Nmod=4,Nfail=4 (k=0.8) fails (Nmod must exceed Nfail)", P(100, 4, 4, 0, 3, 1.0) is False),
+        ("clean site passes at k=0.4 (k=10/5=2.0)", P(100, 10, 4, 0, 3, 0.4) is True),
+        ("error-prone site (Nmod=3,Nfail=40 -> k=0.07) fails at k=0.4", P(100, 3, 40, 0, 3, 0.4) is False),
+        ("stricter k=1.5 rejects a borderline site (Nmod=6,Nfail=4 -> k=1.2)", P(100, 6, 4, 0, 3, 1.5) is False),
+        ("Ndiff guard still applies regardless of k", P(100, 50, 0, 400, 3, 0.4) is False),
+        # per-mod resolution
+        ("bare scalar spec -> (k, empty map)", parse("0.7") == (0.7, {})),
+        ("map spec parses default", dflt == 1.0),
+        ("map spec: mod 'a' -> 0.4", resolve("a", dflt, per) == 0.4),
+        ("map spec: pseU '17802' -> 1.0", resolve("17802", dflt, per) == 1.0),
+        ("map spec: unlisted mod 'm' -> default 1.0", resolve("m", dflt, per) == 1.0),
+        # end-to-end via the resolved k: a borderline site (Nmod=4,Nfail=6 -> k=0.57) is kept under
+        # mod 'a' (threshold 0.4) but dropped under pseU (threshold 1.0)
+        ("mod 'a' keeps borderline site pseU drops",
+         P(100, 4, 6, 0, 3, resolve("a", dflt, per)) is True
+         and P(100, 4, 6, 0, 3, resolve("17802", dflt, per)) is False),
     ]
     return checks
 

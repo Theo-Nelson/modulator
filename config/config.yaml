@@ -128,8 +128,17 @@ aggregation:
   zn:
     filter_enable: true
     count_diff_factor: 3                # site-filter (1): FAIL if Ndiff > count_diff_factor * coverage (drops positions dominated by a variant/misalignment rather than a modification)
-    mod_fail_margin: 1                  # site-filter (2): FAIL if Nmod <= Nfail + mod_fail_margin (confident modified calls must outweigh low-confidence ones)
-    nfail_score_k: 0.0                  # site-filter (3): NFail-SCORE k-ratio (Nelson et al.). FAIL if k = Nmod/(Nfail+1) < this. Error-prone false-positive sites carry a large Nfail; true sites a small one. 0 disables. CALIBRATE per modification basecaller + version -- see resources/nfail_score_k_calibration.tsv (e.g. Dorado SUP m6A-DRACH v2.0.0 -> k=0.4; SUP pseU v2.0.0 -> k=1.0).
+    mod_fail_margin: 1                  # DEPRECATED / no-op: the confident-call guard is now the NFail-SCORE k-ratio below (nfail_score_k=1 reproduces the old margin=0 behaviour). Left here only so old configs don't error.
+    # site-filter (2): NFail-SCORE k-ratio (Nelson et al.) -- the confident-call guard. FAIL if k = Nmod/(Nfail+1) < this
+    # (error-prone false-positive sites carry a large Nfail; true sites a small one). k=1 => Nmod must exceed Nfail,
+    # which REPLACES the old "Nmod > Nfail + mod_fail_margin" filter. CALIBRATE per modification (basecaller + model +
+    # Dorado version) -- see resources/nfail_score_k_calibration.tsv (e.g. Dorado SUP m6A-DRACH v2.0.0 -> 0.4; SUP pseU
+    # v2.0.0 -> 1.0). Set one value for all mods, OR a per-mod-code map (0 disables the guard). Example map:
+    #   nfail_score_k:
+    #     a: 0.4          # m6A (mod code 'a')
+    #     "17802": 1.0    # pseU (numeric ChEBI code -- quote it so YAML keeps it a string)
+    #     default: 1.0    # fallback for any mod code not listed
+    nfail_score_k: 1.0
     emit_raw: false                    # RAW sites_long is huge (~all bedMethyl rows) and not consumed downstream; FILTERED is what test_diffs/genotype/report use. Set true only if you need the full pre-filter table and have disk/quota headroom.
     emit_filtered: true
     write_long: true

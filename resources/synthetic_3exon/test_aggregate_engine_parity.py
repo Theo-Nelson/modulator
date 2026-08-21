@@ -39,8 +39,9 @@ def _rows(long_tsv):
 def run_engine(script, out_prefix, filter_on):
     args = [sys.executable, str(SCRIPTS / script),
             "--modkit-dir", str(MODKIT), "--gtf", str(GTF), "--out-prefix", str(out_prefix),
-            "--min-cov", "0", "--count-diff-factor", "3.0", "--mod-fail-margin", "1",
-            "--nfail-score-k", "0.0", "--emit-raw", "--emit-filtered", "--write-long"]
+            "--min-cov", "0", "--count-diff-factor", "3.0",
+            # per-mod k spec: both engines must resolve + apply it identically (parity)
+            "--nfail-score-k", "a=0.5,default=1.0", "--emit-raw", "--emit-filtered", "--write-long"]
     if "stream" in script:
         args += ["--jobs", "4"]   # the sort engine has no --jobs flag
     if filter_on:

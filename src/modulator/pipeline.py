@@ -1272,6 +1272,13 @@ class ModulatorPipeline:
         if tmpdir_path is None:
             raise ValueError("Could not resolve aggregation tmpdir.")
         tmpdir_path.mkdir(parents=True, exist_ok=True)
+        # nfail_score_k may be a single value (all mods) or a per-mod-code map. Serialize a map to the
+        # CLI spec 'mod=k,...,default=k'; the aggregation scripts parse it back (parse_nfail_score_k).
+        _nfk = agg_cfg.get("nfail_score_k", filters_cfg.get("nfail_score_k", 1.0))
+        if isinstance(_nfk, dict):
+            _nfk_spec = ",".join(f"{k}={float(v)}" for k, v in _nfk.items()) or "1.0"
+        else:
+            _nfk_spec = str(float(_nfk))
         args = [
             "--modkit-dir", str(self.paths.modkit_zn),
             "--gtf", str(self.paths.out_gtf),
@@ -1281,7 +1288,7 @@ class ModulatorPipeline:
             "--chunk-lines", str(int(self.config.get("aggregation_chunk_lines") or self.config.get("aggregation", {}).get("chunk_lines", 2000000))),
             "--count-diff-factor", str(float(agg_cfg.get("count_diff_factor", filters_cfg.get("count_diff_factor", 3)))),
             "--mod-fail-margin", str(int(agg_cfg.get("mod_fail_margin", filters_cfg.get("mod_fail_margin", 1)))),
-            "--nfail-score-k", str(float(agg_cfg.get("nfail_score_k", filters_cfg.get("nfail_score_k", 0.0)))),
+            "--nfail-score-k", _nfk_spec,
             "--verbose",
         ]
         if as_bool(agg_cfg.get("filter_enable", filters_cfg.get("enable_site_filter", True)), True):

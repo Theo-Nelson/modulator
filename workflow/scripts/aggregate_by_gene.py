@@ -13,7 +13,7 @@ What it does (ZN aggregation):
   summing numeric columns.
 - Optional site filtering:
     - FAIL if Ndiff > count_diff_factor * Nvalid_cov
-    - FAIL if Nmod <= Nfail + mod_fail_margin
+    - FAIL if Nmod < nfail_score_k * (Nfail + 1)   (NFail-SCORE k-ratio; k may be set per mod_code)
   FILTERED outputs are subset of RAW by site_key (chrom,start0,end0,strand,mod_code).
 
 Stats output (MEANS ONLY; no medians; avoids huge metric sorts):
@@ -140,25 +140,69 @@ def exon_overlap_len(ex1, ex2):
     return total
 
 
+def parse_nfail_score_k(spec) -> "tuple[float, dict]":
+    """Parse the --nfail-score-k spec into (default_k, per_mod_k).
+
+    Accepts either:
+      - a bare number, applied to every mod code:      "1.0"        -> (1.0, {})
+      - a per-mod-code map (comma-separated k=v):       "a=0.4,17802=1.0,default=1.0"
+        keys are mod codes exactly as they appear in the data (single letters like 'a','m'
+        or numeric ChEBI codes like '17802'); the special key 'default' sets the fallback for
+        any mod not listed. -> (1.0, {'a': 0.4, '17802': 1.0})
+      - empty / None:                                   -> (0.0, {})   (filter disabled)
+
+    k is the NFail-SCORE k-ratio calibrated per modification (basecaller + model + version); see
+    resources/nfail_score_k_calibration.tsv.
+    """
+    if spec is None:
+        return (0.0, {})
+    s = str(spec).strip()
+    if s == "":
+        return (0.0, {})
+    if ("=" not in s) and ("," not in s):
+        return (float(s), {})                      # bare scalar -> all mods
+    default_k = 0.0
+    per_mod = {}
+    for tok in s.split(","):
+        tok = tok.strip()
+        if not tok:
+            continue
+        key, sep, val = tok.partition("=")
+        if not sep:
+            raise ValueError(f"--nfail-score-k token '{tok}' is not of the form mod=k or default=k")
+        key = key.strip()
+        k = float(val.strip())
+        if key.lower() == "default":
+            default_k = k
+        else:
+            per_mod[key] = k
+    return (default_k, per_mod)
+
+
+def resolve_nfail_score_k(mod_code, default_k: float, per_mod: dict) -> float:
+    """Look up the k-ratio threshold for one mod code, falling back to default_k."""
+    if per_mod:
+        return per_mod.get(str(mod_code), default_k)
+    return default_k
+
+
 def row_pass_filter(
     cov: int,
     nmod: int,
     nfail: int,
     ndiff: int,
     count_diff_factor: float,
-    mod_fail_margin: int,
-    nfail_score_k: float = 0.0,
+    nfail_score_k: float = 1.0,
 ) -> bool:
     # (1) variant/misalignment guard: drop positions dominated by a different base, not a modification
     if ndiff > (count_diff_factor * cov):
         return False
-    # (2) confident-call guard: confident modified calls must outweigh low-confidence (failed) calls
-    if nmod <= (nfail + mod_fail_margin):
-        return False
-    # (3) NFail-SCORE k-ratio (Nelson et al., "NFail-SCORE"): error-prone false-positive sites carry
-    # a large NFail; true sites carry a small one. Require k = Nmod / (NFail + 1) >= nfail_score_k,
-    # with k calibrated per modification basecaller + version (see resources/nfail_score_k_calibration.tsv).
-    # Disabled when nfail_score_k <= 0.
+    # (2) NFail-SCORE k-ratio (Nelson et al., "NFail-SCORE") -- the confident-call guard: error-prone
+    # false-positive sites carry a large NFail; true sites carry a small one. FAIL if
+    # k = Nmod / (NFail + 1) < nfail_score_k. This SUPERSEDES the old "Nmod > Nfail + mod_fail_margin"
+    # rule -- k=1 is equivalent to margin=0 (Nmod must strictly exceed Nfail). k is calibrated per
+    # modification (basecaller + model + Dorado version; see resources/nfail_score_k_calibration.tsv)
+    # and can be set per mod_code (parse_nfail_score_k / resolve_nfail_score_k). Disabled when k <= 0.
     if nfail_score_k > 0.0 and nmod < nfail_score_k * (nfail + 1):
         return False
     return True
@@ -201,11 +245,14 @@ def parse_args():
     ap.add_argument("--min-cov", type=int, default=0, help="Zero frac_modified if Nvalid_cov < MIN_COV (row kept)")
     ap.add_argument("--filter-enable", action="store_true", help="Enable site-level filtering")
     ap.add_argument("--count-diff-factor", type=float, default=3.0, help="FAIL if Ndiff > factor * Nvalid_cov (default: 3)")
-    ap.add_argument("--mod-fail-margin", type=int, default=1, help="FAIL if Nmod <= Nfail + margin (default: 1)")
-    ap.add_argument("--nfail-score-k", type=float, default=0.0,
-                    help="NFail-SCORE k-ratio filter: FAIL if Nmod < k*(Nfail+1), i.e. k = Nmod/(Nfail+1) < this. "
-                         "Calibrate k per modification basecaller + version (see resources/nfail_score_k_calibration.tsv). "
-                         "0 disables (default).")
+    ap.add_argument("--mod-fail-margin", type=int, default=1,
+                    help="DEPRECATED / no-op: the confident-call guard is now the NFail-SCORE k-ratio "
+                         "(--nfail-score-k); k=1 reproduces the old margin=0 behaviour. Accepted but ignored.")
+    ap.add_argument("--nfail-score-k", type=str, default="1.0",
+                    help="NFail-SCORE k-ratio confident-call filter: FAIL if Nmod < k*(Nfail+1), i.e. "
+                         "k = Nmod/(Nfail+1) < this. Either a single value for all mods (e.g. '1.0') or a "
+                         "per-mod-code map (e.g. 'a=0.4,17802=1.0,default=1.0'). Calibrate k per modification "
+                         "basecaller + version (see resources/nfail_score_k_calibration.tsv). 0 disables.")
 
     # output toggles (explicit on/off)
     ap.add_argument("--emit-raw", dest="emit_raw", action="store_true")
@@ -643,8 +690,8 @@ def dedup_reduce_sorted(
     min_cov: int,
     filter_enable: bool,
     count_diff_factor: float,
-    mod_fail_margin: int,
-    nfail_score_k: float = 0.0,
+    k_default: float = 1.0,
+    k_per_mod: Optional[dict] = None,
     verbose: bool = False,
 ) -> int:
     """
@@ -702,7 +749,8 @@ def dedup_reduce_sorted(
             )
 
         if pass_fh is not None:
-            if row_pass_filter(cov, nmod, nfail, ndiff, count_diff_factor, mod_fail_margin, nfail_score_k):
+            k = resolve_nfail_score_k(mod, k_default, k_per_mod or {})
+            if row_pass_filter(cov, nmod, nfail, ndiff, count_diff_factor, k):
                 pass_fh.write(f"{chrom}\t{start0}\t{end0}\t{strand}\t{mod}\n")
 
         dedup_written += 1
@@ -1369,6 +1417,7 @@ def key_dedup_by_site(line: str):
 
 def main():
     args = parse_args()
+    _k_default, _k_per_mod = parse_nfail_score_k(args.nfail_score_k)
 
     beds = iter_numbered_beds(args.modkit_dir)
     if not beds:
@@ -1419,8 +1468,8 @@ def main():
                 min_cov=args.min_cov,
                 filter_enable=args.filter_enable,
                 count_diff_factor=args.count_diff_factor,
-                mod_fail_margin=args.mod_fail_margin,
-                nfail_score_k=args.nfail_score_k,
+                k_default=_k_default,
+                k_per_mod=_k_per_mod,
                 verbose=args.verbose
             )
 

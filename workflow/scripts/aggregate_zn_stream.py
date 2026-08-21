@@ -83,8 +83,8 @@ def process_chrom(chrom):
 
     min_cov = cfg["min_cov"]
     cdf = cfg["count_diff_factor"]
-    mfm = cfg["mod_fail_margin"]
-    ksc = cfg.get("nfail_score_k", 0.0)
+    k_default = cfg.get("k_default", 1.0)
+    k_per_mod = cfg.get("k_per_mod", {})
     filter_enable = cfg["filter_enable"]
 
     # one position-sorted iterator per bed that has this chrom
@@ -140,6 +140,8 @@ def process_chrom(chrom):
                     v[3] += int(rec["Nother_mod"]); v[4] += int(rec["Ndelete"]); v[5] += int(rec["Nfail"])
                     v[6] += int(rec["Ndiff"]); v[7] += int(rec["Nnocall"])
                 site_pass = False
+                # k-ratio threshold is per mod_code (constant across this site's sample/ZN rows)
+                site_k = agg.resolve_nfail_score_k(mod, k_default, k_per_mod)
                 buf_dedup = []
                 buf_long = []
                 s0 = str(min_start); e0 = str(end0)
@@ -157,7 +159,7 @@ def process_chrom(chrom):
                         f"{cov}\t{nmod}\t{frac:.6f}\t{gid}\t{gname}\t"
                         f"{ncan}\t{nother}\t{ndel}\t{nfail}\t{ndiff}\t{nnoc}\n"
                     )
-                    if filter_enable and agg.row_pass_filter(cov, nmod, nfail, ndiff, cdf, mfm, ksc):
+                    if filter_enable and agg.row_pass_filter(cov, nmod, nfail, ndiff, cdf, site_k):
                         site_pass = True
                 if need_raw:
                     dedup_raw.writelines(buf_dedup)
@@ -208,12 +210,14 @@ def parse_args():
     ap.add_argument("--tmpdir", default=None)
     ap.add_argument("--chunk-lines", type=int, default=2_000_000)
     ap.add_argument("--count-diff-factor", type=float, default=3.0)
-    ap.add_argument("--mod-fail-margin", type=int, default=1)
+    ap.add_argument("--mod-fail-margin", type=int, default=1,
+                    help="DEPRECATED / no-op: superseded by --nfail-score-k (k=1 reproduces margin=0).")
     ap.add_argument("--jobs", type=int, default=8, help="chromosomes processed in parallel")
     ap.add_argument("--verbose", action="store_true")
     ap.add_argument("--filter-enable", dest="filter_enable", action="store_true", default=False)
-    ap.add_argument("--nfail-score-k", type=float, default=0.0,
-                    help="NFail-SCORE k-ratio filter: FAIL if Nmod < k*(Nfail+1). 0 disables (default).")
+    ap.add_argument("--nfail-score-k", type=str, default="1.0",
+                    help="NFail-SCORE k-ratio confident-call filter: FAIL if Nmod < k*(Nfail+1). Either a single "
+                         "value ('1.0') or a per-mod-code map ('a=0.4,17802=1.0,default=1.0'). 0 disables.")
     for flag in ("emit-raw", "emit-filtered", "write-long",
                  "write-raw-per-gene", "write-filtered-per-gene"):
         dest = flag.replace("-", "_")
@@ -246,8 +250,9 @@ def main():
     if args.verbose:
         print(f"[stream] {len(beds)} beds, {len(chroms)} chromosomes, jobs={args.jobs}", file=sys.stderr, flush=True)
 
+    _k_default, _k_per_mod = agg.parse_nfail_score_k(args.nfail_score_k)
     cfg = dict(workdir=workdir, min_cov=args.min_cov, count_diff_factor=args.count_diff_factor,
-               mod_fail_margin=args.mod_fail_margin, nfail_score_k=args.nfail_score_k,
+               k_default=_k_default, k_per_mod=_k_per_mod,
                filter_enable=args.filter_enable, emit_raw=args.emit_raw,
                emit_filtered=args.emit_filtered)
 
