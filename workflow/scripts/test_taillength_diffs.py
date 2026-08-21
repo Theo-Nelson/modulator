@@ -47,8 +47,10 @@ def parse_args():
     return ap.parse_args()
 
 
-def _plot_gene(df, mg, gene, p_adj, min_reads, path, max_forms=12):
-    """Boxplot of poly(A) tail length per fragmentform for one gene/metagene."""
+def _plot_gene(df, mg, gene, p_adj, min_reads, path, max_forms=20):
+    """Boxplot of poly(A) tail length per fragmentform for one gene/metagene. The p_adj is computed
+    over ALL fragmentforms with >= min_reads; when there are more than max_forms the boxplot shows only
+    the most-supported ones (and says so), since dozens of boxes are unreadable."""
     try:
         import matplotlib
         matplotlib.use("Agg")
@@ -60,8 +62,16 @@ def _plot_gene(df, mg, gene, p_adj, min_reads, path, max_forms=12):
               if g.shape[0] >= int(min_reads)]
     if len(groups) < 2:
         return False
-    if len(groups) > max_forms:  # keep the most-supported fragmentforms if a gene has many
-        groups = sorted(groups, key=lambda kv: -kv[1].size)[:max_forms]
+    n_total = len(groups)                    # number of fragmentforms in the TEST
+    if n_total > max_forms:
+        # keep the extremes of the distribution (shortest- and longest-median-tail fragmentforms) so
+        # the plotted range is honest, PLUS the top-10 most-supported by read count; dedup by ZT.
+        by_median = sorted(groups, key=lambda kv: np.median(kv[1]))
+        by_reads = sorted(groups, key=lambda kv: -kv[1].size)
+        picked = {}
+        for grp in [by_median[-1], by_median[0]] + by_reads[:10]:   # max, min, then top-10 by reads
+            picked[grp[0]] = grp
+        groups = list(picked.values())
     groups.sort(key=lambda kv: np.median(kv[1]))
     labels = [zt.split(".")[-1] for zt, _ in groups]          # T1, T2, ... (transcript index)
     data = [v for _, v in groups]
@@ -74,13 +84,17 @@ def _plot_gene(df, mg, gene, p_adj, min_reads, path, max_forms=12):
         w.set(color="#3b6ea5", linewidth=0.8)
     ax.set_xticklabels(labels, fontsize=8)
     ax.set_ylabel("poly(A) tail length (nt)")
-    ax.set_title(f"{gene} — tail length by fragmentform  (p_adj={p_adj:.1e})", fontsize=10)
+    cap_note = (f"\nKruskal over all {n_total} fragmentforms; showing the min- & max-tail forms + top 10 by reads"
+                if n_total > len(groups)
+                else f"\nKruskal over all {n_total} fragmentforms")
+    ax.set_title(f"{gene} — tail length by fragmentform  (p_adj={p_adj:.1e}){cap_note}", fontsize=9)
     # add headroom above the boxes so the n= labels sit clear of the top whisker/box
     ymin, ymax = ax.get_ylim()
     ax.set_ylim(ymin, ymax + 0.10 * (ymax - ymin))
     top = ax.get_ylim()[1]
+    nfs = 5.5 if len(groups) <= 10 else 4.5   # shrink n= labels when many boxes are packed together
     for i, (_, v) in enumerate(groups):
-        ax.text(i + 1, top, f"n={v.size}", ha="center", va="top", fontsize=6, color="#5b6773")
+        ax.text(i + 1, top, f"n={v.size}", ha="center", va="top", fontsize=nfs, color="#5b6773", rotation=90)
     fig.tight_layout()
     save_figure(fig, path, dpi=130, bbox_inches="tight")   # PNG + SVG
     plt.close(fig)

@@ -12,6 +12,7 @@ O(1) RAM router) and streamed with usecols; the per-read tail table is small and
 (sample,qname) -> tail_len dict. Empty-input safe (header-only output).
 """
 import argparse
+import json
 import os
 import re
 import shutil
@@ -25,10 +26,11 @@ from genotype_utils import benjamini_hochberg, shard_tsv_by_chrom, tsv_header
 from plot_utils import save_figure
 
 _MOD_WANT = ["sample", "qname", "mod_site_id", "chrom", "target_mod_code", "target_modified",
-             "gene_name", "state_detail", "usable", "fail", "within_alignment"]
+             "gene_name", "state_detail", "usable", "fail", "within_alignment", "ZN"]
 OUT_COLS = ["mod_site_id", "chrom", "gene_name", "target_mod_code",
             "n_reads", "n_modified", "n_unmodified", "median_tail_modified", "median_tail_unmodified",
-            "effect_median_diff_nt", "test_name", "stat_name", "stat_value", "p_value", "p_adj_bh"]
+            "effect_median_diff_nt", "test_name", "stat_name", "stat_value", "p_value", "p_adj_bh",
+            "per_fragmentform_json"]
 
 
 def parse_args():
@@ -44,28 +46,52 @@ def parse_args():
     return ap.parse_args()
 
 
-def _plot_site(mod_t, unmod_t, meta, path):
-    """Overlaid modified-vs-unmodified poly(A) tail-length histograms for one mod site."""
+def _plot_site(mod_t, unmod_t, meta, path, per_ff=None):
+    """Modified-vs-unmodified poly(A) tail for one mod site: (left) pooled histogram across all
+    fragmentforms, and (right, when available) a per-fragmentform dumbbell showing the modified vs
+    unmodified MEDIAN tail WITHIN each fragmentform -- so a pooled shift can be told apart from the
+    modification merely tracking a differently-tailed fragmentform."""
     try:
         import matplotlib
         matplotlib.use("Agg")
         import matplotlib.pyplot as plt
     except Exception:
         return False
+    # fragmentforms with BOTH states well-sampled (>=3 reads each)
+    ff = [(zn, d) for zn, d in (per_ff or {}).items()
+          if d.get("median_tail_mod") is not None and d.get("median_tail_unmod") is not None
+          and d["n_mod"] >= 3 and d["n_unmod"] >= 3]
+    ff.sort(key=lambda t: t[1]["median_tail_unmod"])
+    two = len(ff) >= 1
+    if two:
+        fig, (ax, a2) = plt.subplots(1, 2, figsize=(11.2, max(4.2, 0.32 * len(ff) + 2.2)), layout="constrained")
+    else:
+        fig, ax = plt.subplots(figsize=(6.4, 4.0), layout="constrained")
     hi = float(np.percentile(np.concatenate([mod_t, unmod_t]), 99))
     bins = np.linspace(0, max(hi, 10), 40)
-    fig, ax = plt.subplots(figsize=(6.4, 4.0))
     ax.hist(unmod_t, bins=bins, density=True, color="#8aa0b5", alpha=0.6, label=f"unmodified (n={unmod_t.size})")
     ax.hist(mod_t, bins=bins, density=True, color="#c1121f", alpha=0.55, label=f"modified (n={mod_t.size})")
     ax.axvline(np.median(unmod_t), color="#41576d", ls="--", lw=1.2)
     ax.axvline(np.median(mod_t), color="#7a0c15", ls="--", lw=1.2)
-    ax.set_xlabel("poly(A) tail length (nt)")
-    ax.set_ylabel("density")
-    d = float(np.median(mod_t) - np.median(unmod_t))
-    ax.set_title(f"{meta['gene_name']}  {meta['mod_site_id']}\nmodified median {np.median(mod_t):.0f} vs "
-                 f"unmodified {np.median(unmod_t):.0f} nt  (Δ={d:+.0f}, p_adj={meta['p_adj_bh']:.1e})", fontsize=9)
+    ax.set_xlabel("poly(A) tail length (nt)"); ax.set_ylabel("density")
     ax.legend(frameon=False, fontsize=8)
-    fig.tight_layout()
+    ax.set_title("pooled across fragmentforms", fontsize=9)
+    if two:
+        for y, (zn, d) in enumerate(ff):
+            um, mm = d["median_tail_unmod"], d["median_tail_mod"]
+            a2.plot([um, mm], [y, y], color="#b8c2cc", lw=1.6, zorder=1)
+            a2.scatter([um], [y], color="#8aa0b5", s=34, zorder=2)
+            a2.scatter([mm], [y], color="#c1121f", s=34, zorder=2)
+        a2.set_yticks(range(len(ff)))
+        a2.set_yticklabels([f"ZN{zn} (n {d['n_mod']}/{d['n_unmod']})" for zn, d in ff], fontsize=7.5)
+        a2.set_xlabel("median poly(A) tail (nt)")
+        a2.set_title("per fragmentform  (● unmodified, ● modified)", fontsize=9)
+        a2.grid(True, axis="x", ls="--", lw=0.5, alpha=0.4)
+        for sp in ("top", "right"):
+            a2.spines[sp].set_visible(False)
+    d = float(np.median(mod_t) - np.median(unmod_t))
+    fig.suptitle(f"{meta['gene_name']}  {meta['mod_site_id']} — modified median {np.median(mod_t):.0f} vs "
+                 f"unmodified {np.median(unmod_t):.0f} nt  (Δ={d:+.0f}, p_adj={meta['p_adj_bh']:.1e})", fontsize=9)
     save_figure(fig, path, dpi=130, bbox_inches="tight")   # PNG + SVG
     plt.close(fig)
     return True
@@ -108,6 +134,26 @@ def _site_rows_for_chrom(mod_path, tail_map, args):
             continue
         stat, p = mannwhitneyu(mod_t, unmod_t, alternative="two-sided")
         f = g.iloc[0]
+        # per-FRAGMENTFORM (ZN) breakdown: does the modified-vs-unmodified tail gap hold WITHIN a
+        # fragmentform, or is it just the modification tracking a differently-tailed fragmentform?
+        per_ff = {}
+        if "ZN" in g.columns:
+            for zn, zg in g.groupby("ZN"):
+                try:
+                    zi = int(float(zn))
+                except (TypeError, ValueError):
+                    continue  # unassigned reads (blank ZN) belong to no fragmentform
+                mt = zg.loc[zg["target_modified"] == 1, "tail_len"].values
+                ut = zg.loc[zg["target_modified"] == 0, "tail_len"].values
+                if mt.size == 0 and ut.size == 0:
+                    continue
+                per_ff[zi] = {
+                    "n_mod": int(mt.size), "n_unmod": int(ut.size),
+                    "median_tail_mod": round(float(np.median(mt)), 1) if mt.size else None,
+                    "median_tail_unmod": round(float(np.median(ut)), 1) if ut.size else None,
+                    "delta_nt": (round(float(np.median(mt) - np.median(ut)), 1)
+                                 if mt.size and ut.size else None),
+                }
         row = {
             "mod_site_id": sid, "chrom": f.get("chrom", ""), "gene_name": f.get("gene_name", ""),
             "target_mod_code": f.get("target_mod_code", ""),
@@ -116,10 +162,11 @@ def _site_rows_for_chrom(mod_path, tail_map, args):
             "median_tail_unmodified": round(float(np.median(unmod_t)), 2),
             "effect_median_diff_nt": round(float(np.median(mod_t) - np.median(unmod_t)), 2),
             "test_name": "mannwhitneyu", "stat_name": "U", "stat_value": round(float(stat), 4), "p_value": float(p),
+            "per_fragmentform_json": json.dumps(per_ff),
         }
         rows.append(row)
         if collect:
-            cands.append((float(p), row, mod_t, unmod_t))
+            cands.append((float(p), row, mod_t, unmod_t, per_ff))
     return rows, cands
 
 
@@ -167,10 +214,10 @@ def main():
         os.makedirs(args.figs_dir, exist_ok=True)
         padj = dict(zip(out["mod_site_id"], out["p_adj_bh"])) if not out.empty else {}
         n_fig = 0
-        for i, (p, row, mod_t, unmod_t) in enumerate(sorted(fig_cands, key=lambda x: x[0])[:int(args.top_k)], start=1):
+        for i, (p, row, mod_t, unmod_t, per_ff) in enumerate(sorted(fig_cands, key=lambda x: x[0])[:int(args.top_k)], start=1):
             meta = dict(row); meta["p_adj_bh"] = float(padj.get(row["mod_site_id"], p))
             safe = re.sub(r"[^A-Za-z0-9._-]", "_", f"{row['gene_name']}_{row['mod_site_id']}")
-            if _plot_site(mod_t, unmod_t, meta, os.path.join(args.figs_dir, f"rank{i:02d}_{safe}.png")):
+            if _plot_site(mod_t, unmod_t, meta, os.path.join(args.figs_dir, f"rank{i:02d}_{safe}.png"), per_ff):
                 n_fig += 1
         if args.verbose:
             print(f"[taillength_mod] wrote {n_fig} per-site tail figures -> {args.figs_dir}", flush=True)

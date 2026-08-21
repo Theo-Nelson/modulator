@@ -147,6 +147,7 @@ COLUMN_DEFINITIONS = {
     "test_name": "Statistical test used: Mann-Whitney U (2 groups) or Kruskal-Wallis (>2 groups).",
     "median_tail_modified": "Median tail length (nt) of reads modified at the target site.",
     "median_tail_unmodified": "Median tail length (nt) of reads unmodified at the target site.",
+    "per_fragmentform_json": "Per-fragmentform (ZN) breakdown {ZN: {n_mod, n_unmod, median_tail_mod, median_tail_unmod, delta_nt}} — the modified-vs-unmodified tail comparison WITHIN each fragmentform, so a pooled shift can be told apart from the modification tracking a differently-tailed fragmentform. Visualized as the right panel of each per-site figure.",
     "n_unmodified": "Number of reads unmodified at the target site.",
     "sample": "Sample identifier derived from the BAM filename.",
     "chrom": "Reference chromosome or contig containing the reported feature.",
@@ -1086,8 +1087,21 @@ def build_between_conditions_section(bc_dir, top_n, top_note=""):
                 blocks.append(subsection(f"{title} — top by effect size",
                                          df_to_html(sig[[c for c in cols if c in sig.columns]], max_rows=top_n)))
         if summary:
+            # spell out the direction explicitly: the contrast name is "{test}_vs_{reference}" and every
+            # delta is mu_test - mu_reference, so the reader never has to guess the sign convention.
+            _cv = contrast.split("_vs_")
+            if len(_cv) == 2:
+                _test, _ref = html.escape(_cv[0]), html.escape(_cv[1])
+                cond_def = (f"<p class='section-intro'><b>Reference condition:</b> {_ref} &nbsp;·&nbsp; "
+                            f"<b>Test condition:</b> {_test}. Every <b>delta</b> is <b>test − reference</b> "
+                            f"(mu_test − mu_reference / median_tail_test − median_tail_reference), so a "
+                            f"POSITIVE value means higher in <b>{_test}</b> (test) than in <b>{_ref}</b> "
+                            f"(reference), and a negative value means lower.</p>")
+            else:
+                cond_def = ("<p class='section-intro'>Every delta is test − reference "
+                            "(mu_test − mu_reference); a positive value means higher in the test condition.</p>")
             parts.append(subsection(f"Contrast: {contrast}",
-                                    df_to_html(pd.DataFrame(summary), max_rows=10) + "".join(blocks)))
+                                    cond_def + df_to_html(pd.DataFrame(summary), max_rows=10) + "".join(blocks)))
     return section(
         "Between-Condition Changes in Fragment-form Usage, Junction Usage, APA Usage, polyA Tail Length, and Modification Stoichiometries",
         top_note + "".join(parts),
