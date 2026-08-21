@@ -97,11 +97,15 @@ def process_chrom(chrom):
 
     n_sites = 0
     emit_raw = cfg["emit_raw"]
+    # When site-filtering is OFF, the FILTERED outputs alias RAW (filtered == everything), matching the
+    # sort engine (aggregate_by_gene.py). So we must still produce the RAW partials in that case, even
+    # if emit_raw is off, because they are the source the FILTERED outputs are copied from.
+    need_raw = emit_raw or (cfg.get("emit_filtered", True) and not filter_enable)
     # RAW partials are large and feed only the (unconsumed) RAW outputs; skip them
-    # entirely when emit_raw is off so the on-disk footprint is just FILTERED.
-    raw_long = open(raw_long_p, "w") if emit_raw else None
+    # entirely when they are not needed so the on-disk footprint is just FILTERED.
+    raw_long = open(raw_long_p, "w") if need_raw else None
     filt_long = open(filt_long_p, "w") if filter_enable else None
-    dedup_raw = open(dedup_raw_p, "w") if emit_raw else None
+    dedup_raw = open(dedup_raw_p, "w") if need_raw else None
     dedup_filt = open(dedup_filt_p, "w") if filter_enable else None
 
     try:
@@ -155,7 +159,7 @@ def process_chrom(chrom):
                     )
                     if filter_enable and agg.row_pass_filter(cov, nmod, nfail, ndiff, cdf, mfm, ksc):
                         site_pass = True
-                if emit_raw:
+                if need_raw:
                     dedup_raw.writelines(buf_dedup)
                     raw_long.writelines(buf_long)
                 if filter_enable and site_pass:
@@ -244,7 +248,8 @@ def main():
 
     cfg = dict(workdir=workdir, min_cov=args.min_cov, count_diff_factor=args.count_diff_factor,
                mod_fail_margin=args.mod_fail_margin, nfail_score_k=args.nfail_score_k,
-               filter_enable=args.filter_enable, emit_raw=args.emit_raw)
+               filter_enable=args.filter_enable, emit_raw=args.emit_raw,
+               emit_filtered=args.emit_filtered)
 
     # ---- Phase 1: per-chromosome streaming merge (parallel, resumable) ----
     todo = [c for c in chroms if not os.path.exists(os.path.join(workdir, f".done.{agg.sanitize_filename_token(c)}"))]
@@ -271,17 +276,27 @@ def main():
     def parts(kind):
         return [os.path.join(workdir, f"{kind}.{agg.sanitize_filename_token(c)}.tsv") for c in chroms]
 
+    # When site-filtering is OFF the FILTERED outputs alias RAW (filtered == everything), exactly as the
+    # sort engine (aggregate_by_gene.py) does — otherwise downstream stages that key on the FILTERED
+    # tables (e.g. test_diffs) would be silently skipped under the default stream engine.
+    filt_aliases_raw = args.emit_filtered and not args.filter_enable
+    need_raw = args.emit_raw or filt_aliases_raw
     dedup_raw = os.path.join(workdir, "dedup.RAW.tsv")
     dedup_filt = os.path.join(workdir, "dedup.FILTERED.tsv")
-    if args.emit_raw:
+    if need_raw:
         _concat(parts("dedup_raw"), dedup_raw)
     if args.filter_enable:
         _concat(parts("dedup_filt"), dedup_filt)
+    elif filt_aliases_raw:
+        dedup_filt = dedup_raw   # FILTERED per-gene/stats read the RAW dedup
 
     if args.emit_raw and args.write_long:
         _concat(parts("raw_long"), f"{base}_RAW_sites_long.tsv", header=agg.LONG_HEADER)
-    if args.emit_filtered and args.filter_enable and args.write_long:
-        _concat(parts("filt_long"), f"{base}_FILTERED_sites_long.tsv", header=agg.LONG_HEADER)
+    if args.emit_filtered and args.write_long:
+        # FILTERED long from the filtered partials when filtering is on; from the raw partials when it
+        # is off (so the FILTERED long is present-and-complete rather than missing).
+        _concat(parts("filt_long" if args.filter_enable else "raw_long"),
+                f"{base}_FILTERED_sites_long.tsv", header=agg.LONG_HEADER)
     if args.verbose:
         print("[stream] phase2: concatenated long + dedup outputs", file=sys.stderr, flush=True)
 
@@ -292,7 +307,7 @@ def main():
         agg.generate_per_gene_outputs_from_dedup(dedup_raw, base, "RAW", args.write_raw_per_gene,
                                                  args.pivot_mode, workdir, args.chunk_lines, args.verbose,
                                                  jobs=args.jobs, pivot_max_groups=args.pivot_max_groups)
-    if args.emit_filtered and args.filter_enable:
+    if args.emit_filtered:
         agg.compute_per_sample_mod_stats_from_dedup(dedup_filt, base, "FILTERED", workdir, args.chunk_lines, args.verbose)
         agg.generate_per_gene_outputs_from_dedup(dedup_filt, base, "FILTERED", args.write_filtered_per_gene,
                                                  args.pivot_mode, workdir, args.chunk_lines, args.verbose,

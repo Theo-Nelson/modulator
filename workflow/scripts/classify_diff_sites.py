@@ -294,6 +294,15 @@ def is_proximal(tes_a, tes_b, strand):
     return (tes_a < tes_b) if strand == '+' else (tes_a > tes_b)
 
 
+def _alt_last_dir(hi_tes, lo_tes, strand):
+    """Direction for a mutually-exclusive ALTERNATIVE LAST EXON: which form's alt last exon is used.
+    The two last exons are different exons, so we describe WHERE the higher form terminates relative to
+    the other (proximal = upstream / shorter 3'UTR, distal = downstream / longer 3'UTR)."""
+    if hi_tes is None or lo_tes is None:
+        return 'ALT_LAST_EXON_HIGHER'
+    return 'PROXIMAL_HIGHER' if is_proximal(hi_tes, lo_tes, strand) else 'DISTAL_HIGHER'
+
+
 # --- Orthogonal stoichiometry axes layered on top of the structural `category` ---
 # The primary `category` is the structural MECE label. These add, in separate columns, the
 # stoichiometry RELATIONSHIP the structural label does not encode: which fragmentform is more
@@ -383,7 +392,7 @@ def exon_gap(a, b):
 # =============================================================================
 TAXONOMY = {
     "PRIVATE":       ["SKIPPED_EXON", "INTRONIC_POLYA", "ALT_LAST_EXON"],
-    "SHARED_LOCAL":  ["ALT_DONOR", "ALT_ACCEPTOR", "ALT_POLYA_SITE", "RETAINED_INTRON",
+    "SHARED_LOCAL":  ["ALT_DONOR", "ALT_ACCEPTOR", "ALT_EXON", "ALT_POLYA_SITE", "RETAINED_INTRON",
                       "IPA_EXTENSION", "NEAR_ALT_JUNCTION"],
     "SHARED_DISTAL": ["DISTAL_APA", "DISTAL_SPLICING"],
     "UNEXPLAINABLE": ["FIVE_PRIME_UNCERTAIN", "INTRON_READ_ARTIFACT", "NO_MODEL", "UNRESOLVED"],
@@ -448,7 +457,9 @@ def classify_tree(gene, pos, hiZN, loZN, iso, *, tes_tol, ejc_nt):
         if sh == 'exonic_terminal':
             th, tl = terminal_exon(ihi['exons'], strand), terminal_exon(ilo['exons'], strand)
             info['delta_nt'] = exon_gap(th, tl)
-            d = 'LONGER_EXON_HIGHER' if (th[1] - th[0]) >= (tl[1] - tl[0]) else 'SHORTER_EXON_HIGHER'
+            # the two forms use DIFFERENT (mutually-exclusive) last exons, so their lengths are not
+            # comparable; the meaningful axis is WHERE the higher form's alternative last exon sits.
+            d = _alt_last_dir(ihi['tes'], ilo['tes'], strand)
             return 'PRIVATE', 'ALT_LAST_EXON', d, info
         ehi = _exon_containing(ihi['exons'], pos)
         if ehi:
@@ -499,7 +510,7 @@ def classify_tree(gene, pos, hiZN, loZN, iso, *, tes_tol, ejc_nt):
         long_tes = ht if hi_longer else lt
         short_tes = lt if hi_longer else ht
         long_is_last = hi_last if hi_longer else lo_last
-        exon_dir = 'LONGER_EXON_HIGHER' if hi_longer else 'SHORTER_EXON_HIGHER'
+        exon_dir = 'LONGER_EXON_HIGHER' if hi_longer else 'LONGER_EXON_LOWER'
         acc_diff = (acc_hi != acc_lo) and not (hi_first or lo_first)   # 5' end is the blind spot
         don_diff = (don_hi != don_lo)
         if acc_diff or don_diff:
@@ -519,6 +530,11 @@ def classify_tree(gene, pos, hiZN, loZN, iso, *, tes_tol, ejc_nt):
                 info['delta_nt'] = abs(len_hi - len_lo)
                 d = 'INTRON_RETAINED_HIGHER' if hi_longer else 'INTRON_RETAINED_LOWER'
                 return 'SHARED_LOCAL', 'RETAINED_INTRON', d, info
+            # ALT_EXON: BOTH the acceptor and the donor differ -> a mutually-exclusive alternative exon
+            # (shares neither splice site), not a single shifted boundary.
+            if acc_diff and don_diff:
+                info['delta_nt'] = abs(len_hi - len_lo)
+                return 'SHARED_LOCAL', 'ALT_EXON', exon_dir, info
             # otherwise a single shifted splice boundary that rejoins downstream.
             if acc_diff:
                 info['delta_nt'] = abs(acc_hi - acc_lo)
@@ -607,10 +623,11 @@ def scan_private_sites(zn_long_path, iso, genes, *, min_frac, min_cov):
         if ihi['arch'] == 'IPA' and sh == 'exonic_terminal':
             event, direction, delta = 'INTRONIC_POLYA', 'IPA_TRANSCRIPT_HIGHER', ''
         elif sh == 'exonic_terminal':
-            event, direction = 'ALT_LAST_EXON', ''
-            th = terminal_exon(ihi['exons'], strand); tl = terminal_exon(_iso_at(iso, g, absent[0], pos)['exons'], strand)
+            event = 'ALT_LAST_EXON'
+            alo = _iso_at(iso, g, absent[0], pos)
+            th = terminal_exon(ihi['exons'], strand); tl = terminal_exon(alo['exons'], strand)
             delta = exon_gap(th, tl)
-            direction = 'LONGER_EXON_HIGHER' if (th[1] - th[0]) >= (tl[1] - tl[0]) else 'SHORTER_EXON_HIGHER'
+            direction = _alt_last_dir(ihi['tes'], alo['tes'], strand)
         else:
             e = _exon_containing(ihi['exons'], pos)
             event, direction, delta = 'SKIPPED_EXON', 'WITH_EXON_HIGHER', (e[1] - e[0]) if e else ''

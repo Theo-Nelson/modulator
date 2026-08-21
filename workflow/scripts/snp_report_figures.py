@@ -146,7 +146,7 @@ def _fig_hap(row, plt):
         return None
     block = row.get("block_id", "")
     is_mod = states[:2] == ["modified", "not_target"] or "mod_site_id" in row.index
-    fig, ax = plt.subplots(figsize=(max(4.2, 0.95 * len(haps) + 2.0), 3.5))
+    fig, ax = plt.subplots(figsize=(max(4.8, 1.05 * len(haps) + 2.4), 3.6), layout="constrained")
     x = np.arange(len(haps))
     if is_mod and counts.shape[1] >= 2:
         fr = [counts[i, 0] / (counts[i].sum() or 1) for i in range(len(haps))]
@@ -155,8 +155,8 @@ def _fig_hap(row, plt):
         for b, f, t in zip(bars, fr, tot):
             ax.text(b.get_x() + b.get_width() / 2, f + 0.01, f"{f*100:.0f}%\n(n={t})",
                     ha="center", va="bottom", fontsize=7.5)
-        ax.set_ylim(0, 1.16); ax.set_ylabel(f"fraction modified ({row.get('target_mod_code','')})")
-        title = f"block {block}  {row.get('mod_site_id','')}\nmethylation by haplotype"
+        ax.set_ylim(0, 1.18); ax.set_ylabel(f"frac modified ({row.get('target_mod_code','')})")
+        title = f"{block}  {row.get('mod_site_id','')} — methylation by haplotype"
     else:
         # fragmentform usage: stacked proportion of each haplotype's reads across the gene's fragmentforms
         rowsum = counts.sum(axis=1, keepdims=True); rowsum[rowsum == 0] = 1
@@ -169,17 +169,16 @@ def _fig_hap(row, plt):
                 lbl = f"T{int(lbl[1:]) + 1}"
             ax.bar(x, prop[:, j], 0.62, bottom=bottom, label=lbl, color=cmap(j % 20))
             bottom += prop[:, j]
-        ax.set_ylim(0, 1.0); ax.set_ylabel("fragmentform usage fraction")
+        ax.set_ylim(0, 1.0); ax.set_ylabel("usage fraction")
         ax.legend(fontsize=6.5, frameon=False, ncol=1, bbox_to_anchor=(1.01, 1), loc="upper left",
                   title="fragmentform")
         gene = str(row.get("gene_names", "") or "").split(",")[0]
-        title = (f"block {block} — {gene}\nfragmentform usage by haplotype" if gene
-                 else f"block {block}\nfragmentform usage by haplotype")
+        title = (f"{block} — {gene}: fragmentform usage by haplotype" if gene
+                 else f"{block}: fragmentform usage by haplotype")
     ax.set_xticks(x); ax.set_xticklabels(haps, fontsize=8, rotation=20, ha="right")
     ax.set_title(title, fontsize=8.5)
     for sp in ("top", "right"):
         ax.spines[sp].set_visible(False)
-    fig.tight_layout()
     return fig, f"block_{block}"
 
 

@@ -52,6 +52,11 @@ CASES = [
       2: ([(1000, 1200), (2000, 2400), (3000, 3500)], 3500, 100)},
      2200, 1, 2, "SHARED_LOCAL", "ALT_DONOR"),
 
+    ("SHARED_LOCAL_ALT_EXON",       # base's exon differs at BOTH the acceptor AND the donor (alt exon)
+     {1: ([(1000, 1200), (2000, 2500), (3000, 3500)], 3500, 100),
+      2: ([(1000, 1200), (2100, 2400), (3000, 3500)], 3500, 100)},
+     2250, 1, 2, "SHARED_LOCAL", "ALT_EXON"),
+
     ("SHARED_LOCAL_ALT_POLYA_SITE", # both in the last exon, same acceptor, different poly(A) site
      {1: ([(1000, 1200), (2000, 2500)], 2500, 100),
       2: ([(1000, 1200), (2000, 3000)], 3000, 100)},
