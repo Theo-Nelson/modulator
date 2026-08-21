@@ -148,6 +148,8 @@ COLUMN_DEFINITIONS = {
     "median_tail_modified": "Median tail length (nt) of reads modified at the target site.",
     "median_tail_unmodified": "Median tail length (nt) of reads unmodified at the target site.",
     "per_fragmentform_json": "Per-fragmentform (ZN) breakdown {ZN: {n_mod, n_unmod, median_tail_mod, median_tail_unmod, delta_nt}} — the modified-vs-unmodified tail comparison WITHIN each fragmentform, so a pooled shift can be told apart from the modification tracking a differently-tailed fragmentform. Visualized as the right panel of each per-site figure.",
+    "n_forms_comparable": "Number of fragmentforms with >=3 reads in BOTH the modified and unmodified state (the forms in which a within-fragmentform tail comparison is possible).",
+    "n_forms_concordant": "Of the comparable fragmentforms, how many shift in the SAME direction as the pooled effect. If this is <=1 (or a minority of comparable forms), the pooled tail difference may be driven by a single fragmentform rather than a within-fragmentform effect — the per-site figure carries a warning in that case.",
     "n_unmodified": "Number of reads unmodified at the target site.",
     "sample": "Sample identifier derived from the BAM filename.",
     "chrom": "Reference chromosome or contig containing the reported feature.",

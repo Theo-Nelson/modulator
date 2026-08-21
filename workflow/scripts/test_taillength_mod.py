@@ -30,7 +30,7 @@ _MOD_WANT = ["sample", "qname", "mod_site_id", "chrom", "target_mod_code", "targ
 OUT_COLS = ["mod_site_id", "chrom", "gene_name", "target_mod_code",
             "n_reads", "n_modified", "n_unmodified", "median_tail_modified", "median_tail_unmodified",
             "effect_median_diff_nt", "test_name", "stat_name", "stat_value", "p_value", "p_adj_bh",
-            "per_fragmentform_json"]
+            "n_forms_comparable", "n_forms_concordant", "per_fragmentform_json"]
 
 
 def parse_args():
@@ -61,7 +61,8 @@ def _plot_site(mod_t, unmod_t, meta, path, per_ff=None):
     ff = [(zn, d) for zn, d in (per_ff or {}).items()
           if d.get("median_tail_mod") is not None and d.get("median_tail_unmod") is not None
           and d["n_mod"] >= 3 and d["n_unmod"] >= 3]
-    ff.sort(key=lambda t: t[1]["median_tail_unmod"])
+    n_ff_total = len(per_ff or {})               # all fragmentforms with ANY reads at the site
+    ff.sort(key=lambda t: t[1]["delta_nt"])       # by within-form Δ, so a lone strong-effect form stands out
     two = len(ff) >= 1
     if two:
         fig, (ax, a2) = plt.subplots(1, 2, figsize=(11.2, max(4.2, 0.32 * len(ff) + 2.2)), layout="constrained")
@@ -77,21 +78,40 @@ def _plot_site(mod_t, unmod_t, meta, path, per_ff=None):
     ax.legend(frameon=False, fontsize=8)
     ax.set_title("pooled across fragmentforms", fontsize=9)
     if two:
+        xmax = max(max(d["median_tail_unmod"], d["median_tail_mod"]) for _, d in ff)
         for y, (zn, d) in enumerate(ff):
             um, mm = d["median_tail_unmod"], d["median_tail_mod"]
             a2.plot([um, mm], [y, y], color="#b8c2cc", lw=1.6, zorder=1)
             a2.scatter([um], [y], color="#8aa0b5", s=34, zorder=2)
             a2.scatter([mm], [y], color="#c1121f", s=34, zorder=2)
+            a2.text(xmax * 1.04, y, f"Δ={d['delta_nt']:+.0f}", va="center", ha="left", fontsize=6.5,
+                    color="#7a0c15" if d["delta_nt"] < 0 else "#1d6b4f")
         a2.set_yticks(range(len(ff)))
         a2.set_yticklabels([f"ZN{zn} (n {d['n_mod']}/{d['n_unmod']})" for zn, d in ff], fontsize=7.5)
+        a2.set_xlim(right=xmax * 1.22)
         a2.set_xlabel("median poly(A) tail (nt)")
-        a2.set_title("per fragmentform  (● unmodified, ● modified)", fontsize=9)
+        # be explicit that only forms with BOTH states well-sampled are comparable here
+        a2.set_title(f"per fragmentform  (● unmod, ● mod, Δ = mod−unmod)\n"
+                     f"{len(ff)} of {n_ff_total} forms with ≥3 reads in each state", fontsize=8)
         a2.grid(True, axis="x", ls="--", lw=0.5, alpha=0.4)
         for sp in ("top", "right"):
             a2.spines[sp].set_visible(False)
     d = float(np.median(mod_t) - np.median(unmod_t))
-    fig.suptitle(f"{meta['gene_name']}  {meta['mod_site_id']} — modified median {np.median(mod_t):.0f} vs "
-                 f"unmodified {np.median(unmod_t):.0f} nt  (Δ={d:+.0f}, p_adj={meta['p_adj_bh']:.1e})", fontsize=9)
+    # warn when the pooled effect is NOT reproduced within fragmentforms (single-form-driven / confounded)
+    n_comp = len(ff)
+    n_conc = sum(1 for _, dd in ff if (dd["delta_nt"] > 0) == (d > 0)) if d != 0 else 0
+    warn = ""
+    if n_comp <= 1:
+        warn = (f"CAUTION: only {n_comp} fragmentform comparable — pooled effect cannot be separated "
+                f"from fragmentform identity")
+    elif n_conc < (n_comp + 1) // 2:
+        warn = (f"CAUTION: not consistent across fragmentforms — only {n_conc}/{n_comp} shift in the "
+                f"pooled direction (effect may be driven by a subset)")
+    sup = (f"{meta['gene_name']}  {meta['mod_site_id']} — modified median {np.median(mod_t):.0f} vs "
+           f"unmodified {np.median(unmod_t):.0f} nt  (Δ={d:+.0f}, p_adj={meta['p_adj_bh']:.1e})")
+    # a dark-red title (with the caveat as a second line) flags "read carefully"; kept in the
+    # layout-managed suptitle so it never overlaps the axes, and ASCII-only for font safety.
+    fig.suptitle(sup + ("\n" + warn if warn else ""), fontsize=9, color=("#b00020" if warn else "black"))
     save_figure(fig, path, dpi=130, bbox_inches="tight")   # PNG + SVG
     plt.close(fig)
     return True
@@ -164,6 +184,15 @@ def _site_rows_for_chrom(mod_path, tail_map, args):
             "test_name": "mannwhitneyu", "stat_name": "U", "stat_value": round(float(stat), 4), "p_value": float(p),
             "per_fragmentform_json": json.dumps(per_ff),
         }
+        # Is the pooled shift reproduced WITHIN fragmentforms, or driven by a single form (which would
+        # make it inseparable from fragmentform identity)? Count comparable (>=3 reads/state) forms and
+        # how many shift in the SAME direction as the pooled effect.
+        _pooled = float(np.median(mod_t) - np.median(unmod_t))
+        _comp = [d for d in per_ff.values()
+                 if d["n_mod"] >= 3 and d["n_unmod"] >= 3 and d["delta_nt"] is not None]
+        row["n_forms_comparable"] = len(_comp)
+        row["n_forms_concordant"] = (sum(1 for d in _comp if (d["delta_nt"] > 0) == (_pooled > 0))
+                                     if _pooled != 0 else 0)
         rows.append(row)
         if collect:
             cands.append((float(p), row, mod_t, unmod_t, per_ff))
