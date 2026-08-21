@@ -336,9 +336,27 @@ def clean_columns(df):
 
 
 def read_tsv(path):
+    """Tolerant TSV reader for the report. A malformed or unexpectedly-compressed input must never
+    abort the whole report, so we sniff gzip magic bytes (a bgzipped file named .tsv) and skip
+    (with a warning) any ragged rows rather than raising."""
     if not path or not os.path.exists(path) or os.path.getsize(path) == 0:
         return pd.DataFrame()
-    return clean_columns(pd.read_csv(path, sep="\t"))
+    comp = "infer"
+    try:
+        with open(path, "rb") as fh:
+            if fh.read(2) == b"\x1f\x8b":
+                comp = "gzip"
+    except Exception:
+        pass
+    try:
+        return clean_columns(pd.read_csv(path, sep="\t", compression=comp, on_bad_lines="warn"))
+    except Exception as e:
+        try:
+            return clean_columns(pd.read_csv(path, sep="\t", compression=comp,
+                                             on_bad_lines="skip", engine="python"))
+        except Exception:
+            sys.stderr.write(f"[report] warning: could not read {path}: {e}\n")
+            return pd.DataFrame()
 
 
 def read_summary_metrics(paths):
@@ -479,6 +497,9 @@ def _scan_perff_by_allele(mol_mods_path, mol_snps_path, sites):
             chunk["start0"] = pd.to_numeric(chunk["start0"], errors="coerce")
             chunk = chunk.dropna(subset=["start0"])
             chunk["start0"] = chunk["start0"].astype(int)
+            # coerce target_modified up front so a NaN/blank can never raise inside the row loop
+            # (a raise there would drop the whole result and silently erase every allele-split figure)
+            chunk["_tmod"] = pd.to_numeric(chunk.get("target_modified", 0), errors="coerce").fillna(0).astype(int)
             if "usable" in chunk.columns:
                 chunk = chunk[chunk["usable"].astype(str).str.lower().isin(("true", "1"))]
             for (c, s, mc), grp in chunk.groupby(["chrom", "start0", "target_mod_code"]):
@@ -490,7 +511,7 @@ def _scan_perff_by_allele(mol_mods_path, mol_snps_path, sites):
                     if zi is None:
                         continue
                     sq = (str(r.get("sample", "")), str(r["qname"]))
-                    reads_at[key][sq] = (zi, int(float(r.get("target_modified", 0) or 0)))
+                    reads_at[key][sq] = (zi, int(r["_tmod"]))
     except Exception:
         return acc
     # pass 2: allele_class per read at each wanted SNP -> {snp_id: {(sample,qname): 'ref'/'alt'}}
@@ -504,9 +525,9 @@ def _scan_perff_by_allele(mol_mods_path, mol_snps_path, sites):
                     break
                 chunk = chunk[chunk["snp_id"].astype(str).isin(snp_want)]
                 for _, r in chunk.iterrows():
-                    a = str(r["allele_class"]).lower()
-                    if a in ("ref", "alt"):
-                        allele_at[str(r["snp_id"])][(str(r.get("sample", "")), str(r["qname"]))] = a
+                    # record the genotype for EVERY read covering the SNP (incl. third alleles), so the
+                    # join can tell "not covered" (→ na) apart from "covered but off-allele" (→ dropped).
+                    allele_at[str(r["snp_id"])][(str(r.get("sample", "")), str(r["qname"]))] = str(r["allele_class"]).lower()
         except Exception:
             allele_at = {snp: {} for snp in snp_want}
     # join
@@ -514,7 +535,13 @@ def _scan_perff_by_allele(mol_mods_path, mol_snps_path, sites):
         amap = allele_at.get(site_snp.get(key, ""), {})
         per_zn = acc.setdefault(key, {})
         for sq, (zi, mod) in rmap.items():
-            allele = amap.get(sq, "na")
+            geno = amap.get(sq)                    # None = read did not cover the SNP
+            if geno is None:
+                allele = "na"
+            elif geno in ("ref", "alt"):
+                allele = geno
+            else:
+                continue                           # covered but a third/off allele -> not ref/alt, drop
             cell = per_zn.setdefault(zi, {}).setdefault(allele, [0.0, 0])
             cell[0] += float(mod); cell[1] += 1
     return acc
@@ -815,8 +842,10 @@ def mod_mod_concordance_png(df, top_n=12):
         gene = str(r.get("gene_names", "")).split(";")[0]
         gene = "" if gene.strip().lower() in ("", "nan", "none") else gene[:12]
         ca, cb = str(r.get("mod_code_a", "")), str(r.get("mod_code_b", ""))
-        orr = r.get("odds_ratio", float("nan")); dist = r.get("distance_bp", "")
-        ttl = f"{gene} {ca}x{cb}\nd={dist}bp OR={orr:.1f}" if gene else f"{ca}x{cb}  d={dist}bp OR={orr:.1f}"
+        orr = pd.to_numeric(r.get("odds_ratio", None), errors="coerce")
+        orr_s = f"{orr:.1f}" if pd.notna(orr) else "n/a"
+        dist = r.get("distance_bp", "")
+        ttl = f"{gene} {ca}x{cb}\nd={dist}bp OR={orr_s}" if gene else f"{ca}x{cb}  d={dist}bp OR={orr_s}"
         ax.set_title(ttl, fontsize=8)
     for k in range(n, nrow * ncol):
         axes[k // ncol][k % ncol].axis("off")
@@ -994,7 +1023,7 @@ def polya_distribution_png(frag_df):
         order += [c for c in frag_df["classification"].dropna().unique() if c not in order]
         data = [pd.to_numeric(frag_df.loc[frag_df["classification"] == c, "median_tail"],
                               errors="coerce").dropna().values for c in order]
-        axes[1].boxplot(data, labels=order, showfliers=False)
+        axes[1].boxplot(data, tick_labels=order, showfliers=False)  # 'labels=' removed in mpl 3.11
         axes[1].set_ylabel("median tail (nt)")  # short label so the +12 font bump doesn't clip it
         axes[1].set_xlabel("fragmentform class")
         for t in axes[1].get_xticklabels():
@@ -1323,10 +1352,12 @@ def build_polya_section(frag_df, diffs_df, mod_df, top_n, diff_figs_dir="", mod_
         n_sig_diff = int((pd.to_numeric(diffs_df.get("p_adj_bh"), errors="coerce") < 0.05).sum()) if diffs_df is not None and not diffs_df.empty else 0
         n_sig_mod = int((pd.to_numeric(mod_df.get("p_adj_bh"), errors="coerce") < 0.05).sum()) if mod_df is not None and not mod_df.empty else 0
         parts.append("<h3>Summary Across All Poly(A) Tail Measurements</h3>")
+        _med = med_all.median()
+        _med_s = f"{_med:.0f} nt" if pd.notna(_med) else "n/a"
         parts.append(
             "<ul>"
             f"<li><b>{len(frag_df):,}</b> fragmentforms with a tail-length distribution; "
-            f"overall median <b>{med_all.median():.0f} nt</b></li>"
+            f"overall median <b>{_med_s}</b></li>"
             f"<li><b>{n_sig_diff:,}</b> genes with differential tail length between their fragmentforms (FDR&lt;0.05)</li>"
             f"<li><b>{n_sig_mod:,}</b> modification sites where tail length differs by modification state (FDR&lt;0.05)</li>"
             "</ul>"
@@ -1483,7 +1514,33 @@ def build_classification_section(class_df, private_df, class_figs_dir, arch_figs
             m &= df["event"] == event
         return int(m.sum())
 
-    total = sum(count(b) for b in CLASS_BUCKET_ORDER) or 1
+    # Which rows the known bucket/event enumeration will actually render (PRIVATE from private_df,
+    # the rest from class_df). Anything NOT covered here is a taxonomy-drift row (e.g. the classifier
+    # emitted a newer label than this report knows) — surface it in a catch-all rather than let it
+    # vanish and skew the denominator.
+    def _rendered_mask(df, buckets):
+        if df is None or df.empty or "bucket" not in df.columns:
+            return None
+        m = pd.Series(False, index=df.index)
+        for b in buckets:
+            for e in CLASS_TAXONOMY.get(b, []):
+                sub = (df["bucket"] == b)
+                if "event" in df.columns:
+                    sub &= (df["event"] == e)
+                m |= sub
+        return m
+
+    leftover_frames = []
+    pr = _rendered_mask(private_df, ["PRIVATE"])
+    if pr is not None and (~pr).any():
+        leftover_frames.append(private_df[~pr])
+    cr = _rendered_mask(class_df, [b for b in CLASS_BUCKET_ORDER if b != "PRIVATE"])
+    if cr is not None and (~cr).any():
+        leftover_frames.append(class_df[~cr])
+    leftover_df = pd.concat(leftover_frames, ignore_index=True) if leftover_frames else pd.DataFrame()
+
+    known_total = sum(count(b, e) for b in CLASS_BUCKET_ORDER for e in CLASS_TAXONOMY[b])
+    total = (known_total + len(leftover_df)) or 1
 
     def count_dir(bucket, event, direction):
         df = src_for(bucket)
@@ -1591,6 +1648,22 @@ def build_classification_section(class_df, private_df, class_figs_dir, arch_figs
             "</details>"
         )
 
+    # catch-all: taxonomy-drift rows not in the known bucket/event constants — listed, never dropped
+    if not leftover_df.empty:
+        nlo = len(leftover_df)
+        lo_cols = [c for c in ["gene_name", "mod_code", "chrom", "start0", "strand",
+                               "bucket", "event", "direction", "structural_delta_nt"]
+                   if c in leftover_df.columns]
+        tree.append(
+            "<details class='report-subtree' open>"
+            f"<summary><h2 class='bucket'>UNRECOGNIZED — {nlo} site{'s' if nlo != 1 else ''}</h2></summary>"
+            "<div class='section-body'><p class='section-intro'>Sites whose bucket/event is not in this "
+            "report's taxonomy constants (e.g. the classifier emitted a newer label than the report "
+            "knows). They are listed here rather than silently dropped, so the counts and percentages "
+            "above stay complete.</p>"
+            + df_to_html(leftover_df[lo_cols] if lo_cols else leftover_df, max_rows=top_n)
+            + "</div></details>")
+
     return section(title, overview + "".join(tree), intro=intro)
 
 
@@ -1686,10 +1759,18 @@ def main():
     n_tx = len(class_df)
     n_genes = class_df["gene_index"].nunique() if "gene_index" in class_df.columns and not class_df.empty else 0
     n_metagenes = class_df["metagene_index"].nunique() if "metagene_index" in class_df.columns and not class_df.empty else 0
-    max_partitions = class_df["metagene_partition_count"].max() if "metagene_partition_count" in class_df.columns and not class_df.empty else 0
-    total_reads = class_df["read_support"].astype(float).sum() if "read_support" in class_df.columns and not class_df.empty else 0
-    trunc_reads = class_df["trunc_assigned_reads"].astype(float).sum() if "trunc_assigned_reads" in class_df.columns and not class_df.empty else 0
-    exact_reads = class_df["exact_chain_reads"].astype(float).sum() if "exact_chain_reads" in class_df.columns and not class_df.empty else 0
+    def _num_col(col, reduce="sum"):
+        # numeric reduction that tolerates non-numeric cells (coerce->NaN) instead of aborting the
+        # whole report on a stray 'NA'; also avoids a lexical max on an object-typed count column.
+        if col not in class_df.columns or class_df.empty:
+            return 0
+        s = pd.to_numeric(class_df[col], errors="coerce")
+        v = s.max() if reduce == "max" else s.sum()
+        return 0 if pd.isna(v) else v
+    max_partitions = _num_col("metagene_partition_count", "max")
+    total_reads = _num_col("read_support")
+    trunc_reads = _num_col("trunc_assigned_reads")
+    exact_reads = _num_col("exact_chain_reads")
     overview_cards.extend([
         ("Fragmentforms", fmt_int(n_tx)),
         ("Genes", fmt_int(n_genes)),
@@ -1807,6 +1888,8 @@ def main():
                 block_region[b["block_id"]] = f"{b['chrom']}:{int(b['start1'])}-{int(b['end1'])}"
 
     def _with_region(df):
+        if "block_id" not in df.columns:   # malformed input without the join key -> pass through
+            return df.copy()
         out = df.copy()
         out.insert(1, "block_region", out["block_id"].map(block_region).fillna(""))
         return out

@@ -246,7 +246,7 @@ def _intron_inside(exons, lo, hi):
     for i in range(len(exons) - 1):
         istart = exons[i][1]      # donor: end of exon i
         iend = exons[i + 1][0]    # acceptor: start of exon i+1
-        if lo < istart and iend < hi:
+        if lo < istart and iend < hi and istart < iend:   # require a real (positive-length) intron
             return True
     return False
 
@@ -427,8 +427,11 @@ def classify_tree(gene, pos, hiZN, loZN, iso, *, tes_tol, ejc_nt):
     else:
         polar = 'DISTAL_HIGHER'
 
-    # (a) same last exon, different poly(A) site -> ALT_POLYA_SITE
-    if hi_last and lo_last and ht is not None and lt is not None and abs(ht - lt) > tes_tol:
+    # (a) SAME last exon (shared acceptor), different poly(A) site -> ALT_POLYA_SITE (tandem APA).
+    # A DIFFERENT acceptor means a mutually-exclusive alternative last exon, which must fall through
+    # to (b) so the acceptor/splicing shift is named rather than mislabeled as tandem APA.
+    if (hi_last and lo_last and ht is not None and lt is not None and abs(ht - lt) > tes_tol
+            and ehi and elo and same_last_exon_start(ehi, elo, strand, tes_tol)):
         info['delta_nt'] = abs(ht - lt)
         return 'SHARED_LOCAL', 'ALT_POLYA_SITE', polar, info
 
@@ -452,14 +455,19 @@ def classify_tree(gene, pos, hiZN, loZN, iso, *, tes_tol, ejc_nt):
         long_don = don_hi if hi_longer else don_lo
         long_tes = ht if hi_longer else lt
         short_tes = lt if hi_longer else ht
+        long_is_last = hi_last if hi_longer else lo_last
         exon_dir = 'LONGER_EXON_HIGHER' if hi_longer else 'SHORTER_EXON_HIGHER'
         acc_diff = (acc_hi != acc_lo) and not (hi_first or lo_first)   # 5' end is the blind spot
         don_diff = (don_hi != don_lo)
         if acc_diff or don_diff:
-            # IPA_EXTENSION: the longer form's donor boundary IS its own poly(A) site (reads into the
-            # intron and terminates there), and it is NOT co-terminal with the other form.
+            # IPA_EXTENSION: the longer form's base exon IS its terminal exon and ends at its own
+            # poly(A) site (reads into the intron and terminates there), NOT co-terminal with the other
+            # form. Requiring the base exon to be terminal prevents an internal exon whose splice donor
+            # merely happens to sit within tes_tol of a short downstream terminal exon from being
+            # mislabeled IPA (that is really an ALT_DONOR).
             not_coterm = long_tes is not None and (short_tes is None or abs(long_tes - short_tes) > tes_tol)
-            if don_diff and long_tes is not None and abs(long_don - long_tes) <= tes_tol and not_coterm:
+            if (don_diff and long_is_last and long_tes is not None
+                    and abs(long_don - long_tes) <= tes_tol and not_coterm):
                 info['delta_nt'] = abs(don_hi - don_lo)
                 d = 'EXTENDS_TO_PA_HIGHER' if hi_longer else 'EXTENDS_TO_PA_LOWER'
                 return 'SHARED_LOCAL', 'IPA_EXTENSION', d, info
@@ -949,7 +957,10 @@ def main():
         # comparison against the 1-based GTF exon coords in classify()/status_in()/junctions --
         # else every site is tested 1 bp upstream of its true base and boundary/EJC calls are
         # systematically off by one.
-        gene = r['gene_name']; pos = int(r['start0']); cpos = pos + 1; strand = r['strand']
+        try:
+            gene = r['gene_name']; pos = int(r['start0']); cpos = pos + 1; strand = r['strand']
+        except (ValueError, TypeError, KeyError):
+            continue  # one malformed row must not abort the whole classification stage
         n_considered += 1
 
         try:
