@@ -79,12 +79,22 @@ COLUMN_DEFINITIONS = {
     "assignment_mode": "Recorded suffix-family assignment policy used during fragmentform assembly.",
     "single_gene_kept": "Reads in an overlapping-gene region where only ONE gene's fragmentforms survived the "
                         "assembly/support filters, so the read is unambiguously assigned to that single gene — there "
-                        "was no cross-gene conflict left to resolve.",
-    "multi_gene_no_zt": "Reads spanning ≥2 overlapping genes' fragmentforms that carried NO fragmentform (ZT) tag: "
-                        "the read could not be pinned to a specific fragmentform, so it could not be resolved to one "
-                        "gene and was scrapped (`multi_gene_action`).",
+                        "was no cross-gene conflict left to resolve. Kept.",
+    "multi_gene_kept_by_zt": "Reads spanning ≥2 overlapping genes' fragmentforms that DID carry a fragmentform (ZT) "
+                             "tag whose fragmentform belongs to one of those overlapping genes: the read is resolved "
+                             "to that single gene and kept. Always retained regardless of `multi_gene_action`.",
+    "multi_gene_no_zt": "Reads spanning ≥2 overlapping genes' fragmentforms that carried NO fragmentform (ZT) tag, so "
+                        "they could not be pinned to a single gene. This bucket counts such reads that were RETAINED — "
+                        "the default `multi_gene_action=scrap_conflict` (and `keep`) keep them; only `scrap_unresolved` "
+                        "removes them, in which case they are counted under `multi_gene_scrapped` instead.",
+    "multi_gene_scrapped": "Multi-gene reads that were removed by `multi_gene_action`: reads whose ZT-assigned gene is "
+                           "not among the overlapping genes (`scrap_conflict`, the default), plus no-ZT reads under "
+                           "`scrap_unresolved`. These reads are excluded from per-ZN pileup and genotype scans.",
     "zero_gene_kept": "Reads in an overlapping-gene region where NO gene's fragmentforms passed the filters, so the "
-                      "read maps to zero retained fragmentforms and is scrapped.",
+                      "read maps to zero retained fragmentforms. This bucket counts such reads that were RETAINED "
+                      "(`zero_gene_action=keep`, the default); under `zero_gene_action=scrap` they are removed and "
+                      "counted under `zero_gene_scrapped` instead.",
+    "zero_gene_scrapped": "Reads mapping to zero retained fragmentforms that were removed under `zero_gene_action=scrap`.",
     # --- per-sample read funnel (per_sample_read_stats) ---
     "total_reads_bam": "Total alignment records in the input BAM for this sample.",
     "total_mapped": "Reads with a mapped primary alignment.",
