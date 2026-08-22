@@ -1766,8 +1766,13 @@ class ModulatorPipeline:
                 "--out-tsv", str(self.paths.geno_snp_at_mod_base),
                 "--verbose",
             ]
-            if self._nonempty(self.paths.zn_diff_results):
-                args += ["--annotate", str(self.paths.zn_diff_results)]
+            # Annotate BOTH the between-isoform differential table and snp_mod_assoc, so each
+            # SNP<->mod association also carries whether its modified base coincides with a
+            # self-reporting/ablating variant (the circularity flag).
+            annotate = [p for p in (self.paths.zn_diff_results, self.paths.geno_snp_mod)
+                        if self._nonempty(p)]
+            if annotate:
+                args += ["--annotate", *[str(p) for p in annotate]]
             self.run_python_script("find_snp_at_mod_base.py", args, label="find_snp_at_mod_base")
 
     def stage_apa_motifs(self) -> None:

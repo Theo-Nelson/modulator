@@ -142,12 +142,19 @@ def detect(snps, mods):
 
 def annotate_tsv(path, hits):
     """Add `snp_at_mod_base` (0/1) + `snp_at_mod_base_class` columns in place
-    (idempotent), joining on (chrom, start0, mod_code)."""
+    (idempotent), joining on (chrom, mod-start0, mod-code).
+
+    The mod-site position column is `start0` (mod-diff tables) or `mod_start0`
+    (snp_mod_assoc); the mod-code column is `mod_code` or `target_mod_code`. This lets
+    the same flag be surfaced onto snp_mod_assoc, whose rows would otherwise be silently
+    skipped for lacking a literal `start0`/`mod_code` column."""
     try:
         with open(path) as fh:
             rr = csv.DictReader(fh, delimiter="\t")
             fields = list(rr.fieldnames or [])
-            if "chrom" not in fields or "start0" not in fields:
+            pos_col = "start0" if "start0" in fields else ("mod_start0" if "mod_start0" in fields else None)
+            mc_col = "mod_code" if "mod_code" in fields else ("target_mod_code" if "target_mod_code" in fields else None)
+            if "chrom" not in fields or pos_col is None:
                 return False
             rows = list(rr)
     except (OSError, csv.Error):
@@ -156,8 +163,8 @@ def annotate_tsv(path, hits):
         if c not in fields:
             fields.append(c)
     for row in rows:
-        ch = row.get("chrom"); s0 = _to_int(row.get("start0"))
-        st = row.get("strand", ""); mc = str(row.get("mod_code", ""))
+        ch = row.get("chrom"); s0 = _to_int(row.get(pos_col))
+        st = row.get("strand", ""); mc = str(row.get(mc_col, "")) if mc_col else ""
         cls = hits.get((ch, s0, st, mc))
         if cls is None:
             # progressively looser match for differential tables missing strand and/or mod_code

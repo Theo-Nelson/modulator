@@ -342,13 +342,25 @@ def external_sort_tsv(
     ensure_dir(os.path.dirname(out_path) or ".")
     ensure_dir(tmpdir)
 
+    # Isolate this sort's chunk files in a private subdir. Two external sorts that share the
+    # same --tmpdir -- concurrent aggregate_by_gene invocations (jobs>1), or the RAW and
+    # FILTERED per-gene sorts within one run -- would otherwise both write chunk_00000.tsv,
+    # chunk_00001.tsv, ... into tmpdir and silently corrupt each other's intermediates.
+    work = tempfile.mkdtemp(prefix="agg_sort_", dir=tmpdir)
+    try:
+        _external_sort_into(in_path, out_path, key_func, work, chunk_lines, verbose)
+    finally:
+        shutil.rmtree(work, ignore_errors=True)
+
+
+def _external_sort_into(in_path, out_path, key_func, work, chunk_lines, verbose):
     chunks: List[str] = []
     buf: List[str] = []
     n_in = 0
 
     def write_chunk(lines: List[str], idx: int) -> str:
         lines.sort(key=key_func)
-        cpath = os.path.join(tmpdir, f"chunk_{idx:05d}.tsv")
+        cpath = os.path.join(work, f"chunk_{idx:05d}.tsv")
         with open(cpath, "w") as f:
             f.writelines(lines)
         return cpath

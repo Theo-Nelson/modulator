@@ -117,6 +117,26 @@ def main():
         return
 
     fa = pysam.FastaFile(args.reference_fa)
+    fa_contigs = set(fa.references)
+    # Preflight: _windows() silently returns (None, None) for a contig absent from the FASTA,
+    # so a reference-name mismatch (e.g. 'chr1' vs '1') would skip every site and emit an
+    # empty table with no signal. Detect it here: hard-fail on zero overlap, warn on partial.
+    summary_contigs = set(df["chrom"].astype(str).unique())
+    if summary_contigs and not (summary_contigs & fa_contigs):
+        sys.exit(
+            f"[apa_motifs] ERROR: none of the {len(summary_contigs)} contig name(s) in the "
+            f"classification summary are present in the reference FASTA ({args.reference_fa}). "
+            f"Example summary contigs: {sorted(summary_contigs)[:5]}; example FASTA contigs: "
+            f"{sorted(fa_contigs)[:5]}. This is almost always a reference-name mismatch."
+        )
+    missing_contigs = sorted(summary_contigs - fa_contigs)
+    if missing_contigs:
+        print(
+            f"[apa_motifs] WARNING: {len(missing_contigs)} contig(s) in the classification summary "
+            f"are absent from the reference FASTA; their sites will be skipped: "
+            f"{missing_contigs[:10]}{' ...' if len(missing_contigs) > 10 else ''}",
+            file=sys.stderr, flush=True,
+        )
     gene_col = "gtf_gene_name" if "gtf_gene_name" in df.columns else ("gene_name" if "gene_name" in df.columns else None)
     rows = []
     for r in df.itertuples(index=False):
