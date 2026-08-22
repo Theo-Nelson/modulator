@@ -78,17 +78,21 @@ def load_fragmentforms(gtf_path):
             if len(f) < 9:
                 continue
             typ, attr = f[2], f[8]
+            # key on the FRAGMENTFORM (transcript_id), NOT (gene, zn_index): zn_index is a graph colour
+            # that non-overlapping fragmentforms of a gene SHARE, so keying on it pools their exons and
+            # fabricates junctions that span between exons of DIFFERENT fragmentforms.
+            tid = _attr(attr, "transcript_id")
             gname = _attr(attr, "ref_gene_name") or _attr(attr, "gene_id")
-            zn = _attr(attr, "zn_index") or _attr(attr, "transcript_index")
-            if not gname or not zn:
+            if not tid or not gname:
                 continue
-            key = (gname, zn)
+            key = tid
             if typ == "exon":
                 exons[key].append((int(f[3]), int(f[4])))
             elif typ == "transcript":
                 rs = _attr(attr, "read_support")
                 meta[key] = dict(
-                    chrom=f[0], strand=f[6],
+                    chrom=f[0], strand=f[6], gene_name=gname,
+                    zn_index=_attr(attr, "zn_index") or _attr(attr, "transcript_index"),
                     zt_label=_attr(attr, "zt_label"),
                     gene_id=_attr(attr, "gene_id"),
                     read_support=int(rs) if rs.isdigit() else 0,
@@ -98,6 +102,7 @@ def load_fragmentforms(gtf_path):
         exl.sort()
         m = meta.get(key, {})
         out[key] = dict(chrom=m.get("chrom", ""), strand=m.get("strand", "+"), exons=exl,
+                        gene_name=m.get("gene_name", ""), zn_index=m.get("zn_index", ""),
                         zt_label=m.get("zt_label", ""), gene_id=m.get("gene_id", ""),
                         read_support=m.get("read_support", 0))
     return out
@@ -186,8 +191,9 @@ def main():
     gene_junctions = defaultdict(dict)
     gene_forms = defaultdict(set)
 
-    for (gname, zn), d in sorted(iso.items()):
-        gene_forms[gname].add(zn)
+    for key, d in sorted(iso.items()):
+        gname, zn = d["gene_name"], d["zn_index"]
+        gene_forms[gname].add(key)   # count DISTINCT fragmentforms (transcript_id), not shared colours
         chrom, strand = d["chrom"], d["strand"]
         for (i_s, i_e) in introns_of(d["exons"]):
             donor, acceptor = junction_motif(fa, chrom, i_s, i_e, strand)

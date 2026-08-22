@@ -95,7 +95,13 @@ def load_ref_codons(ref_gtf):
             if not tid:
                 continue
             key = "start" if f[2] == "start_codon" else "stop"
-            codons[tid][key] = (int(f[3]) - 1, int(f[4]))
+            # GENCODE emits TWO (or three) features for a codon that straddles an exon junction;
+            # assigning would let the LAST fragment win and anchor cds_start_t/cds_end_t to the 2nd/3rd
+            # base. MERGE to the genomic extent (min start, max end): downstream uses only the codon's
+            # 5'-most and 3'-most bases, both of which are real codon bases at these extremes.
+            s0, e0 = int(f[3]) - 1, int(f[4])
+            prev = codons[tid][key]
+            codons[tid][key] = (s0, e0) if prev is None else (min(prev[0], s0), max(prev[1], e0))
     return codons
 
 

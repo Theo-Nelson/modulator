@@ -26,7 +26,7 @@ from genotype_utils import benjamini_hochberg, shard_tsv_by_chrom, tsv_header
 from plot_utils import save_figure
 
 _MOD_WANT = ["sample", "qname", "mod_site_id", "chrom", "target_mod_code", "target_modified",
-             "gene_name", "state_detail", "usable", "fail", "within_alignment", "ZN"]
+             "gene_name", "state_detail", "usable", "fail", "within_alignment", "ZN", "ZT"]
 OUT_COLS = ["mod_site_id", "chrom", "gene_name", "target_mod_code",
             "n_reads", "n_modified", "n_unmodified", "median_tail_modified", "median_tail_unmodified",
             "effect_median_diff_nt", "test_name", "stat_name", "stat_value", "p_value", "p_adj_bh",
@@ -159,17 +159,26 @@ def _site_rows_for_chrom(mod_path, tail_map, args):
         # per-FRAGMENTFORM (ZN) breakdown: does the modified-vs-unmodified tail gap hold WITHIN a
         # fragmentform, or is it just the modification tracking a differently-tailed fragmentform?
         per_ff = {}
-        if "ZN" in g.columns:
-            for zn, zg in g.groupby("ZN"):
-                try:
-                    zi = int(float(zn))
-                except (TypeError, ValueError):
-                    continue  # unassigned reads (blank ZN) belong to no fragmentform
+        # group by the FRAGMENTFORM (ZT), NOT ZN: ZN is a graph colour that non-overlapping
+        # fragmentforms of a gene SHARE, so grouping by it pools them and computes the per-fragmentform
+        # confounder guard on gene-pooled reads. Fall back to ZN only if ZT is absent.
+        _ffcol = "ZT" if "ZT" in g.columns else ("ZN" if "ZN" in g.columns else None)
+        if _ffcol:
+            for ffval, zg in g.groupby(_ffcol):
+                if _ffcol == "ZN":
+                    try:
+                        ffkey = int(float(ffval))
+                    except (TypeError, ValueError):
+                        continue  # unassigned reads (blank ZN) belong to no fragmentform
+                else:
+                    ffkey = str(ffval).strip()
+                    if not ffkey:
+                        continue  # unassigned reads (blank ZT) belong to no fragmentform
                 mt = zg.loc[zg["target_modified"] == 1, "tail_len"].values
                 ut = zg.loc[zg["target_modified"] == 0, "tail_len"].values
                 if mt.size == 0 and ut.size == 0:
                     continue
-                per_ff[zi] = {
+                per_ff[ffkey] = {
                     "n_mod": int(mt.size), "n_unmod": int(ut.size),
                     "median_tail_mod": round(float(np.median(mt)), 1) if mt.size else None,
                     "median_tail_unmod": round(float(np.median(ut)), 1) if ut.size else None,
