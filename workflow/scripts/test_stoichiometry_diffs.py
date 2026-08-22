@@ -149,6 +149,9 @@ def summarize_site(df_site, min_cov, which_test, pseudocount, alternative):
     # per-transcript totals
     grp = (df_site.groupby("ZN_transcript_index", as_index=False)[["Nvalid_cov", "Nmod"]]
                  .sum())
+    # clip Nmod to coverage: an upstream Nmod > Nvalid_cov glitch would otherwise make Nunmod negative
+    # and blow up the contingency test (ValueError) -- the sibling test_condition_mod_diffs guards this too.
+    grp["Nmod"] = grp[["Nmod", "Nvalid_cov"]].min(axis=1)
     grp["Nunmod"] = grp["Nvalid_cov"] - grp["Nmod"]
     grp = grp.sort_values("ZN_transcript_index")
 

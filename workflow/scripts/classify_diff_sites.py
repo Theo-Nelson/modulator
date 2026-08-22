@@ -391,7 +391,7 @@ def exon_gap(a, b):
 # class_key = BUCKET__EVENT__DIRECTION
 # =============================================================================
 TAXONOMY = {
-    "PRIVATE":       ["SKIPPED_EXON", "INTRONIC_POLYA", "ALT_LAST_EXON"],
+    "PRIVATE":       ["SKIPPED_EXON", "INTRONIC_POLYA", "THREE_PRIME_EXTENSION", "ALT_LAST_EXON"],
     "SHARED_LOCAL":  ["ALT_DONOR", "ALT_ACCEPTOR", "ALT_EXON", "ALT_POLYA_SITE", "RETAINED_INTRON",
                       "IPA_EXTENSION", "NEAR_ALT_JUNCTION"],
     "SHARED_DISTAL": ["DISTAL_APA", "DISTAL_SPLICING"],
@@ -456,9 +456,16 @@ def classify_tree(gene, pos, hiZN, loZN, iso, *, tes_tol, ejc_nt):
             return 'PRIVATE', 'INTRONIC_POLYA', 'IPA_TRANSCRIPT_HIGHER', info
         if sh == 'exonic_terminal':
             th, tl = terminal_exon(ihi['exons'], strand), terminal_exon(ilo['exons'], strand)
+            # DISTINGUISH tandem APA from a true alternative last exon: if the two terminal exons SHARE
+            # their acceptor (start), the base sits in the higher form's 3'UTR EXTENSION of one shared
+            # last exon (tandem/distal poly(A)), NOT a mutually-exclusive alternative last exon. ~2/3 of
+            # these were mislabelled ALT_LAST_EXON because same_last_exon_start() was never called here.
+            if th and tl and same_last_exon_start(th, tl, strand, tes_tol):
+                info['delta_nt'] = abs(ihi['tes'] - ilo['tes']) if (ihi['tes'] is not None and ilo['tes'] is not None) else 0
+                return 'PRIVATE', 'THREE_PRIME_EXTENSION', 'DISTAL_POLYA_HIGHER', info
             info['delta_nt'] = exon_gap(th, tl)
-            # the two forms use DIFFERENT (mutually-exclusive) last exons, so their lengths are not
-            # comparable; the meaningful axis is WHERE the higher form's alternative last exon sits.
+            # DIFFERENT acceptors -> mutually-exclusive last exons, so their lengths are not comparable;
+            # the meaningful axis is WHERE the higher form's alternative last exon sits.
             d = _alt_last_dir(ihi['tes'], ilo['tes'], strand)
             return 'PRIVATE', 'ALT_LAST_EXON', d, info
         ehi = _exon_containing(ihi['exons'], pos)
@@ -565,7 +572,7 @@ CATEGORY_ORDER = [
 ]
 
 
-def scan_private_sites(zn_long_path, iso, genes, *, min_frac, min_cov):
+def scan_private_sites(zn_long_path, iso, genes, *, min_frac, min_cov, tes_tol=25):
     """Coverage-INDEPENDENT PRIVATE detection.
 
     The differential test only reaches a site when >=2 fragmentforms are covered there, so a base
@@ -623,11 +630,17 @@ def scan_private_sites(zn_long_path, iso, genes, *, min_frac, min_cov):
         if ihi['arch'] == 'IPA' and sh == 'exonic_terminal':
             event, direction, delta = 'INTRONIC_POLYA', 'IPA_TRANSCRIPT_HIGHER', ''
         elif sh == 'exonic_terminal':
-            event = 'ALT_LAST_EXON'
             alo = _iso_at(iso, g, absent[0], pos)
             th = terminal_exon(ihi['exons'], strand); tl = terminal_exon(alo['exons'], strand)
-            delta = exon_gap(th, tl)
-            direction = _alt_last_dir(ihi['tes'], alo['tes'], strand)
+            # shared last-exon acceptor -> the base is in the carrier's 3'UTR EXTENSION (tandem/distal
+            # poly(A)), not a mutually-exclusive alternative last exon (~2/3 of these were mislabelled).
+            if th and tl and same_last_exon_start(th, tl, strand, tes_tol):
+                event, direction = 'THREE_PRIME_EXTENSION', 'DISTAL_POLYA_HIGHER'
+                delta = abs(ihi['tes'] - alo['tes']) if (ihi['tes'] is not None and alo['tes'] is not None) else ''
+            else:
+                event = 'ALT_LAST_EXON'
+                delta = exon_gap(th, tl)
+                direction = _alt_last_dir(ihi['tes'], alo['tes'], strand)
         else:
             e = _exon_containing(ihi['exons'], pos)
             event, direction, delta = 'SKIPPED_EXON', 'WITH_EXON_HIGHER', (e[1] - e[0]) if e else ''
@@ -1097,7 +1110,7 @@ def main():
     if args.private_out_tsv and args.zn_long and os.path.exists(args.zn_long):
         priv_rows, priv_cols = scan_private_sites(
             args.zn_long, iso, genes,
-            min_frac=args.private_min_frac, min_cov=args.private_min_cov)
+            min_frac=args.private_min_frac, min_cov=args.private_min_cov, tes_tol=args.tes_tol)
         os.makedirs(os.path.dirname(args.private_out_tsv) or '.', exist_ok=True)
         with open(args.private_out_tsv, 'w', newline='') as out:
             w = csv.writer(out, delimiter='\t')

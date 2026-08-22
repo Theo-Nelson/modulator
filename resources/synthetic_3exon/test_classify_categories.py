@@ -37,10 +37,15 @@ CASES = [
       2: ([(1000, 1200), (3000, 3500)], 3500, 100)},
      2100, 1, 2, "PRIVATE", "SKIPPED_EXON"),
 
-    ("PRIVATE_ALT_LAST_EXON",       # base in hi's distal terminal exon, absent from lo entirely
+    ("PRIVATE_ALT_LAST_EXON",       # base in hi's distal terminal exon (DIFFERENT acceptor), absent from lo
      {1: ([(1000, 1200), (2000, 2500), (5000, 6000)], 6000, 100),
       2: ([(1000, 1200), (2000, 3500)], 3500, 100)},
      5500, 1, 2, "PRIVATE", "ALT_LAST_EXON"),
+
+    ("PRIVATE_THREE_PRIME_EXTENSION",   # base in hi's 3'UTR extension of a SHARED last exon (tandem APA)
+     {1: ([(1000, 1200), (2000, 3500)], 3500, 100),    # hi: last exon 2000-3500, distal poly(A)
+      2: ([(1000, 1200), (2000, 2500)], 2500, 100)},   # lo: SAME acceptor 2000, ends at 2500 (proximal)
+     3200, 1, 2, "PRIVATE", "THREE_PRIME_EXTENSION"),
 
     ("SHARED_LOCAL_ALT_ACCEPTOR",   # base's exon shares its donor but uses a different acceptor (5' start)
      {1: ([(1000, 1200), (2000, 2500), (3000, 3500)], 3500, 100),

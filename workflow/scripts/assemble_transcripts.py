@@ -534,12 +534,14 @@ def _write_zt_tagged_sample(task):
     _seen_w = 0
     with pysam.AlignmentFile(in_path, "rb", threads=io_threads) as inp, \
          pysam.AlignmentFile(out_path, "wb", header=inp.header, threads=io_threads) as outw:
+        # inp.fetch() (no until_eof) yields only PLACED alignments -- the unmapped-read branch that
+        # used to sit here was dead code (unmapped reads never reached it), so it is removed rather than
+        # left implying this writer preserves them. modkit uses only mapped reads, so nothing downstream
+        # needs the unmapped records in the cleaned BAM.
         for aln in inp.fetch():
             _seen_w += 1
             if _seen_w % 1_000_000 == 0:
                 _drop_page_cache(in_path, _bgzf_coffset(inp))
-            if aln.is_unmapped:
-                outw.write(aln); continue
             if primary_only and (aln.is_secondary or aln.is_supplementary):
                 continue
             tup = sample_assign.get(aln.query_name) if sample_assign else None
