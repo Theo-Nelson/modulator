@@ -167,9 +167,19 @@ def main():
                                     "div3p": int(getattr(r, "divergence_from_3p_nt", 0) or 0)})
         payload[gene] = rec
 
-    ranked = sorted(payload.values(), key=lambda r: (-r["reads"], r["gene"]))[:args.max_genes]
+    ranked_all = sorted(payload.values(), key=lambda r: (-r["reads"], r["gene"]))
+    ranked = ranked_all[:args.max_genes]
+    # DISCLOSE truncation: --max-genes silently dropped ~half the genes on real data, so a search for a
+    # present gene returned "No match" with nothing on the page saying it was omitted.
+    disp_title = args.title
+    if len(ranked_all) > len(ranked):
+        disp_title = f"{args.title} — showing top {len(ranked):,} of {len(ranked_all):,} genes by read support (--max-genes)"
+        print(f"[browser] NOTE: {len(ranked_all) - len(ranked):,} of {len(ranked_all):,} genes omitted "
+              f"(--max-genes={args.max_genes}); page shows the top {len(ranked):,} by read support.",
+              file=__import__("sys").stderr, flush=True)
     data = {"genes": {r["gene"]: r for r in ranked},
-            "index": [{"g": r["gene"], "n": len(r["forms"]), "r": r["reads"], "c": r["chrom"]} for r in ranked]}
+            "index": [{"g": r["gene"], "n": len(r["forms"]), "r": r["reads"], "c": r["chrom"]} for r in ranked],
+            "n_total_genes": len(ranked_all), "n_shown": len(ranked)}
     os.makedirs(os.path.dirname(args.out_html) or ".", exist_ok=True)
     # Embed the JSON so it cannot break out of <script> or terminate it early: a gene_name / contrast
     # containing '</script>' would otherwise close the block and the page would never initialise.
@@ -178,7 +188,7 @@ def main():
                  .replace("<", "\\u003c").replace(">", "\\u003e").replace("&", "\\u0026")
                  .replace("\u2028", "\\u2028").replace("\u2029", "\\u2029"))
     with open(args.out_html, "w") as fh:
-        fh.write(_HTML.replace("__TITLE__", html.escape(args.title))
+        fh.write(_HTML.replace("__TITLE__", html.escape(disp_title))
                       .replace("__DATA__", data_json))
     if args.verbose:
         print(f"[browser] wrote {len(ranked):,} genes -> {args.out_html} "
