@@ -122,8 +122,11 @@ def main():
     genes = feat.index.get_level_values(0)
     tot = gene_tot.reindex(genes)[samples].to_numpy(dtype=float)
     K = feat[samples].to_numpy(dtype=float)
+    K = np.minimum(K, tot)   # defensive: a feature count can never exceed its gene total
     gidx = np.array([0 if s in ref_s else 1 for s in samples], dtype=int)
 
+    # NOTE: requiring EVERY sample >= min_gene_reads (not >= min_samples_per_group covered per group)
+    # silently drops features covered in most-but-not-all replicates; documented in the stress report.
     keep = (tot.min(axis=1) >= args.min_gene_reads)
     # a feature that is the gene's ONLY one is 100% by construction -> nothing to compare. Use an EXACT
     # integer compare (K == tot): np.isclose's default rtol=1e-5 would wrongly drop a feature that is
@@ -150,8 +153,10 @@ def main():
         gene, feature = idx[i]
         with np.errstate(divide="ignore", invalid="ignore"):
             frac_i = np.where(tot[i] > 0, K[i] / tot[i], np.nan)
-        per_rep = {"reference": {s: round(float(frac_i[j]), 4) for j, s in enumerate(samples) if s in ref_s},
-                   "test": {s: round(float(frac_i[j]), 4) for j, s in enumerate(samples) if s in test_s}}
+        per_rep = {"reference": {s: round(float(frac_i[j]), 4)
+                                 for j, s in enumerate(samples) if s in ref_s and np.isfinite(frac_i[j])},
+                   "test": {s: round(float(frac_i[j]), 4)
+                            for j, s in enumerate(samples) if s in test_s and np.isfinite(frac_i[j])}}
         rows.append({
             "contrast": name, "feature_type": args.feature, "feature": feature, "gene_name": gene,
             "n_reference": r["n_reference"], "n_test": r["n_test"],

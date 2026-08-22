@@ -76,7 +76,7 @@ def main():
     meta = pd.read_csv(args.sample_metadata, sep="\t", low_memory=False, keep_default_na=False)
     if "sample" not in meta.columns or args.column not in meta.columns:
         print(f"[condition_mod] metadata needs 'sample' and {args.column!r}", file=sys.stderr, flush=True)
-        pd.DataFrame(columns=OUT_COLS).to_csv(args.out_tsv, sep="\t", index=False)
+        pd.DataFrame(columns=build_out_cols(args.by_transcript)).to_csv(args.out_tsv, sep="\t", index=False)
         return
     grp = dict(zip(meta["sample"].astype(str), meta[args.column].astype(str)))
     ref_s = {s for s, g in grp.items() if g == args.reference}
@@ -84,7 +84,7 @@ def main():
     if len(ref_s) < args.min_samples_per_group or len(test_s) < args.min_samples_per_group:
         print(f"[condition_mod] {name}: need >={args.min_samples_per_group} samples per group "
               f"(reference={len(ref_s)}, test={len(test_s)}); nothing to do", file=sys.stderr, flush=True)
-        pd.DataFrame(columns=OUT_COLS).to_csv(args.out_tsv, sep="\t", index=False)
+        pd.DataFrame(columns=build_out_cols(args.by_transcript)).to_csv(args.out_tsv, sep="\t", index=False)
         return
 
     hdr = pd.read_csv(args.in_tsv, sep="\t", nrows=0).columns
@@ -94,7 +94,7 @@ def main():
     if args.mod_filter:
         df = df[df["mod_code"].isin(set(args.mod_filter))]
     if df.empty:
-        pd.DataFrame(columns=OUT_COLS).to_csv(args.out_tsv, sep="\t", index=False)
+        pd.DataFrame(columns=build_out_cols(args.by_transcript)).to_csv(args.out_tsv, sep="\t", index=False)
         return
 
     # Genomic key. In --by-transcript mode the transcript partition (ZN) joins the key, so each
@@ -125,6 +125,7 @@ def main():
         return
 
     K, N = mod.to_numpy(dtype=float), cov.to_numpy(dtype=float)
+    K = np.minimum(K, N)   # defensive: Nmod>Nvalid_cov (upstream glitch) otherwise yields a garbage significant p
     ref_names = [s for s in samples if s in ref_s]
     test_names = [s for s in samples if s in test_s]
     sites = [(i, K[i], N[i], gidx) for i in range(K.shape[0])]
@@ -144,8 +145,12 @@ def main():
         # per-replicate observed modified fractions, so the report can plot the replicate spread
         with np.errstate(divide="ignore", invalid="ignore"):
             mu_i = np.where(N[i] > 0, K[i] / N[i], np.nan)
-        per_rep = {"reference": {s: round(float(mu_i[j]), 4) for j, s in enumerate(samples) if s in ref_s},
-                   "test": {s: round(float(mu_i[j]), 4) for j, s in enumerate(samples) if s in test_s}}
+        # keep only finite per-replicate values -> always valid JSON (a NaN would serialize to the
+        # bare token NaN, which is not valid JSON and breaks the report's json.loads)
+        per_rep = {"reference": {s: round(float(mu_i[j]), 4)
+                                 for j, s in enumerate(samples) if s in ref_s and np.isfinite(mu_i[j])},
+                   "test": {s: round(float(mu_i[j]), 4)
+                            for j, s in enumerate(samples) if s in test_s and np.isfinite(mu_i[j])}}
         row = {
             "contrast": name, "chrom": kv["chrom"], "start0": kv["start0"], "end0": kv["end0"],
             "strand": kv["strand"], "mod_code": kv["mod_code"],

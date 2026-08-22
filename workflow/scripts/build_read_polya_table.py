@@ -118,11 +118,21 @@ def main():
         meta = summ[keep].drop_duplicates("zt_label").rename(columns={
             "zt_label": "ZT", "gtf_gene_name": "gene_name"})
         df = df.merge(meta, on="ZT", how="left")
-    # Fallbacks derivable from the ZT tag itself if no summary provided.
+    # Back-fill from the read's OWN ZT/ZM tags for any row the summary did not cover (a ZT present in
+    # the BAM but absent from classification_summary merges to NaN). Without this, those reads carry a
+    # NaN metagene_index and are silently dropped from the between-fragmentform tail test, since its
+    # groupby("metagene_index") drops NaN keys -- a whole gene's fragmentforms can vanish with no note.
+    zt_gene = normalize_string_series(df.get("ZT", pd.Series(dtype=str))).str.split(".").str[0]
     if "gene_name" not in df.columns:
-        df["gene_name"] = normalize_string_series(df.get("ZT", pd.Series(dtype=str))).str.split(".").str[0]
+        df["gene_name"] = zt_gene
+    else:
+        _blank = df["gene_name"].isna() | df["gene_name"].astype(str).str.strip().eq("")
+        df.loc[_blank, "gene_name"] = zt_gene[_blank]
+    zm = df.get("ZM", pd.Series(pd.NA, index=df.index))
     if "metagene_index" not in df.columns:
-        df["metagene_index"] = df.get("ZM", pd.Series(dtype="Int64"))
+        df["metagene_index"] = zm
+    else:
+        df["metagene_index"] = df["metagene_index"].where(df["metagene_index"].notna(), zm)
     for c in OUT_COLS:
         if c not in df.columns:
             df[c] = pd.NA

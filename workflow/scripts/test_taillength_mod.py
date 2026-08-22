@@ -99,7 +99,9 @@ def _plot_site(mod_t, unmod_t, meta, path, per_ff=None):
     d = float(np.median(mod_t) - np.median(unmod_t))
     # warn when the pooled effect is NOT reproduced within fragmentforms (single-form-driven / confounded)
     n_comp = len(ff)
-    n_conc = sum(1 for _, dd in ff if (dd["delta_nt"] > 0) == (d > 0)) if d != 0 else 0
+    # a zero-Δ form is neither concordant nor discordant -- excluding it keeps the count independent
+    # of the pooled sign (else Δ=0 forms counted concordant only when pooled<0: False==False).
+    n_conc = sum(1 for _, dd in ff if dd["delta_nt"] != 0 and (dd["delta_nt"] > 0) == (d > 0)) if d != 0 else 0
     warn = ""
     if n_comp <= 1:
         warn = (f"CAUTION: only {n_comp} fragmentform comparable — pooled effect cannot be separated "
@@ -191,7 +193,8 @@ def _site_rows_for_chrom(mod_path, tail_map, args):
         _comp = [d for d in per_ff.values()
                  if d["n_mod"] >= 3 and d["n_unmod"] >= 3 and d["delta_nt"] is not None]
         row["n_forms_comparable"] = len(_comp)
-        row["n_forms_concordant"] = (sum(1 for d in _comp if (d["delta_nt"] > 0) == (_pooled > 0))
+        row["n_forms_concordant"] = (sum(1 for d in _comp
+                                         if d["delta_nt"] != 0 and (d["delta_nt"] > 0) == (_pooled > 0))
                                      if _pooled != 0 else 0)
         rows.append(row)
         if collect:
