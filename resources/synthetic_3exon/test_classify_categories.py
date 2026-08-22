@@ -82,6 +82,16 @@ CASES = [
       2: ([(1000, 1200), (2000, 2400), (2490, 2700)], 2700, 100)},  # so this is ALT_DONOR, not IPA
      2200, 1, 2, "SHARED_LOCAL", "ALT_DONOR"),
 
+    ("SHARED_LOCAL_IPA_NO_EXTENSION", # base's exon identical; hi SPLICES at its donor (2500) while lo
+     {1: ([(1000, 1200), (2000, 2500), (3000, 3500)], 3500, 100),   # POLYADENYLATES at 2500. Base within
+      2: ([(1000, 1200), (2000, 2500)], 2500, 100)},                # the EJC/cleavage footprint (<=24 nt).
+     2490, 1, 2, "SHARED_LOCAL", "IPA_NO_EXTENSION"),
+
+    ("SHARED_DISTAL_IPA_NO_EXTENSION_FAR", # SAME splice-vs-poly(A) structure, but the base is FAR (>24 nt)
+     {1: ([(1000, 1200), (2000, 2500), (3000, 3500)], 3500, 100),   # from the 2500 decision site, so it is
+      2: ([(1000, 1200), (2000, 2500)], 2500, 100)},                # DISTAL_APA, not IPA_NO_EXTENSION.
+     2100, 1, 2, "SHARED_DISTAL", "DISTAL_APA"),
+
     ("SHARED_DISTAL_SPLICING",      # base's exon identical, SAME 3' end (tes 3500); forms differ only in the 5' exon
      {1: ([(1000, 1200), (2000, 2200), (3000, 3500)], 3500, 100),
       2: ([(1500, 1700), (2000, 2200), (3000, 3500)], 3500, 100)},

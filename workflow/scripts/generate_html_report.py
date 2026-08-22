@@ -1700,7 +1700,7 @@ def build_polya_section(frag_df, diffs_df, mod_df, top_n, diff_figs_dir="", mod_
 CLASS_TAXONOMY = {
     "PRIVATE":       ["SKIPPED_EXON", "INTRONIC_POLYA", "THREE_PRIME_EXTENSION", "ALT_LAST_EXON"],
     "SHARED_LOCAL":  ["ALT_DONOR", "ALT_ACCEPTOR", "ALT_EXON", "ALT_POLYA_SITE", "RETAINED_INTRON",
-                      "IPA_EXTENSION", "NEAR_ALT_JUNCTION"],
+                      "IPA_EXTENSION", "IPA_NO_EXTENSION"],
     "SHARED_DISTAL": ["DISTAL_APA", "DISTAL_SPLICING"],
     "UNEXPLAINABLE": ["FIVE_PRIME_UNCERTAIN", "INTRON_READ_ARTIFACT", "NO_MODEL", "UNRESOLVED"],
 }
@@ -1709,17 +1709,17 @@ CLASS_TAXONOMY = {
 # here is always shown for its event (with a zero count when none landed there), so the tree is a
 # complete, self-documenting enumeration rather than only whatever the run happened to produce.
 EVENT_DIRECTIONS = {
-    "SKIPPED_EXON":         ["WITH_EXON_HIGHER"],
-    "INTRONIC_POLYA":       ["IPA_TRANSCRIPT_HIGHER"],
-    "THREE_PRIME_EXTENSION": ["DISTAL_POLYA_HIGHER"],
-    "ALT_LAST_EXON":        ["PROXIMAL_HIGHER", "DISTAL_HIGHER", "ALT_LAST_EXON_HIGHER"],
+    "SKIPPED_EXON":         ["IN_INCLUDED_EXON"],
+    "INTRONIC_POLYA":       ["IN_IPA_ISOFORM"],
+    "THREE_PRIME_EXTENSION": ["IN_DISTAL_EXTENSION"],
+    "ALT_LAST_EXON":        ["IN_ALT_LAST_EXON"],
     "ALT_DONOR":            ["LONGER_EXON_HIGHER", "LONGER_EXON_LOWER"],
     "ALT_ACCEPTOR":         ["LONGER_EXON_HIGHER", "LONGER_EXON_LOWER"],
     "ALT_EXON":             ["LONGER_EXON_HIGHER", "LONGER_EXON_LOWER"],
     "ALT_POLYA_SITE":       ["PROXIMAL_HIGHER", "DISTAL_HIGHER"],
     "RETAINED_INTRON":      ["INTRON_RETAINED_HIGHER", "INTRON_RETAINED_LOWER"],
     "IPA_EXTENSION":        ["EXTENDS_TO_PA_HIGHER", "EXTENDS_TO_PA_LOWER"],
-    "NEAR_ALT_JUNCTION":    ["JUNCTION_REMOVED_HIGHER", "JUNCTION_PRESENT_HIGHER"],
+    "IPA_NO_EXTENSION":      ["SPLICED_FORM_HIGHER", "POLYA_FORM_HIGHER"],
     "DISTAL_APA":           ["PROXIMAL_HIGHER", "DISTAL_HIGHER"],
     "DISTAL_SPLICING":      ["SAME_3PRIME_END"],
     "FIVE_PRIME_UNCERTAIN": [],
@@ -1728,21 +1728,23 @@ EVENT_DIRECTIONS = {
     "UNRESOLVED":           [],
 }
 DIRECTION_DEFINITIONS = {
-    "WITH_EXON_HIGHER":        "The more-modified fragmentform is the one that splices the cassette exon IN.",
-    "IPA_TRANSCRIPT_HIGHER":   "The more-modified fragmentform is the intronic-polyadenylation isoform (base lives in its retained-intron 3'UTR).",
+    # PRIVATE directions are presence labels (the base exists in ONE form only, so there is no
+    # "lower" — the more-modified form is by construction the one that structurally CONTAINS it):
+    "IN_INCLUDED_EXON":        "PRIVATE / SKIPPED_EXON: the base lives in a cassette exon spliced IN to the carrier form and spliced OUT of the other.",
+    "IN_IPA_ISOFORM":          "PRIVATE / INTRONIC_POLYA: the base lives in the retained-intron 3'UTR of the carrier's intronic-polyadenylation isoform; it does not exist in the spliced form.",
+    "IN_DISTAL_EXTENSION":     "PRIVATE / THREE_PRIME_EXTENSION: the base lives in the carrier's 3'UTR EXTENSION to a DISTAL poly(A) site on a SHARED last exon (tandem APA); absent from the shorter form.",
+    "IN_ALT_LAST_EXON":        "PRIVATE / ALT_LAST_EXON: the base lives in a mutually-exclusive alternative last exon (different acceptor) used only by the carrier form.",
+    # SHARED directions genuinely compare two forms that BOTH contain the base (HIGHER vs LOWER real):
     "LONGER_EXON_HIGHER":      "The more-modified fragmentform carries the LONGER version of the base's exon (structural_delta_nt = the length difference).",
     "LONGER_EXON_LOWER":       "The LESS-modified fragmentform carries the longer version of the base's exon (i.e. the more-modified form has the shorter one).",
-    "SHORTER_EXON_HIGHER":     "The more-modified fragmentform carries the SHORTER version of the base's exon.",
-    "PROXIMAL_HIGHER":         "The more-modified fragmentform uses the PROXIMAL (upstream, shorter-3'UTR) poly(A) site / alternative last exon.",
-    "DISTAL_HIGHER":           "The more-modified fragmentform uses the DISTAL (downstream, longer-3'UTR) poly(A) site / alternative last exon.",
-    "ALT_LAST_EXON_HIGHER":    "The more-modified fragmentform uses an alternative last exon containing the base (relative position undetermined because a poly(A) site is missing).",
-    "DISTAL_POLYA_HIGHER":     "The more-modified fragmentform is the one that extends its 3'UTR to the DISTAL poly(A) site (tandem APA); the base sits in that shared last exon's extension, absent from the shorter form.",
+    "PROXIMAL_HIGHER":         "The more-modified fragmentform uses the PROXIMAL (upstream, shorter-3'UTR) poly(A) site.",
+    "DISTAL_HIGHER":           "The more-modified fragmentform uses the DISTAL (downstream, longer-3'UTR) poly(A) site.",
     "INTRON_RETAINED_HIGHER":  "The more-modified fragmentform is the one that RETAINS the intron (its exon spans it); the other splices it out.",
     "INTRON_RETAINED_LOWER":   "The LESS-modified fragmentform is the one that retains the intron; the more-modified one splices it out.",
     "EXTENDS_TO_PA_HIGHER":    "The more-modified fragmentform is the one that reads into the intron and polyadenylates there (its exon is the extended, intronic-polyadenylation exon).",
     "EXTENDS_TO_PA_LOWER":     "The LESS-modified fragmentform is the one that reads into the intron and polyadenylates there.",
-    "JUNCTION_REMOVED_HIGHER": "The more-modified fragmentform is the one in which the nearby splice junction has been REMOVED (EJC relief).",
-    "JUNCTION_PRESENT_HIGHER": "The more-modified fragmentform is the one that still has the nearby splice junction.",
+    "SPLICED_FORM_HIGHER":     "IPA_NO_EXTENSION: the more-modified fragmentform is the one that SPLICES at the base's exon boundary (base retained upstream of a deposited EJC), where the other form polyadenylates.",
+    "POLYA_FORM_HIGHER":       "IPA_NO_EXTENSION: the more-modified fragmentform is the one that POLYADENYLATES (cleaves/terminates) at the base's exon boundary, where the other form splices onward.",
     "SAME_3PRIME_END":         "Both fragmentforms end at the same 3' position (same last exon / poly(A) site); the more-modified one differs only in an internal or 5' splicing choice further upstream.",
 }
 CLASS_BUCKET_ORDER = ["PRIVATE", "SHARED_LOCAL", "SHARED_DISTAL", "UNEXPLAINABLE"]
@@ -1762,8 +1764,8 @@ EVENT_DEFINITIONS = {
     "ALT_EXON": "The base's exon uses a DIFFERENT 5' splice site (donor) AND a different 3' splice site (acceptor) between the two forms — a mutually-exclusive alternative exon that shares neither boundary, not a single shifted splice site.",
     "ALT_POLYA_SITE": "Same last exon, different poly(A) cleavage sites (tandem APA); the base is in the shared body of the last exon.",
     "RETAINED_INTRON": "The base's own exon spans an intron in one form that the other form splices out — intron retention right at the base (both forms share the same 3' end).",
-    "IPA_EXTENSION": "The base's own exon is extended in one form because it reads into the downstream intron and polyadenylates there (intronic polyadenylation), while the other form splices on to a more distal 3' end.",
-    "NEAR_ALT_JUNCTION": "The base sits within the exon-junction-complex footprint of a splice junction present in one form and removed in the other (EJC relief).",
+    "IPA_EXTENSION": "The base's own exon is EXTENDED in one form because it reads into the downstream intron and polyadenylates there (intronic polyadenylation WITH extension), while the other form splices on to a more distal 3' end. The base sits in the intron-derived extension. Contrast IPA_NO_EXTENSION, where the poly(A) form cleaves right at the splice donor with no extension.",
+    "IPA_NO_EXTENSION": "Intronic polyadenylation with NO exon extension: one form SPLICES at the base's exon boundary while the other POLYADENYLATES at that SAME coordinate (no reading into the intron). The base's exon is identical in both forms and lies within the EJC/cleavage footprint (~24 nt) of the decision; whether it is spliced-and-EJC-marked or cleaved-and-polyadenylated tracks its modification. Contrast IPA_EXTENSION, where the poly(A) form's exon extends PAST the donor into the intron and the base sits in that extension.",
     "DISTAL_APA": "The base's local exon is identical in both forms, but the forms end at DIFFERENT poly(A) sites (a distal alternative-polyadenylation choice); methylation tracks which 3' end the isoform uses.",
     "DISTAL_SPLICING": "The base's local exon is identical AND the forms share the same 3' end; they differ only in an internal / 5' splicing choice ELSEWHERE, so methylation tracks that distal splicing decision.",
     "FIVE_PRIME_UNCERTAIN": "The base falls in (or 5' of) the 5'-most exon, where direct-RNA 5' truncation makes the assembled model unreliable — no confident structural call.",
@@ -1785,7 +1787,7 @@ def build_classification_section(class_df, private_df, class_figs_dir, arch_figs
         "Sites are placed in a <b>three-level tree</b>. <b>Level 1 (bucket)</b>: does the base exist in "
         "the mature RNA of both forms — <b>PRIVATE</b> (base only in the higher form) vs <b>SHARED</b>. "
         "<b>Level 2 (event)</b> for shared sites: is the distinguishing structural change ON the base's "
-        "exon (<b>SHARED_LOCAL</b> → ALT_DONOR / ALT_ACCEPTOR / ALT_POLYA_SITE / NEAR_ALT_JUNCTION) or "
+        "exon (<b>SHARED_LOCAL</b> → ALT_DONOR / ALT_ACCEPTOR / ALT_POLYA_SITE / IPA_NO_EXTENSION) or "
         "ELSEWHERE in the transcript (<b>SHARED_DISTAL</b>)? SHARED_DISTAL now splits into <b>DISTAL_APA</b> "
         "(the forms differ in their 3' end / poly(A) site) vs <b>DISTAL_SPLICING</b> (same 3' end, they "
         "differ in an internal / 5' splicing choice). <b>Level 3 (direction)</b>: which form is the "

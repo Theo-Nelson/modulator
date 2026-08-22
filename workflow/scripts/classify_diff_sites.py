@@ -295,12 +295,12 @@ def is_proximal(tes_a, tes_b, strand):
 
 
 def _alt_last_dir(hi_tes, lo_tes, strand):
-    """Direction for a mutually-exclusive ALTERNATIVE LAST EXON: which form's alt last exon is used.
-    The two last exons are different exons, so we describe WHERE the higher form terminates relative to
-    the other (proximal = upstream / shorter 3'UTR, distal = downstream / longer 3'UTR)."""
-    if hi_tes is None or lo_tes is None:
-        return 'ALT_LAST_EXON_HIGHER'
-    return 'PROXIMAL_HIGHER' if is_proximal(hi_tes, lo_tes, strand) else 'DISTAL_HIGHER'
+    """Direction for a mutually-exclusive ALTERNATIVE LAST EXON. The base is PRIVATE to the carrier's
+    alternative last exon, and the two forms use DIFFERENT (different-acceptor) last exons -- so a
+    proximal/distal ordering relative to the other form is arbitrary (it is not a tandem-APA choice on
+    one shared exon; that case is THREE_PRIME_EXTENSION). We therefore collapse to a single presence
+    label. (Args retained for call-site compatibility; no longer used.)"""
+    return 'IN_ALT_LAST_EXON'
 
 
 # --- Orthogonal stoichiometry axes layered on top of the structural `category` ---
@@ -393,7 +393,7 @@ def exon_gap(a, b):
 TAXONOMY = {
     "PRIVATE":       ["SKIPPED_EXON", "INTRONIC_POLYA", "THREE_PRIME_EXTENSION", "ALT_LAST_EXON"],
     "SHARED_LOCAL":  ["ALT_DONOR", "ALT_ACCEPTOR", "ALT_EXON", "ALT_POLYA_SITE", "RETAINED_INTRON",
-                      "IPA_EXTENSION", "NEAR_ALT_JUNCTION"],
+                      "IPA_EXTENSION", "IPA_NO_EXTENSION"],
     "SHARED_DISTAL": ["DISTAL_APA", "DISTAL_SPLICING"],
     "UNEXPLAINABLE": ["FIVE_PRIME_UNCERTAIN", "INTRON_READ_ARTIFACT", "NO_MODEL", "UNRESOLVED"],
 }
@@ -453,7 +453,7 @@ def classify_tree(gene, pos, hiZN, loZN, iso, *, tes_tol, ejc_nt):
         if sl == 'absent' and truncated_5p:
             return 'UNEXPLAINABLE', 'FIVE_PRIME_UNCERTAIN', '', info
         if ihi['arch'] == 'IPA' and sh == 'exonic_terminal':
-            return 'PRIVATE', 'INTRONIC_POLYA', 'IPA_TRANSCRIPT_HIGHER', info
+            return 'PRIVATE', 'INTRONIC_POLYA', 'IN_IPA_ISOFORM', info
         if sh == 'exonic_terminal':
             th, tl = terminal_exon(ihi['exons'], strand), terminal_exon(ilo['exons'], strand)
             # DISTINGUISH tandem APA from a true alternative last exon: if the two terminal exons SHARE
@@ -462,16 +462,17 @@ def classify_tree(gene, pos, hiZN, loZN, iso, *, tes_tol, ejc_nt):
             # these were mislabelled ALT_LAST_EXON because same_last_exon_start() was never called here.
             if th and tl and same_last_exon_start(th, tl, strand, tes_tol):
                 info['delta_nt'] = abs(ihi['tes'] - ilo['tes']) if (ihi['tes'] is not None and ilo['tes'] is not None) else 0
-                return 'PRIVATE', 'THREE_PRIME_EXTENSION', 'DISTAL_POLYA_HIGHER', info
+                return 'PRIVATE', 'THREE_PRIME_EXTENSION', 'IN_DISTAL_EXTENSION', info
             info['delta_nt'] = exon_gap(th, tl)
-            # DIFFERENT acceptors -> mutually-exclusive last exons, so their lengths are not comparable;
-            # the meaningful axis is WHERE the higher form's alternative last exon sits.
+            # DIFFERENT acceptors -> mutually-exclusive last exons. The base is private to the carrier's
+            # alt last exon; a proximal/distal ordering vs the other form is arbitrary, so we collapse to
+            # a single presence label (IN_ALT_LAST_EXON).
             d = _alt_last_dir(ihi['tes'], ilo['tes'], strand)
             return 'PRIVATE', 'ALT_LAST_EXON', d, info
         ehi = _exon_containing(ihi['exons'], pos)
         if ehi:
             info['delta_nt'] = ehi[1] - ehi[0]
-        return 'PRIVATE', 'SKIPPED_EXON', 'WITH_EXON_HIGHER', info
+        return 'PRIVATE', 'SKIPPED_EXON', 'IN_INCLUDED_EXON', info
 
     # ---- base is SHARED (exonic in both). LEVEL 2: LOCAL vs DISTAL ----
     ehi = _exon_containing(ihi['exons'], pos); elo = _exon_containing(ilo['exons'], pos)
@@ -550,10 +551,16 @@ def classify_tree(gene, pos, hiZN, loZN, iso, *, tes_tol, ejc_nt):
                 info['delta_nt'] = abs(don_hi - don_lo)
                 return 'SHARED_LOCAL', 'ALT_DONOR', exon_dir, info
 
-    # (c) base near a junction present in one form but not the other (EJC window) -> NEAR_ALT_JUNCTION
+    # (c) IPA_NO_EXTENSION: the base's exon coordinates are identical in both forms (branch (b) already
+    # consumed every boundary shift), yet a junction sits within the EJC/cleavage footprint of the base
+    # in ONE form only. Structurally this can only mean one form SPLICES at the base's exon boundary
+    # while the other POLYADENYLATES (terminates) at that same coordinate -- a splicing-vs-cleavage
+    # decision at the base, not alternative splicing between two spliced forms (that residual is
+    # unreachable; see the classifier tests). jd_hi>ejc => the HIGHER form lacks the junction => it is
+    # the poly(A)/terminal form; else it is the spliced form.
     if (info['jd_hi'] <= ejc_nt) != (info['jd_lo'] <= ejc_nt):
-        d = 'JUNCTION_REMOVED_HIGHER' if info['jd_hi'] > ejc_nt else 'JUNCTION_PRESENT_HIGHER'
-        return 'SHARED_LOCAL', 'NEAR_ALT_JUNCTION', d, info
+        d = 'POLYA_FORM_HIGHER' if info['jd_hi'] > ejc_nt else 'SPLICED_FORM_HIGHER'
+        return 'SHARED_LOCAL', 'IPA_NO_EXTENSION', d, info
 
     # (d) the base's exon is identical in both -> the structural difference is DISTAL. Sub-classify
     # by WHERE it is: a different 3' end (distal APA) or a splicing difference elsewhere (same 3' end).
@@ -629,14 +636,14 @@ def scan_private_sites(zn_long_path, iso, genes, *, min_frac, min_cov, tes_tol=2
         cz, cfrac, ccov = carriers[0]
         ihi = _iso_at(iso, g, cz, pos); sh = status_in(ihi['exons'], strand, pos)
         if ihi['arch'] == 'IPA' and sh == 'exonic_terminal':
-            event, direction, delta = 'INTRONIC_POLYA', 'IPA_TRANSCRIPT_HIGHER', ''
+            event, direction, delta = 'INTRONIC_POLYA', 'IN_IPA_ISOFORM', ''
         elif sh == 'exonic_terminal':
             alo = _iso_at(iso, g, absent[0], pos)
             th = terminal_exon(ihi['exons'], strand); tl = terminal_exon(alo['exons'], strand)
             # shared last-exon acceptor -> the base is in the carrier's 3'UTR EXTENSION (tandem/distal
             # poly(A)), not a mutually-exclusive alternative last exon (~2/3 of these were mislabelled).
             if th and tl and same_last_exon_start(th, tl, strand, tes_tol):
-                event, direction = 'THREE_PRIME_EXTENSION', 'DISTAL_POLYA_HIGHER'
+                event, direction = 'THREE_PRIME_EXTENSION', 'IN_DISTAL_EXTENSION'
                 delta = abs(ihi['tes'] - alo['tes']) if (ihi['tes'] is not None and alo['tes'] is not None) else ''
             else:
                 event = 'ALT_LAST_EXON'
@@ -644,7 +651,7 @@ def scan_private_sites(zn_long_path, iso, genes, *, min_frac, min_cov, tes_tol=2
                 direction = _alt_last_dir(ihi['tes'], alo['tes'], strand)
         else:
             e = _exon_containing(ihi['exons'], pos)
-            event, direction, delta = 'SKIPPED_EXON', 'WITH_EXON_HIGHER', (e[1] - e[0]) if e else ''
+            event, direction, delta = 'SKIPPED_EXON', 'IN_INCLUDED_EXON', (e[1] - e[0]) if e else ''
         rows.append([g, mod, chrom, s0, s0 + 1, strand, 'PRIVATE', event, direction, delta,
                      cz, ihi['arch'], f"{cfrac:.4f}", ccov, len(present), len(absent), ','.join(absent)])
     rows.sort(key=lambda x: (x[7], x[0], x[3]))
