@@ -28,6 +28,11 @@ def parse_args():
     ap.add_argument("--min-total-cov", type=int, default=8)
     ap.add_argument("--min-alt-frac", type=float, default=0.10)
     ap.add_argument("--max-alt-frac", type=float, default=0.90)
+    ap.add_argument("--multiallelic-frac", type=float, default=0.10,
+                    help="A site is dropped as multiallelic only if its SECOND-most-common alt is both "
+                         ">= min-alt-reads AND >= this FRACTION of coverage. A pure absolute count wrongly "
+                         "discards deep clean biallelic hets, where a few %% third-base basecall error "
+                         "accumulates past min-alt-reads at high depth. Set 0 for the old absolute-only rule.")
     ap.add_argument("--min-baseq", type=int, default=20)
     ap.add_argument("--min-mapq", type=int, default=10)
     ap.add_argument("--jobs", type=int, default=1, help="Number of scan shards to run in parallel")
@@ -292,6 +297,10 @@ def main():
                 rec["counts"][idx] += int(value)
 
     rows = []
+    # per-filter drop accounting: every candidate position removed by a filter is counted, so the scan
+    # can report WHY sites were dropped instead of them vanishing silently.
+    drops = {"low_total_cov": 0, "low_alt_reads": 0, "low_alt_frac": 0, "high_alt_frac": 0, "multiallelic": 0}
+    n_candidate_positions = len(site_counts)
     for (chrom, pos1, ref), rec in sorted(site_counts.items()):
         total_counts = rec["counts"]
         counts = {base: int(total_counts[idx]) for idx, base in enumerate(DNA_BASES)}
@@ -303,14 +312,23 @@ def main():
         alt_frac = (alt_count / total_cov) if total_cov > 0 else 0.0
         ref_frac = (ref_count / total_cov) if total_cov > 0 else 0.0
         if total_cov < args.min_total_cov:
+            drops["low_total_cov"] += 1
             continue
         if alt_count < args.min_alt_reads:
+            drops["low_alt_reads"] += 1
             continue
         if alt_frac < args.min_alt_frac:
+            drops["low_alt_frac"] += 1
             continue
         if alt_frac > args.max_alt_frac:
+            drops["high_alt_frac"] += 1
             continue
-        if second_alt_count >= args.min_alt_reads:
+        # multiallelic: the SECOND alt must be a real fraction of coverage, not merely past the absolute
+        # floor -- otherwise a deep clean biallelic het is discarded once accumulated basecall error on a
+        # third base clears min_alt_reads (worse at higher depth, i.e. the highest-power sites).
+        second_alt_frac = (second_alt_count / total_cov) if total_cov > 0 else 0.0
+        if second_alt_count >= args.min_alt_reads and second_alt_frac >= args.multiallelic_frac:
+            drops["multiallelic"] += 1
             continue
 
         ann = annotate_site(chrom, pos1, exon_records)
@@ -348,6 +366,12 @@ def main():
         })
 
     df = pd.DataFrame(rows)
+    # de-silence the scan: report how many candidate positions each filter removed (was invisible).
+    if args.verbose:
+        print(f"[candidate_snps] {n_candidate_positions:,} positions with coverage -> {len(rows):,} kept; "
+              f"dropped: low_total_cov={drops['low_total_cov']:,} low_alt_reads={drops['low_alt_reads']:,} "
+              f"low_alt_frac={drops['low_alt_frac']:,} high_alt_frac={drops['high_alt_frac']:,} "
+              f"multiallelic={drops['multiallelic']:,}", file=sys.stderr, flush=True)
     out_dir = os.path.dirname(args.out_tsv) or "."
     os.makedirs(out_dir, exist_ok=True)
     if df.empty:

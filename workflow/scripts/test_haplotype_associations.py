@@ -52,7 +52,11 @@ def _rk(df):
 
 def _hap_for_one_chrom(hap_path, mod_path, args):
     hap = pd.read_csv(hap_path, sep="\t", low_memory=False)
-    hap = hap[hap["haplotype"].fillna("").astype(str).ne("")].copy()
+    _hl = hap["haplotype"].fillna("").astype(str)
+    # drop empty AND the pooled "OTHER" bucket: build_haplotype_blocks merges all sub-threshold
+    # haplotypes into one "OTHER" label, which is not a real allele string and must not be tested as a
+    # haplotype (it would enter the contingency table as an uninterpretable mixed row).
+    hap = hap[_hl.ne("") & _hl.ne("OTHER")].copy()
 
     # ---- hap x transcript: pandas (unchanged, small) ----
     tx_rows = []

@@ -106,10 +106,12 @@ def main():
     for r in df.itertuples(index=False):
         # snp_id = chrom:pos1:REF>ALT ; mod_site_id = chrom:start0-end0:strand:code
         try:
-            s_chrom, s_pos, s_alleles = str(r.snp_id).split(":")
+            # parse from the RIGHT: contig names can contain ':' (HLA / ALT / decoy contigs), which
+            # a plain split(':') would over-split, silently dropping the pair via the except below.
+            s_chrom, s_pos, s_alleles = str(r.snp_id).rsplit(":", 2)
             s_ref, s_alt = s_alleles.split(">")
             snp_pos1 = int(s_pos)
-            m_parts = str(r.mod_site_id).split(":")
+            m_parts = str(r.mod_site_id).rsplit(":", 3)   # -> [chrom, start0-end0, strand, code]
             mod_start0 = int(m_parts[1].split("-")[0])
             strand = m_parts[2]
             code = m_parts[3]

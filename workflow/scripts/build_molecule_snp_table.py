@@ -173,11 +173,16 @@ def main():
 
     df = pd.DataFrame(rows)
     if not df.empty:
-        df = df.drop_duplicates(["sample", "qname", "snp_id"], keep="first")
-        # Deterministic on-disk order: parallel (BAM x chrom) sharding returns rows in
-        # nondeterministic completion order. Sort so the molecule table and every
-        # order-sensitive consumer (haplotype blocks) are reproducible.
-        df = df.sort_values(["chrom", "pos1", "snp_id", "sample", "qname"]).reset_index(drop=True)
+        # Sort BEFORE dedup so keep="first" is deterministic. Parallel (BAM x chrom) shards return rows
+        # in nondeterministic order, and a read with >1 alignment over a SNP yields >1 row (possibly with
+        # different observed_base); sorting -- with the allele as a tiebreak -- makes the retained call
+        # reproducible instead of order-dependent. This order is also what haplotype blocks consume.
+        _sort_cols = ["chrom", "pos1", "snp_id", "sample", "qname"]
+        if "observed_base" in df.columns:
+            _sort_cols.append("observed_base")
+        df = (df.sort_values(_sort_cols)
+                .drop_duplicates(["sample", "qname", "snp_id"], keep="first")
+                .reset_index(drop=True))
     else:
         df = pd.DataFrame(columns=[
             "sample", "qname", "snp_id", "chrom", "pos1", "start0", "end0", "ref", "alt",
