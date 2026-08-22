@@ -28,6 +28,11 @@ CASES = [
     ("m6A_ablated_minus",     (450, "-", "a"),     ("T", "G"), "MOD_BASE_ABLATED"),       # rc(A>C)
     ("m5C_ablated",           (500, "+", "m"),     ("C", "T"), "MOD_BASE_ABLATED"),
     ("inosine_ablated_notG",  (600, "+", "17596"), ("A", "T"), "MOD_BASE_ABLATED"),
+    # F3: the ALT allele CREATES the modifiable base (ref is not the base) -> was mislabelled AT_BASE_OTHER
+    ("m6A_created_plus",      (700, "+", "a"),     ("T", "A"), "MOD_BASE_CREATED"),
+    ("m6A_created_minus",     (750, "-", "a"),     ("A", "T"), "MOD_BASE_CREATED"),   # rc(T>A)
+    # F4: NEITHER allele is the modifiable base -> data inconsistency, not a clean ablation
+    ("m6A_inconsistent",      (800, "+", "a"),     ("C", "G"), "INCONSISTENT"),
 ]
 CHROM = "chrU"
 

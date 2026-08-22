@@ -22,9 +22,17 @@ Because a SNP changes the base, at distance 0 the variant is never neutral:
                         IS the "SNP"; the association is circular.
   PSEU_SELF_REPORT      pseudouridine (mod 17802), T>C -- U->C basecall error is
                         called as the variant at its own site; circular.
-  MOD_BASE_ABLATED      any other base change removes the modifiable base (e.g. an
-                        m6A 'A' that becomes non-A), so the alt allele cannot carry
-                        the modification -- a genuine cis genotype effect.
+  MOD_BASE_CREATED      the ALT allele carries the modifiable base (ref does not);
+                        the variant CREATES the substrate, and the modification is
+                        read off the ALT reads. High-confidence cis class.
+  MOD_BASE_ABLATED      the REF allele carries the base and the ALT removes it, so the
+                        alt allele cannot carry the modification -- a genuine cis
+                        genotype effect (fraction read off the REF reads).
+  INCONSISTENT          neither reported allele is the modifiable base: a modification
+                        called where no allele can carry it (a third allele under the
+                        min-alt floor, or a strand/annotation mismatch) -- a data-
+                        consistency flag, not a clean biological category.
+  AT_BASE_UNKNOWN_MOD   the mod code has no known modifiable base in this table.
 
 Inputs: candidate SNPs (`discover_candidate_snps.py`) + the ZN modification table
 (`aggregate_zn <prefix>_FILTERED_sites_long.tsv`). Reference FASTA optional.
@@ -32,6 +40,7 @@ Inputs: candidate SNPs (`discover_candidate_snps.py`) + the ZN modification tabl
 from __future__ import annotations
 import argparse
 import csv
+import os
 import sys
 from collections import defaultdict
 
@@ -77,8 +86,10 @@ def load_mod_sites(path):
             except (KeyError, ValueError):
                 continue
             d = agg.setdefault(key, dict(gene_name=row.get("gene_name", ""),
-                                         nmod=0.0, ncov=0.0, n_samples=0))
-            d["nmod"] += nmod; d["ncov"] += ncov; d["n_samples"] += 1
+                                         nmod=0.0, ncov=0.0, samples=set()))
+            # the ZN long table is per (site x ZN-partition x sample); count DISTINCT samples, not rows
+            # (else a single-sample run with 3 ZN partitions would report n_samples=3).
+            d["nmod"] += nmod; d["ncov"] += ncov; d["samples"].add(str(row.get("sample", "")))
     return agg
 
 
@@ -89,9 +100,21 @@ def classify(mod_code, strand, ref, alt):
     if sig and tref == sig[0] and talt == sig[1]:
         return sig[2], tref, talt
     base = MOD_BASE.get(str(mod_code))
-    if base is not None and talt != base:
+    if base is None:
+        return "AT_BASE_UNKNOWN_MOD", tref, talt     # no known modifiable base for this mod code
+    if talt == base:
+        # the ALT allele CARRIES the modifiable base (the variant creates it); modification is read
+        # off the ALT reads, not the REF. Previously mislabelled "AT_BASE_OTHER" -- it is in fact the
+        # highest-confidence cis class (the alt allele can carry the modification).
+        return "MOD_BASE_CREATED", tref, talt
+    if tref == base:
+        # REF carries the base, ALT removes it -> the alt allele cannot carry the modification: a
+        # genuine cis genotype effect (the fraction is read off the REF reads).
         return "MOD_BASE_ABLATED", tref, talt
-    return "AT_BASE_OTHER", tref, talt
+    # neither reported allele is the modifiable base: a modification called where no allele can carry
+    # it -> a data-consistency signal (e.g. a third allele under the min-alt floor, or a strand/annot
+    # mismatch), NOT a clean ablation.
+    return "INCONSISTENT", tref, talt
 
 
 def detect(snps, mods):
@@ -107,10 +130,12 @@ def detect(snps, mods):
             chrom=chrom, pos0=start0, pos1=start0 + 1, strand=strand, mod_code=mod_code,
             canonical_base=MOD_BASE.get(str(mod_code), ""), ref=snp["ref"], alt=snp["alt"],
             tx_ref=tref, tx_alt=talt, alt_frac=snp["alt_frac"],
-            snp_at_mod_base_class=cls, gene_name=d["gene_name"], n_samples=d["n_samples"],
+            snp_at_mod_base_class=cls, gene_name=d["gene_name"], n_samples=len(d["samples"]),
             total_Nmod=int(d["nmod"]), total_Nvalid_cov=int(d["ncov"]),
             pooled_frac_mod=round(frac, 4), snp_id=snp["snp_id"]))
-        hits[(chrom, start0, str(mod_code))] = cls
+        # key by STRAND too: two modifications at one genomic position on opposite strands (antisense
+        # gene overlap) otherwise collide in this index and one classification is silently overwritten.
+        hits[(chrom, start0, strand, str(mod_code))] = cls
     rows.sort(key=lambda r: (r["chrom"], r["pos0"], r["mod_code"]))
     return rows, hits
 
@@ -131,18 +156,24 @@ def annotate_tsv(path, hits):
         if c not in fields:
             fields.append(c)
     for row in rows:
-        key = (row.get("chrom"), _to_int(row.get("start0")), str(row.get("mod_code", "")))
-        # fall back to position-only match when the table has no mod_code column
-        cls = hits.get(key) or hits.get((row.get("chrom"), _to_int(row.get("start0")), ""))
-        if cls is None and "mod_code" not in row:
-            for (ch, s0, _mc), v in hits.items():
-                if ch == row.get("chrom") and s0 == _to_int(row.get("start0")):
-                    cls = v; break
+        ch = row.get("chrom"); s0 = _to_int(row.get("start0"))
+        st = row.get("strand", ""); mc = str(row.get("mod_code", ""))
+        cls = hits.get((ch, s0, st, mc))
+        if cls is None:
+            # progressively looser match for differential tables missing strand and/or mod_code
+            for (hch, hs0, hst, hmc), v in hits.items():
+                if hch == ch and hs0 == s0 and (not mc or hmc == mc) and (not st or hst == st):
+                    cls = v
+                    break
         row["snp_at_mod_base"] = "1" if cls else "0"
         row["snp_at_mod_base_class"] = cls or ""
-    with open(path, "w", newline="") as fh:
+    # atomic write (.tmp + os.replace) so a crash/full-disk mid-write can't truncate a table that
+    # took hours to produce -- matching the convention in discover_candidate_snps / build_molecule_snp_table.
+    tmp = path + ".tmp"
+    with open(tmp, "w", newline="") as fh:
         w = csv.DictWriter(fh, fieldnames=fields, delimiter="\t", extrasaction="ignore")
         w.writeheader(); w.writerows(rows)
+    os.replace(tmp, path)
     return True
 
 

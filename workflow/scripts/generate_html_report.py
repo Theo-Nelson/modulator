@@ -506,6 +506,9 @@ def _scan_perff_by_allele(mol_mods_path, mol_snps_path, sites):
         for chunk in pd.read_csv(mol_mods_path, sep="\t", usecols=lambda c: c in keep,
                                  chunksize=200000, low_memory=False):
             if not {"chrom", "start0", "target_mod_code", "ZN", "qname"}.issubset(chunk.columns):
+                print("[report] WARNING: per-read mod table missing required columns "
+                      "(need chrom/start0/target_mod_code/ZN/qname); allele-split figures skipped.",
+                      file=sys.stderr, flush=True)
                 break
             chunk = chunk.copy()
             chunk["start0"] = pd.to_numeric(chunk["start0"], errors="coerce")
@@ -539,20 +542,35 @@ def _scan_perff_by_allele(mol_mods_path, mol_snps_path, sites):
         return acc
     # pass 2: allele_class per read at each wanted SNP -> {snp_id: {(sample,qname): 'ref'/'alt'}}
     allele_at = {snp: {} for snp in snp_want}
+    # Warn (don't silently degrade): if the SNP molecule table is absent/empty/malformed, every read
+    # falls to 'na' and the figure reads as "no SNP call" -- which looks like a biological statement
+    # ("this SNP doesn't stratify the reads") when the truth is the SNP data never arrived.
+    if snp_want and (not mol_snps_path or not os.path.exists(mol_snps_path)):
+        print("[report] WARNING: SNP molecule table unavailable; allele-split figures will show "
+              "'no SNP call' for all reads (SNP data absent, not a lack of stratification).",
+              file=sys.stderr, flush=True)
     if mol_snps_path and os.path.exists(mol_snps_path) and snp_want:
         skeep = ["sample", "qname", "snp_id", "allele_class"]
+        _got_allele_rows = False
         try:
             for chunk in pd.read_csv(mol_snps_path, sep="\t", usecols=lambda c: c in skeep,
                                      chunksize=200000, low_memory=False):
                 if not {"snp_id", "qname", "allele_class"}.issubset(chunk.columns):
+                    print("[report] WARNING: SNP molecule table lacks an allele_class/snp_id/qname "
+                          "column; allele-split figures show 'no SNP call' for all reads.",
+                          file=sys.stderr, flush=True)
                     break
                 chunk = chunk[chunk["snp_id"].astype(str).isin(snp_want)]
                 for _, r in chunk.iterrows():
                     # record the genotype for EVERY read covering the SNP (incl. third alleles), so the
                     # join can tell "not covered" (→ na) apart from "covered but off-allele" (→ dropped).
                     allele_at[str(r["snp_id"])][(str(r.get("sample", "")), str(r["qname"]))] = str(r["allele_class"]).lower()
+                    _got_allele_rows = True
         except Exception:
             allele_at = {snp: {} for snp in snp_want}
+        if not _got_allele_rows:
+            print("[report] WARNING: SNP molecule table yielded no allele calls for the target SNPs; "
+                  "allele-split figures show 'no SNP call' for all reads.", file=sys.stderr, flush=True)
     # join
     for key, rmap in reads_at.items():
         amap = allele_at.get(site_snp.get(key, ""), {})
@@ -1539,8 +1557,11 @@ def build_snp_mechanism_section(mech_df, top_n):
     padj = (pd.to_numeric(mech_df["p_adj_bh"], errors="coerce") if "p_adj_bh" in mech_df.columns
             else pd.Series(float("nan"), index=mech_df.index))
     sig = mech_df[padj < 0.05]
-    n_art_sig = int(sig["artifact_flag"].ne("NONE").sum()) if "artifact_flag" in sig.columns else 0
-    clean = mech_df[mech_df["artifact_flag"].eq("NONE")] if "artifact_flag" in mech_df.columns else mech_df
+    # NaN artifact_flag must be treated as "NONE" (not an artifact): NaN != "NONE" is True, so a missing
+    # value would (a) be counted as a self-reporting artifact AND (b) be dropped from `clean` below --
+    # penalised twice, in opposite directions. fillna('NONE') fixes both.
+    n_art_sig = int(sig["artifact_flag"].fillna("NONE").ne("NONE").sum()) if "artifact_flag" in sig.columns else 0
+    clean = mech_df[mech_df["artifact_flag"].fillna("NONE").eq("NONE")] if "artifact_flag" in mech_df.columns else mech_df
     conc = (clean[clean["direction_concordance"].isin(["CONCORDANT", "DISCORDANT"])]
             if "direction_concordance" in clean.columns else clean.iloc[0:0])
     rate = (100.0 * conc["direction_concordance"].eq("CONCORDANT").mean()) if len(conc) else float("nan")
@@ -1557,7 +1578,8 @@ def build_snp_mechanism_section(mech_df, top_n):
         af = mech_df["artifact_flag"].value_counts().reset_index()
         af.columns = ["artifact_flag", "n_pairs"]
         parts.append(subsection("Self-reporting / definitional artifacts", df_to_html(af, max_rows=8)))
-    me = mech_df[mech_df["motif_effect"].ne("NOT_APPLICABLE")] if "motif_effect" in mech_df.columns else pd.DataFrame()
+    me = (mech_df[mech_df["motif_effect"].fillna("NOT_APPLICABLE").ne("NOT_APPLICABLE")]
+          if "motif_effect" in mech_df.columns else pd.DataFrame())
     if not me.empty:
         mt = me["motif_effect"].value_counts().reset_index()
         mt.columns = ["motif_effect", "n_pairs"]
@@ -1567,7 +1589,8 @@ def build_snp_mechanism_section(mech_df, top_n):
     if not causal.empty:
         cols = [c for c in ["snp_id", "gene_names", "mod_site_id", "distance_bp", "ref_5mer", "alt_5mer",
                             "ref_mod_rate", "alt_mod_rate", "p_adj_bh"] if c in causal.columns]
-        causal = causal.assign(_p=pd.to_numeric(causal["p_adj_bh"], errors="coerce")).sort_values("_p")
+        if "p_adj_bh" in causal.columns:   # sort by FDR only when present (else the KeyError just moved here)
+            causal = causal.assign(_p=pd.to_numeric(causal["p_adj_bh"], errors="coerce")).sort_values("_p")
         parts.append(subsection("Top causal cis variants (motif disrupted, direction concordant)",
                                 df_to_html(causal[cols], max_rows=top_n)))
     return section(
@@ -1587,7 +1610,9 @@ def build_snp_mechanism_section(mech_df, top_n):
             ("MOTIF_DISRUPTED / MOTIF_CREATED", "The alt allele breaks / creates the modification's sequence motif — predicting less / more modification on alt."),
             ("MOTIF_ABSENT_BOTH", "Neither allele matches the modification's motif, which makes the modification call itself suspect."),
             ("EDITING_SELF_REPORT / PSEU_SELF_REPORT", "The 'SNP' may itself BE the modification: A-to-I editing basecalls as G, and pseudouridine causes a U-to-C basecall error, so each can get called as a variant at its own site. The association is then circular rather than regulatory."),
-            ("MOD_BASE_ABLATED", "SNP at a modified base whose alt allele cannot carry the modification (e.g. an m6A site whose alt allele is not an A) — there is no substrate to modify, so the association is definitional."),
+            ("MOD_BASE_CREATED", "SNP whose ALT allele carries the modifiable base while the reference does not — the variant creates the substrate, so the modification is read off the alt reads. The highest-confidence cis class."),
+            ("MOD_BASE_ABLATED", "SNP whose REF allele carries the modified base and the ALT removes it (e.g. an m6A site whose alt allele is not an A) — the alt allele has no substrate, so the association is definitional."),
+            ("INCONSISTENT", "A modification called at a position where NEITHER reported allele is the modifiable base — a data-consistency flag (a third allele below the alt-read floor, or a strand/annotation mismatch), not a biological category."),
             ("direction_concordance", "Does the observed allelic direction match the motif's prediction? CONCORDANT = coherent causal cis variant."),
         ], summary="Category definitions"),
     )
