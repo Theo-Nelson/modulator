@@ -253,13 +253,16 @@ let cur=null, selExon=null;
 const fmt=n=>n==null||isNaN(n)?"–":(+n).toLocaleString();
 const pct=v=>v==null||isNaN(v)?"–":(100*v).toFixed(1)+"%";
 const sci=p=>p==null||isNaN(p)?"–":(p<1e-4?p.toExponential(1):p.toFixed(4));
+// HTML-escape any GTF-derived string before it goes into innerHTML (gene_name, zt_label, classification,
+// pas_motif). Entities are decoded again by getAttribute, so data-* round-trips (the selector lookup) still work.
+const esc=s=>String(s==null?"":s).replace(/[&<>"']/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
 
 function renderList(f){
   const q=(f||"").trim().toLowerCase();
   const rows=DATA.index.filter(r=>!q||r.g.toLowerCase().includes(q)||
       (DATA.genes[r.g].forms||[]).some(x=>x.zt.toLowerCase().includes(q))).slice(0,400);
-  $("#list").innerHTML=rows.map(r=>`<div class="gi${cur===r.g?' sel':''}" data-g="${r.g}">
-     <b>${r.g}</b><small>${r.n} ff · ${fmt(r.r)}</small></div>`).join("")
+  $("#list").innerHTML=rows.map(r=>`<div class="gi${cur===r.g?' sel':''}" data-g="${esc(r.g)}">
+     <b>${esc(r.g)}</b><small>${r.n} ff · ${fmt(r.r)}</small></div>`).join("")
      ||`<div class="empty" style="padding:14px">No match.</div>`;
   document.querySelectorAll(".gi").forEach(e=>e.onclick=()=>select(e.dataset.g));
 }
@@ -280,17 +283,17 @@ function draw(){
     const y=i*30+34, mid=y+8;
     const introns=`<line x1="${X(Math.min(...f.exons.map(e=>e[0])))}" x2="${X(Math.max(...f.exons.map(e=>e[1])))}"
        y1="${mid}" y2="${mid}" stroke="var(--line)" stroke-width="2"/>`;
-    const ex=f.exons.map((e,j)=>`<g class="exon" data-s="${e[0]}" data-e="${e[1]}" data-zt="${f.zt}">
+    const ex=f.exons.map((e,j)=>`<g class="exon" data-s="${e[0]}" data-e="${e[1]}" data-zt="${esc(f.zt)}">
         <rect x="${X(e[0])}" y="${y}" width="${Math.max(X(e[1])-X(e[0]),2)}" height="16" rx="2.5"
-          fill="${j%2?'var(--exon-alt)':'var(--exon)'}"><title>${f.zt} exon ${j+1}\n${fmt(e[0])}–${fmt(e[1])} (${fmt(e[1]-e[0])} nt)\nclick to filter sites</title></rect></g>`).join("");
-    const lab=`<text x="0" y="${mid+4}" font-size="10.5" fill="var(--muted)" font-family="ui-monospace,monospace">${f.zt.split('.').slice(-2).join('.')}</text>`;
+          fill="${j%2?'var(--exon-alt)':'var(--exon)'}"><title>${esc(f.zt)} exon ${j+1}\n${fmt(e[0])}–${fmt(e[1])} (${fmt(e[1]-e[0])} nt)\nclick to filter sites</title></rect></g>`).join("");
+    const lab=`<text x="0" y="${mid+4}" font-size="10.5" fill="var(--muted)" font-family="ui-monospace,monospace">${esc(f.zt.split('.').slice(-2).join('.'))}</text>`;
     return `<g>${introns}${ex}</g>`+`<g transform="translate(${W+8},0)">${lab}</g>`;
   }).join("");
   const arrow=G.strand==="+"?"5′ → 3′":"3′ ← 5′";
-  const ffTable=G.forms.map(f=>`<tr><td>${f.zt}</td><td>${f.classification||"–"}</td><td>${fmt(f.reads)}</td>
-      <td>${f.pas||"–"}</td><td>${f.tail?f.tail.toFixed(0)+" nt":"–"}</td><td>${f.exons.length}</td></tr>`).join("");
+  const ffTable=G.forms.map(f=>`<tr><td>${esc(f.zt)}</td><td>${esc(f.classification||"–")}</td><td>${fmt(f.reads)}</td>
+      <td>${esc(f.pas||"–")}</td><td>${f.tail?f.tail.toFixed(0)+" nt":"–"}</td><td>${f.exons.length}</td></tr>`).join("");
   $("#main").innerHTML=`
-   <h1>${G.gene}</h1>
+   <h1>${esc(G.gene)}</h1>
    <div class="sub">${G.chrom} · ${G.strand} strand (${arrow}) · ${G.forms.length} fragmentforms · ${fmt(G.reads)} reads</div>
    <div class="card"><h2>Fragmentform structures</h2>
      <div class="hint">Click an exon to filter the tables below to modification sites inside it.
@@ -348,7 +351,7 @@ function tables(){
  + (Hh.length||G.hier.length? tbl(`Truncation-aware fragmentform comparison <span class="pill">${Hh.length}</span>`,
        "Only reads that demonstrably span each pair's divergence point — <i>n informative</i> shows the power that survived.",
        "<th>position</th><th>A</th><th>B</th><th>delta</th><th>n inf.</th><th>div. from 3′</th><th>FDR</th>",
-       Hh.slice(0,200).map(h=>`<tr><td>${fmt(h.pos)}</td><td>${h.a.split('.').slice(-1)}</td><td>${h.b.split('.').slice(-1)}</td>
+       Hh.slice(0,200).map(h=>`<tr><td>${fmt(h.pos)}</td><td>${esc(h.a.split('.').slice(-1))}</td><td>${esc(h.b.split('.').slice(-1))}</td>
          <td>${(h.delta>0?"+":"")+(100*h.delta).toFixed(1)}%</td><td>${fmt(h.ninf)}</td><td>${fmt(h.div3p)}</td>
          <td class="${h.padj<0.05?'sig':''}">${sci(h.padj)}</td></tr>`).join("")):"");
 }
