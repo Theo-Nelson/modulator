@@ -335,17 +335,17 @@ function tables(){
    tbl(`Modification sites <span class="pill">${S.length}</span>`,
        "Pooled stoichiometry per site (per ZN transcript partition where available).",
        "<th>position</th><th>mod</th><th>ZN</th><th>coverage</th><th>modified</th>",
-       S.slice(0,400).map(s=>`<tr><td>${fmt(s.pos)}</td><td>${s.mod}</td><td>${s.zn<0?"–":s.zn}</td>
+       S.slice(0,400).map(s=>`<tr><td>${fmt(s.pos)}</td><td>${esc(s.mod)}</td><td>${s.zn<0?"–":s.zn}</td>
          <td>${fmt(s.cov)}</td><td>${pct(s.frac)}</td></tr>`).join(""))
  + tbl(`Differential between transcripts <span class="pill">${D.length}</span>`,
        "Sites whose modified fraction differs between this gene's transcript partitions.",
        "<th>position</th><th>mod</th><th>effect</th><th>FDR</th>",
-       D.slice(0,200).map(d=>`<tr><td>${fmt(d.pos)}</td><td>${d.mod}</td><td>${pct(d.effect)}</td>
+       D.slice(0,200).map(d=>`<tr><td>${fmt(d.pos)}</td><td>${esc(d.mod)}</td><td>${pct(d.effect)}</td>
          <td class="${d.padj<0.05?'sig':''}">${sci(d.padj)}</td></tr>`).join(""))
  + (C.length||G.cond.length? tbl(`Between conditions <span class="pill">${C.length}</span>`,
        "Replicate-aware differential modification between conditions.",
        "<th>position</th><th>mod</th><th>contrast</th><th>delta</th><th>FDR</th>",
-       C.slice(0,200).map(c=>`<tr><td>${fmt(c.pos)}</td><td>${c.mod}</td><td>${c.contrast}</td>
+       C.slice(0,200).map(c=>`<tr><td>${fmt(c.pos)}</td><td>${esc(c.mod)}</td><td>${esc(c.contrast)}</td>
          <td class="${c.delta>0?'up':''}">${(c.delta>0?"+":"")+(100*c.delta).toFixed(1)}%</td>
          <td class="${c.padj<0.05?'sig':''}">${sci(c.padj)}</td></tr>`).join("")):"")
  + (Hh.length||G.hier.length? tbl(`Truncation-aware fragmentform comparison <span class="pill">${Hh.length}</span>`,

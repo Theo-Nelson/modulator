@@ -17,11 +17,13 @@ Build a NULL contrast in which there is, by construction, no real biological
 difference -- two arbitrary halves of the replicates OF THE SAME CONDITION -- and
 run the real differential-modification engine on it across a grid of ``ref_df``.
 Under the null the fraction of sites with ``p < 0.05`` should be ~0.05. Pick the
-smallest ``ref_df`` whose null rate is not anti-conservative (<= ~0.06); a larger
+LARGEST ``ref_df`` whose null rate is not anti-conservative (<= ~0.06); a smaller
 value is safe but costs sensitivity.
 
-    ref_df too small  -> null p<0.05 rate >> 0.05  (anti-conservative: false positives)
-    ref_df too large  -> null p<0.05 rate << 0.05  (over-conservative: lost power)
+    ref_df too small  -> null p<0.05 rate << 0.05  (over-conservative: lost power)
+    ref_df too large  -> null p<0.05 rate >> 0.05  (anti-conservative: false positives)
+    (F(1, ref_df) -> chi2(1) as ref_df -> inf, whose lighter tail is anti-conservative;
+     smaller ref_df has a heavier tail and is more conservative.)
 
 USAGE
 -----
@@ -118,10 +120,11 @@ def main():
 
     ok = [r for r in rows if r[3]]
     if ok:
-        rec = min(ok, key=lambda r: r[0])   # smallest ref_df that is calibrated
+        rec = max(ok, key=lambda r: r[0])   # LARGEST calibrated ref_df = max power without going
+                                            # anti-conservative (null rate rises with ref_df)
         print(f"\n[calibrate] RECOMMENDATION: set between_conditions.ref_df={rec[0]} "
               f"(null p<0.05 = {rec[2]:.3f}, ~target {args.target}).")
-        print(f"[calibrate] A larger ref_df is safe but costs sensitivity; a smaller one "
+        print(f"[calibrate] A smaller ref_df is safe but costs sensitivity; a larger one "
               f"is anti-conservative on this data.")
     else:
         print(f"\n[calibrate] No ref_df in the grid reached the target null rate "

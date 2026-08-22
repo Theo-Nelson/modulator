@@ -1200,9 +1200,13 @@ def _write_one_gene_group(lines, gene_name, gene_id, mod, out_dir, prefix_base,
     """Write the per-gene row TSV and/or the 3 pivots for ONE (gene_name, gene_id, mod) group.
     `lines` are the already-grouped rows (18 tab-cols each) from the sorted per_gene file. Each
     group writes to its own basepath files, so this is safe to run in parallel across groups."""
+    # Include gene_id in the filename: two distinct gene_ids can share a gene_name, and they are
+    # separate groups (grouped on gene_name, gene_id, mod) -- a gene_name-only filename would make
+    # them overwrite each other (serial: open("w") truncation; jobs>1: concurrent-write race).
     safe_g = sanitize_filename_token(gene_name if gene_name else "NA")
+    safe_gid = sanitize_filename_token(gene_id if gene_id else "NA")
     safe_mod = sanitize_filename_token(str(mod))
-    bp = os.path.join(out_dir, f"{prefix_base}__{safe_g}__{safe_mod}")
+    bp = os.path.join(out_dir, f"{prefix_base}__{safe_g}__{safe_gid}__{safe_mod}")
 
     row_fh = open(f"{bp}.tsv", "w") if write_per_gene else None
     if row_fh is not None:
@@ -1334,8 +1338,11 @@ def generate_per_gene_outputs_from_dedup(
                 ]) + "\n")
 
     def key_per_gene(line: str):
+        # MUST include gene_id (p[1]): the group boundaries below split on (gene_name, gene_id, mod),
+        # so if two gene_ids share a gene_name and the sort ignored gene_id, their rows interleave and
+        # form multiple non-contiguous groups that then collide on one gene_name-only filename.
         p = line.rstrip("\n").split("\t")
-        return (p[0], p[2], p[3], int(p[4]), int(p[5]), p[6], int(p[7]), p[8])
+        return (p[0], p[1], p[2], p[3], int(p[4]), int(p[5]), p[6], int(p[7]), p[8])
 
     per_gene_sorted = os.path.join(workdir, f"{tag}.per_gene.sorted.tsv")
     external_sort_tsv(per_gene_uns, per_gene_sorted, key_per_gene, tmpdir=workdir, chunk_lines=chunk_lines, verbose=verbose)
