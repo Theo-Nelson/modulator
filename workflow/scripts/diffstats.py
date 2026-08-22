@@ -30,7 +30,7 @@ scipy only (no statsmodels).
 """
 import numpy as np
 from scipy.optimize import minimize, minimize_scalar
-from scipy.special import betaln, expit, logit
+from scipy.special import betaln, expit, logit, polygamma
 from scipy.stats import f as fdist
 from scipy.stats import ttest_ind
 
@@ -49,12 +49,15 @@ _LOG_THETA_LO, _LOG_THETA_HI = np.log(1e-2), np.log(1e6)
 #     NULL p<0.05 = 0.050 (nominal)   |   delta=0.10 -> 69% sensitivity at ~5% FDR
 #     (chi2(1) -> 0.081 null, 24% FDR;  F(1,4) -> 0.021 null but only 14% sensitivity)
 #
-# DISPERSION note: the 3 mock replicates are near-BINOMIALLY reproducible -- median per-site
-# overdispersion ratio ~1 (implied phi ~ 0), 90th pct phi ~ 0.009. theta is therefore well
-# determined, which is what justifies a reference this light. Data with genuinely overdispersed
-# replicates needs a LOWER ref_df (F(1,4) was right for phi 0.01-0.08); ref_df is exposed so it can
-# be re-calibrated. Sanity-check any new dataset by running a within-condition (null) contrast and
-# confirming p<0.05 lands near 0.05.
+# DISPERSION note: per-site theta is estimated with a Cox-Reid ADJUSTED profile likelihood (see
+# _fit_theta), which removes the downward dispersion bias of plain ML. WITHOUT that adjustment the
+# test was ~2x anti-conservative on even mildly overdispersed cohorts (null type-I 0.11 at phi>=0.005,
+# 0.26 at 2v2) while looking calibrated only at phi~0 -- the regime the 3 mock replicates happen to
+# sit in. WITH Cox-Reid, at ref_df=10 the null type-I is ~nominal across dispersion (phi=0 -> 0.026;
+# phi=0.005/0.02/0.05 -> 0.061/0.052/0.056 at 3v3) and only conservative at higher replicate counts --
+# never anti-conservative except the 2v2 corner (0.093). So the fix was the dispersion estimator, NOT
+# ref_df (ref_df is still exposed for re-calibration). Sanity-check any new dataset with a
+# within-condition (null) contrast and confirm p<0.05 lands near/below 0.05.
 REF_DF = 10
 _MIN_SITES_FOR_CALIBRATION = 50   # below this the empirical null median is unreliable -> no scaling
 _MIN_CALIBRATION = 1.0            # never DEFLATE the statistic (stay on the conservative side)
@@ -82,28 +85,46 @@ def _fit_mu(k, n, theta):
     return float(expit(r.x)), float(-r.fun)
 
 
+def _mu_info(k, n, mu, theta):
+    """Observed Fisher information of one group's mean mu at fixed theta: j = -d2/dmu2 sum_i ll_i.
+
+    Analytic (trigamma) -- with a=mu*theta, b=(1-mu)*theta and betaln(x,y)=lgamma(x)+lgamma(y)-lgamma(x+y),
+    d2 ll/dmu2 = theta^2 * sum[psi1(k+a)+psi1(n-k+b)-psi1(a)-psi1(b)] <= 0, so j = -that >= 0. This is the
+    curvature of the mean nuisance parameter that Cox-Reid penalises when estimating theta."""
+    mu = min(max(mu, _MIN_MU), _MAX_MU)
+    a, b = mu * theta, (1.0 - mu) * theta
+    j = theta * theta * float(np.sum(polygamma(1, a) + polygamma(1, b)
+                                     - polygamma(1, k + a) - polygamma(1, n - k + b)))
+    return max(j, _EPS)
+
+
 def _fit_theta(k, n, gidx, ngroups=2):
-    """MLE of a site's theta with a mu per group -- ONE joint fit over (logit mu0, logit mu1, log theta).
+    """Cox-Reid ADJUSTED profile estimate of a site's theta with a mu per group.
 
-    Profiling mu inside a theta search would nest an optimizer in an optimizer (~5k likelihood evals
-    per site, ~80 min on 100k sites); the joint fit is ~1 optimization per site instead.
-    """
+    Plain ML of theta jointly with the two group means is biased LOW in dispersion (theta too high):
+    it ignores the degrees of freedom spent estimating mu0 and mu1 from few replicates, so at n=3 per
+    group the between-condition LRT is ~2x anti-conservative once replicates are even mildly
+    overdispersed. Exactly as edgeR/DSS do, we maximise the Cox-Reid adjusted profile log-likelihood
+    over theta:  APL(theta) = l(theta, mu_hat(theta)) - 1/2 * log|j_mu(mu_hat; theta)|,  where j_mu is
+    the observed information of the (nuisance) group means; with two independent groups |j_mu| factors
+    as j0*j1. This is a bounded 1-D search over log theta (mu profiled analytically per group), so it
+    is only a few group-mean fits per site -- fine at the site counts a between-condition test sees."""
     m0 = gidx == 0
-    def _p0(mask):
-        tot = float(np.sum(n[mask]))
-        p = float(np.sum(k[mask])) / tot if tot > 0 else 0.5
-        return min(max(p, 1e-3), 1 - 1e-3)
+    k0, n0, k1, n1 = k[m0], n[m0], k[~m0], n[~m0]
 
-    def negll(params):
-        mu0, mu1, theta = expit(params[0]), expit(params[1]), float(np.exp(params[2]))
-        return -(_bb_ll(k[m0], n[m0], mu0, theta) + _bb_ll(k[~m0], n[~m0], mu1, theta))
+    def neg_apl(log_theta):
+        theta = float(np.exp(log_theta))
+        mu0, ll0 = _fit_mu(k0, n0, theta)
+        mu1, ll1 = _fit_mu(k1, n1, theta)
+        cr = 0.5 * (np.log(_mu_info(k0, n0, mu0, theta)) + np.log(_mu_info(k1, n1, mu1, theta)))
+        return -((ll0 + ll1) - cr)
 
-    x0 = np.array([logit(_p0(m0)), logit(_p0(~m0)), np.log(100.0)])
-    r = minimize(negll, x0, method="L-BFGS-B",
-                 bounds=[(logit(_MIN_MU), logit(_MAX_MU)),
-                         (logit(_MIN_MU), logit(_MAX_MU)),
-                         (_LOG_THETA_LO, _LOG_THETA_HI)])
-    return float(np.exp(r.x[2])), float(-r.fun)
+    r = minimize_scalar(neg_apl, bounds=(_LOG_THETA_LO, _LOG_THETA_HI), method="bounded",
+                        options={"xatol": 1e-3})
+    theta = float(np.exp(r.x))
+    _, ll0 = _fit_mu(k0, n0, theta)
+    _, ll1 = _fit_mu(k1, n1, theta)
+    return theta, float(ll0 + ll1)
 
 
 def _site_lrt(k, n, gidx, theta):
