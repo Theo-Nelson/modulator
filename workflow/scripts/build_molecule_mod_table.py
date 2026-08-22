@@ -23,6 +23,20 @@ OUTPUT_COLUMNS = [
     "within_alignment", "gene_id", "gene_name", "metagene_index",
 ]
 
+# transcript-oriented base each modification sits on (canonical_base in modkit's output is already
+# strand-adjusted -- verified: m6A rows are 'A' on both strands). A read whose canonical_base is NOT
+# this base carries a variant at the site and CANNOT carry the modification, so recording it as a
+# (usable, unmodified) observation manufactures false negative allele-specific-modification signal.
+MOD_BASE = {"a": "A", "17596": "A", "69426": "A", "m": "C", "19228": "C",
+            "17802": "T", "19227": "T", "19229": "G", "h": "C", "f": "C", "c": "C"}
+
+
+def _base_mismatch(target_mod, canonical_base):
+    """True iff the read's canonical base cannot carry `target_mod` (a variant at the modified base)."""
+    exp = MOD_BASE.get(str(target_mod))
+    cb = str(canonical_base or "").upper()
+    return exp is not None and cb != "" and cb != exp
+
 
 def parse_args():
     ap = argparse.ArgumentParser(description="Build a per-read mod call table at candidate modulator sites.")
@@ -179,6 +193,8 @@ def extract_rows_from_bam(
                     if site_strand and ref_strand and ref_strand not in {".", "?"} and site_strand != ref_strand:
                         continue
                     target_mod = str(site["mod_code"])
+                    if _base_mismatch(target_mod, rec.get("canonical_base", "")):
+                        continue   # variant at the modified base -> read cannot carry the mod (not an observation)
                     if call_code == target_mod:
                         state_detail = "modified"
                         target_modified = 1
@@ -280,6 +296,8 @@ def parse_extracted_calls(sample, calls_tsv, lookup, shard_dir, chunk_rows, verb
                 if site_strand and ref_strand and ref_strand not in {".", "?"} and site_strand != ref_strand:
                     continue
                 target_mod = str(site["mod_code"])
+                if _base_mismatch(target_mod, rec.get("canonical_base", "")):
+                    continue   # variant at the modified base -> read cannot carry the mod (not an observation)
                 if call_code == target_mod:
                     state_detail = "modified"
                     target_modified = 1
