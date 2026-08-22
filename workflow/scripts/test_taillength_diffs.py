@@ -167,7 +167,10 @@ def main():
             continue
         groups = list(kept.values())
         if len(groups) == 2:
-            stat, p = mannwhitneyu(groups[0], groups[1], alternative="two-sided")
+            try:
+                stat, p = mannwhitneyu(groups[0], groups[1], alternative="two-sided")
+            except ValueError:
+                stat, p = float("nan"), float("nan")
             test_name, stat_name = "mannwhitneyu", "U"
         else:
             # kruskal raises ValueError("All numbers are identical") when every read across all
@@ -175,8 +178,14 @@ def main():
             try:
                 stat, p = kruskal(*groups)
             except ValueError:
-                stat, p = float("nan"), 1.0
+                stat, p = float("nan"), float("nan")
             test_name, stat_name = "kruskal", "H"
+        # scipy >= 1.18 RETURNS nan rather than raising when every read is identical, so the except
+        # above is not enough. A degenerate gene is UNTESTABLE (no tail-length variation), not a
+        # result -- mark it so the nan p is excluded from the BH family instead of being written as a
+        # completed test with an empty p (which shrinks the family the other rows are adjusted against).
+        if not np.isfinite(p):
+            test_name, stat_name, stat, p = "untestable", "none", float("nan"), float("nan")
         per_frag = []
         for zt, v in sorted(kept.items(), key=lambda kv: -np.median(kv[1])):
             d = _dist(v)

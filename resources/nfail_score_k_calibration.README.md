@@ -39,6 +39,8 @@ aggregation:
     nfail_score_k: 0.4
 ```
 
-`k = 0.0` (default) disables the filter. Ranges (e.g. `1.8–2.2`) mean several conditions tied at the
+`k = 0.0` disables the filter (keeps every site); the shipped **default is `k = 1.0`** (config.yaml
+`filters.nfail_score_k`), which on a real bedMethyl subset keeps ~650 of ~223,130 rows — do not assume
+the default table is unfiltered. Ranges (e.g. `1.8–2.2`) mean several conditions tied at the
 maximum; pick within the range for your P(A)/P(mod) thresholds. The score is easily recalibrated for
 each new basecaller as it is released.

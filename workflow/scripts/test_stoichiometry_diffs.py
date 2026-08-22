@@ -172,14 +172,23 @@ def summarize_site(df_site, min_cov, which_test, pseudocount, alternative):
 
     def do_fisher_2x2(tab):
         odds, p = fisher_exact(tab.astype(int), alternative=alternative)
-        return "fisher_exact_2x2", "fisher_odds", float(odds), float(p)
+        # single zero cell -> odds genuinely infinite (keep inf); nan margins handled below.
+        odds = float(odds) if math.isfinite(odds) else float("inf")
+        return "fisher_exact_2x2", "fisher_odds", odds, float(p)
 
     def do_chi2_rx2(tab, pc):
         tab_pc = tab + pc
         chi2, p, dof, _ = chi2_contingency(tab_pc, correction=False)
         return f"chi2_{tab.shape[0]}x{tab.shape[1]}_pc{pc:g}", "chi2", float(chi2), float(p)
 
-    if which_test == "auto":
+    # A zero marginal (all transcripts 100%- or 0%-modified, i.e. no variation in the modified column)
+    # is UNTESTABLE: fisher returns a nan odds ratio and chi2_contingency RAISES at pseudocount=0.
+    # Set NaN p (excluded from the BH family -- it can never be significant) rather than crashing the
+    # stage or writing a nan/inf statistic that later coerces to a misleading value. The effect size and
+    # per-transcript block below are still computed so the row is otherwise complete.
+    if not ((table.sum(axis=0) > 0).all() and (table.sum(axis=1) > 0).all()):
+        used_test, stat_name, stat_value, pval = "untestable", "none", float("nan"), float("nan")
+    elif which_test == "auto":
         if nrows == 2:
             used_test, stat_name, stat_value, pval = do_fisher_2x2(table)
         else:

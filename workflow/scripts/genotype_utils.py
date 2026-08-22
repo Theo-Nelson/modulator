@@ -92,8 +92,18 @@ def run_contingency_test(
     if tab.size == 0 or tab.shape[0] < 2 or tab.shape[1] < 2:
         return "none", "none", 0.0, 1.0
 
+    # A table with a zero marginal (a group or an outcome with no reads at all -- e.g. 100%/100%,
+    # 0%/0%, or a monomorphic group) is structurally UNTESTABLE: there is no variation to test on one
+    # axis. fisher returns an undefined (nan) odds ratio and chi2_contingency RAISES when pseudocount=0.
+    # Return NaN p so it is excluded from the BH family (it can never be significant), rather than
+    # crashing, writing a nan/inf statistic, or padding the multiple-testing burden with p==1 rows.
+    if not ((tab.sum(axis=0) > 0).all() and (tab.sum(axis=1) > 0).all()):
+        return "untestable", "none", float("nan"), float("nan")
+
     def do_fisher_2x2(tt):
         odds, p = fisher_exact(tt.astype(int))
+        # a single zero CELL (not a zero margin) is still testable; its odds ratio is genuinely
+        # infinite -> keep inf. nan cannot occur here (degenerate margins handled above).
         odds = float(odds) if math.isfinite(odds) else float("inf")
         return "fisher_exact_2x2", "fisher_odds", odds, float(p)
 

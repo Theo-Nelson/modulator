@@ -1356,7 +1356,7 @@ def build_between_conditions_section(bc_dir, top_n, top_note=""):
                 _test, _ref = html.escape(_cv[0]), html.escape(_cv[1])
                 cond_def = (f"<p class='section-intro'><b>Reference condition:</b> {_ref} &nbsp;·&nbsp; "
                             f"<b>Test condition:</b> {_test}. Every <b>delta</b> is <b>test − reference</b> "
-                            f"(mu_test − mu_reference / median_tail_test − median_tail_reference), so a "
+                            f"(mu_test − mu_reference / mean_tail_test − mean_tail_reference), so a "
                             f"POSITIVE value means higher in <b>{_test}</b> (test) than in <b>{_ref}</b> "
                             f"(reference), and a negative value means lower.</p>")
             else:
