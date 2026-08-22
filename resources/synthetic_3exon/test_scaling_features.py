@@ -200,6 +200,11 @@ def test_nfail_score_k():
         ("Ndiff guard still applies regardless of k", P(100, 50, 0, 400, 3, 0.4) is False),
         # per-mod resolution
         ("bare scalar spec -> (k, empty map)", parse("0.7") == (0.7, {})),
+        # a map WITHOUT an explicit default must keep the standard k=1 guard for unlisted mods,
+        # NOT silently disable it (k=0) -> that bug inflated the FILTERED table ~46x.
+        ("map without default -> default_k=1.0 (guard stays on)", parse("a=0.4") == (1.0, {"a": 0.4})),
+        ("unlisted mod under no-default map -> k=1.0", resolve("m", *parse("a=0.4")) == 1.0),
+        ("explicit default=0 opt-in disables unlisted", parse("a=0.4,default=0") == (0.0, {"a": 0.4})),
         ("map spec parses default", dflt == 1.0),
         ("map spec: mod 'a' -> 0.4", resolve("a", dflt, per) == 0.4),
         ("map spec: pseU '17802' -> 1.0", resolve("17802", dflt, per) == 1.0),

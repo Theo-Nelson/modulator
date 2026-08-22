@@ -145,10 +145,13 @@ def parse_nfail_score_k(spec) -> "tuple[float, dict]":
 
     Accepts either:
       - a bare number, applied to every mod code:      "1.0"        -> (1.0, {})
-      - a per-mod-code map (comma-separated k=v):       "a=0.4,17802=1.0,default=1.0"
+      - a per-mod-code map (comma-separated k=v):       "a=0.4,17802=1.0"
         keys are mod codes exactly as they appear in the data (single letters like 'a','m'
-        or numeric ChEBI codes like '17802'); the special key 'default' sets the fallback for
-        any mod not listed. -> (1.0, {'a': 0.4, '17802': 1.0})
+        or numeric ChEBI codes like '17802'). Mods NOT listed inherit the fallback, which is the
+        standard k=1 guard unless overridden with an explicit 'default=' key -> (1.0, {'a':0.4,'17802':1.0}).
+        (Using default_k=1.0 here -- NOT 0.0 -- is critical: a map like 'a=0.4' must still filter the
+        other mod codes in the data, not silently disable the confident-call guard for them. To turn the
+        guard OFF for unlisted mods, opt in explicitly with 'default=0'.)
       - empty / None:                                   -> (0.0, {})   (filter disabled)
 
     k is the NFail-SCORE k-ratio calibrated per modification (basecaller + model + version); see
@@ -161,7 +164,7 @@ def parse_nfail_score_k(spec) -> "tuple[float, dict]":
         return (0.0, {})
     if ("=" not in s) and ("," not in s):
         return (float(s), {})                      # bare scalar -> all mods
-    default_k = 0.0
+    default_k = 1.0                                 # unlisted mods keep the standard guard, not k=0
     per_mod = {}
     for tok in s.split(","):
         tok = tok.strip()
