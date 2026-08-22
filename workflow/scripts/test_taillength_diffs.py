@@ -184,7 +184,10 @@ def main():
                              "q25": d["q25"], "q75": d["q75"]})
         medians = [pf["median"] for pf in per_frag]
         diff_rows.append({
-            "metagene_index": mg, "gene_name": g["gene_name"].iloc[0],
+            # a metagene can span >1 overlapping gene; label with ALL of them (not the first read's
+            # gene in file order), else e.g. an IGH-locus test is mislabelled as a single IGH gene.
+            "metagene_index": mg,
+            "gene_name": "+".join(sorted(g["gene_name"].dropna().astype(str).unique())) or "",
             "n_fragmentforms_tested": len(kept), "n_reads": n_total,
             "test_name": test_name, "stat_name": stat_name,
             "stat_value": round(float(stat), 4), "p_value": float(p),

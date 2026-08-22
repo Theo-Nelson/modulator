@@ -350,7 +350,10 @@ def annotate_isoform(iso, gtf_by_cs, tes_sorted_index, tes_match_tol, exact_tes_
     if cands:
         def rank(tx):
             same_chain = 0 if tx.chain_tx == iso["chain_tx"] else 1
-            return (abs(tx.tes_1based - tes), same_chain, -exon_overlap_len(iso["rep_exons"], tx.exons), -len(tx.chain_tx))
+            # chain IDENTITY must dominate TES proximity: a reference transcript with the SAME intron
+            # chain is the correct annotation even if another ref's TES is a few bp closer. Ranking TES
+            # first mislabels ~identical-chain forms as NOVEL_CHAIN and can pick the wrong gene_id.
+            return (same_chain, abs(tx.tes_1based - tes), -exon_overlap_len(iso["rep_exons"], tx.exons), -len(tx.chain_tx))
         best = min(cands, key=rank)
     else:
         overlaps = []

@@ -10,6 +10,7 @@ The payload is built per gene so the browser stays responsive: genes are indexed
 the selected gene's detail is rendered. No frameworks, no CDN -- it opens anywhere, offline.
 """
 import argparse
+import html
 import json
 import os
 import re
@@ -170,9 +171,15 @@ def main():
     data = {"genes": {r["gene"]: r for r in ranked},
             "index": [{"g": r["gene"], "n": len(r["forms"]), "r": r["reads"], "c": r["chrom"]} for r in ranked]}
     os.makedirs(os.path.dirname(args.out_html) or ".", exist_ok=True)
+    # Embed the JSON so it cannot break out of <script> or terminate it early: a gene_name / contrast
+    # containing '</script>' would otherwise close the block and the page would never initialise.
+    # \u-escaping < > & (and the JS line separators) keeps it valid JSON while HTML-inert.
+    data_json = (json.dumps(data, separators=(",", ":"))
+                 .replace("<", "\\u003c").replace(">", "\\u003e").replace("&", "\\u0026")
+                 .replace("\u2028", "\\u2028").replace("\u2029", "\\u2029"))
     with open(args.out_html, "w") as fh:
-        fh.write(_HTML.replace("__TITLE__", args.title)
-                      .replace("__DATA__", json.dumps(data, separators=(",", ":"))))
+        fh.write(_HTML.replace("__TITLE__", html.escape(args.title))
+                      .replace("__DATA__", data_json))
     if args.verbose:
         print(f"[browser] wrote {len(ranked):,} genes -> {args.out_html} "
               f"({os.path.getsize(args.out_html)/1e6:.1f} MB)", flush=True)

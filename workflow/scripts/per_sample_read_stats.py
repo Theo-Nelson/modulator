@@ -187,8 +187,9 @@ def _stats_for_one_sample(task):
 
             if aln.is_unmapped:
                 total_unmapped += 1
-            else:
-                total_mapped += 1
+            elif not (aln.is_secondary or aln.is_supplementary):
+                total_mapped += 1   # count READS with a primary mapped alignment, not every record
+                                    # (secondary/supplementary would inflate this ~60% over the read count)
 
             reason = considered_fail_reason(
                 aln,
