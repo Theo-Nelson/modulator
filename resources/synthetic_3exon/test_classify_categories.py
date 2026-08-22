@@ -5,7 +5,7 @@ Unit-validate the FULL classify_diff_sites.py structural taxonomy.
 The end-to-end synthetic run only reaches the classify categories whose
 differential site is covered by >=2 isoforms (shared-coverage categories:
 SHARED_TERMINAL_EXON, TANDEM_APA, EJC_SPLICING...). The "private-exon"
-categories (CASSETTE_EXON, INTRONIC_POLYADENYLATION, INTERGENIC_TERMINAL_EXON,
+categories (CASSETTE_EXON, INTRONIC_POLYADENYLATION,
 LAST_EXON_DISTAL_ONLY) require the site to be intronic/absent in the low
 isoform, so real reads never produce a 2-isoform test there. To validate those,
 this test drives classify_diff_sites.py directly: it hand-writes a GTF + a
@@ -91,6 +91,16 @@ CASES = [
      {1: ([(1000, 1200), (2000, 2500), (3000, 3500)], 3500, 100),   # from the 2500 decision site, so it is
       2: ([(1000, 1200), (2000, 2500)], 2500, 100)},                # DISTAL_APA, not IPA_NO_EXTENSION.
      2100, 1, 2, "SHARED_DISTAL", "DISTAL_APA"),
+
+    ("F1_FIVE_PRIME_UNCERTAIN",     # base internal in BOTH; hi's base exon is a FIRST exon (masked 5' acc
+     {1: ([(1500, 1700), (3000, 3500)], 3500, 100),                 # diff), same 3' end -> must NOT leak into
+      2: ([(1000, 1100), (1600, 1700), (3000, 3500)], 3500, 100)},  # IPA_NO_EXTENSION; it's the 5' blind spot.
+     1650, 1, 2, "UNEXPLAINABLE", "FIVE_PRIME_UNCERTAIN"),
+
+    ("F2_APA_DEADZONE_NOT_ALT_DONOR", # both terminal, shared acceptor, |dTES|=15 (<=tes_tol): sub-tolerance
+     {1: ([(1000, 1100), (2000, 2500)], 2500, 100),                 # tandem-APA jitter must NOT be ALT_DONOR;
+      2: ([(1000, 1100), (2000, 2515)], 2515, 100)},                # it is co-terminal -> SHARED_DISTAL.
+     2100, 1, 2, "SHARED_DISTAL", "DISTAL_SPLICING"),
 
     ("SHARED_DISTAL_SPLICING",      # base's exon identical, SAME 3' end (tes 3500); forms differ only in the 5' exon
      {1: ([(1000, 1200), (2000, 2200), (3000, 3500)], 3500, 100),

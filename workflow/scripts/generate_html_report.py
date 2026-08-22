@@ -248,7 +248,6 @@ CATEGORY_DEFINITIONS = {
     # 14-label `category` collapses into.
     "TANDEM_APA": "Tandem alternative polyadenylation: both isoforms share the same last exon (same acceptor) but cleave at different 3' ends; the site differs between the shorter- and longer-3'UTR forms.",
     "ALTERNATIVE_LAST_EXON": "The two isoforms are both terminal at the site but their terminal exons begin at DIFFERENT acceptor sites (distinct last exons).",
-    "INTERGENIC_TERMINAL_EXON": "A non-IPA terminal exon that is genomically disjoint and far (≥ intergenic-gap) from the comparator's terminal exon.",
     "INTRONIC_POLYADENYLATION": "The high isoform terminates within an intron of the longer form (IPA); the modified base exists only in the mature IPA isoform (IPA-private, or IPA-vs-full-length with EJC relief).",
     "EJC_SPLICING": "A shared base whose modification tracks removal of a nearby splice junction / exon-junction-complex (EJC) footprint in one isoform.",
     "CASSETTE_EXON": "The base sits in an internal/cassette exon included in one isoform and spliced out (or absent) in the other.",
@@ -264,7 +263,6 @@ CATEGORY_DEFINITIONS = {
     "LAST_EXON_PROXIMAL_APA_FAVORED": "Same terminal exon (same acceptor), different cleavage site; the PROXIMAL (shorter 3'UTR) isoform carries more m6A. Tandem 3'UTR APA, cleavage-independent.",
     "LAST_EXON_DISTAL_APA_FAVORED": "Same terminal-exon geometry; the DISTAL (longer 3'UTR) isoform carries more m6A. Tandem 3'UTR APA.",
     "ALTERNATIVE_LAST_EXON": "High and low isoforms are both terminal at the site, but their terminal exons begin at different (nearby/overlapping) acceptors — alternative last exons.",
-    "INTERGENIC_TERMINAL_EXON": "The site is exonic-terminal in a non-IPA high isoform whose terminal exon is genomically disjoint from the comparator's and separated by a large gap (>= --intergenic-gap) — spatially separated / read-through / intergenic-scale alternative last exons.",
     "SHARED_TERMINAL_EXON": "High and low isoforms share the same terminal exon AND the same cleavage site; m6A tracks isoform identity, not APA or EJC.",
     "SHARED_INTERNAL_EXON": "The site is in a constitutive internal exon with no junction asymmetry — not attributable to 3' architecture.",
     "UNEXPLAINED_SHARED": "Rare residual: terminal in the high isoform, internal in the low, with no nearby differential junction.",
@@ -2068,7 +2066,7 @@ def main():
     snp_mod_iso = {}
     if getattr(args, "assembled_gtf", "") and load_isoforms is not None and os.path.exists(args.assembled_gtf):
         try:
-            snp_mod_iso, _snp_mod_genes = load_isoforms(args.assembled_gtf, tes_tol=25, inside_tol=50)
+            snp_mod_iso, _snp_mod_genes = load_isoforms(args.assembled_gtf, tes_tol=25, arch_tol=50)
         except Exception:
             snp_mod_iso = {}
     diff_df = read_tsv(args.diff_results)

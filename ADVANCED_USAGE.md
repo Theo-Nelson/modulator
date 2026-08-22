@@ -273,16 +273,15 @@ the gene's longest-3′UTR isoform. Covers **all** detected `mod_code`s.
 | `classify_diffs.mod_filter` | list/null | `null` | mod_code(s) to classify (`null` = all detected). |
 | `classify_diffs.min_cov` | int | `0` | Extra per-isoform `Ncov` floor on JSON entries. |
 | `classify_diffs.tes_tol` | int | `200` | TES match tolerance for architecture/APA calls (the run scripts set `25` to match the assembler). |
-| `classify_diffs.inside_tol` | int | `50` | Last-exon acceptor match tolerance. |
+| `classify_diffs.arch_tol` | int | `50` | Isoform-architecture (IPA vs full-length) classification tolerance (bp): how far a TES may sit inside/outside the reference terminal exon. |
 | `classify_diffs.ejc_nt` | int | `150` | EJC suppression zone (nt). |
-| `classify_diffs.intergenic_gap` | int | `1000` | Minimum gap (bp) to call `INTERGENIC_TERMINAL_EXON`. |
 | `classify_diffs.figures` | bool | `true` | Render per-category isoform **architecture maps** (`__figs_by_category_arch/`) + 2-panel stoichiometry figures (`__figs_by_category/`). |
 | `classify_diffs.figs_per_category` | int | `10` | Top sites (by effect) per category to plot. |
 
 **Categories:** `IPA_UNIQUE`, `SPLICED_EXON_UNIQUE`, `LAST_EXON_DISTAL_ONLY`,
 `IPA_SHARED_EJC`, `SPLICING_EJC`, `LAST_EXON_PROXIMAL_APA_FAVORED`,
 `LAST_EXON_DISTAL_APA_FAVORED`, `ALTERNATIVE_LAST_EXON`,
-`INTERGENIC_TERMINAL_EXON`, `SHARED_TERMINAL_EXON`, `SHARED_INTERNAL_EXON`,
+`SHARED_TERMINAL_EXON`, `SHARED_INTERNAL_EXON`,
 `UNEXPLAINED_SHARED`, `HI_INTRONIC_ARTIFACT`, `UNCLASSIFIED`.
 
 ### 7. Genotype (optional)

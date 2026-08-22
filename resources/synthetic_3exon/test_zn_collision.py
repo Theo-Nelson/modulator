@@ -52,7 +52,7 @@ def main():
     with tempfile.TemporaryDirectory() as td:
         gtf = Path(td) / "u.gtf"
         write_gtf(gtf)
-        iso, genes = C.load_isoforms(str(gtf), tes_tol=25, inside_tol=50)
+        iso, genes = C.load_isoforms(str(gtf), tes_tol=25, arch_tol=50)
 
         d = iso[("G", "1")]
         # the merged model would have 4 exons (T1's 2 + T4's 2); the correct primary has just T1's 2.

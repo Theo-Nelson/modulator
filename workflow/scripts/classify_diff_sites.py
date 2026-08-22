@@ -59,16 +59,6 @@ nearest spliced junction, EJC_NT=150):
  -- A SHARED via an ALTERNATIVE / SEPARATE terminal exon --
   ALTERNATIVE_LAST_EXON   hi & lo terminal at the site but their terminal exons
                           start at DIFFERENT (but nearby/overlapping) acceptors.
-  INTERGENIC_TERMINAL_EXON  (NEW) the site is exonic_TERMINAL in a non-IPA high
-                          isoform whose terminal exon is genomically DISJOINT from
-                          the comparator's terminal exon and separated by a large
-                          gap (>= --intergenic-gap, default 1000 bp). The contrast
-                          spans spatially-separated terminal exons (read-through /
-                          downstream-independent / intergenic-scale alternative
-                          last exons) rather than a local 3'UTR-length (tandem APA)
-                          or a near alternative-last-exon. Absorbs a large share of
-                          what otherwise lands in SPLICED_EXON_UNIQUE /
-                          LAST_EXON_DISTAL_ONLY / ALTERNATIVE_LAST_EXON / residual.
 
  -- A SHARED with NO local 3' structural difference --
   SHARED_TERMINAL_EXON    hi & lo share the SAME terminal exon AND the SAME 3'
@@ -112,19 +102,19 @@ def _attr(s, key):
 
 # ----------------------------- isoform models ----------------------------- #
 
-def classify_arch(tes, exons, strand, ref_tes, ref_exons, tes_tol, inside_tol):
+def classify_arch(tes, exons, strand, ref_tes, ref_exons, tes_tol, arch_tol):
     """architecture of one isoform vs the gene reference (longest), from REAL exons."""
     if not ref_exons:
         return 'AMBIGUOUS'
     if strand == '+':
         upstream = ref_tes - tes
         ref_term_start = ref_exons[-1][0]
-        inside_term = (ref_term_start - inside_tol) <= tes <= (ref_tes + inside_tol)
+        inside_term = (ref_term_start - arch_tol) <= tes <= (ref_tes + arch_tol)
         gmin, gmax = ref_exons[0][0], max(ref_exons[-1][1], ref_tes)
     else:
         upstream = tes - ref_tes
         ref_term_end = ref_exons[0][1]
-        inside_term = (ref_tes - inside_tol) <= tes <= (ref_term_end + inside_tol)
+        inside_term = (ref_tes - arch_tol) <= tes <= (ref_term_end + arch_tol)
         gmin, gmax = min(ref_exons[0][0], ref_tes), ref_exons[-1][1]
     if abs(upstream) <= tes_tol:
         return 'FULL_LENGTH'
@@ -132,12 +122,12 @@ def classify_arch(tes, exons, strand, ref_tes, ref_exons, tes_tol, inside_tol):
         return 'DISTAL_EXT'
     if inside_term:
         return 'TANDEM_APA'              # proximal TES inside reference terminal exon
-    if gmin - inside_tol <= tes <= gmax + inside_tol:
+    if gmin - arch_tol <= tes <= gmax + arch_tol:
         return 'IPA'                     # proximal TES upstream of terminal exon
     return 'AMBIGUOUS'
 
 
-def load_isoforms(gtf_path, tes_tol, inside_tol):
+def load_isoforms(gtf_path, tes_tol, arch_tol):
     """iso[(gene, zn)] = dict(strand, chrom, tes, exons=[(s,e)...], rs, arch).
 
     Keyed by (ref_gene_name, zn_index): zn_index is what the ZN partition tag --
@@ -214,7 +204,7 @@ def load_isoforms(gtf_path, tes_tol, inside_tol):
         for zn in zns:
             for d in [iso[(g, zn)]] + iso[(g, zn)].get('variants', []):
                 d['arch'] = 'REFERENCE' if (zn == ref and d is iso[(g, zn)]) else classify_arch(
-                    d['tes'], d['exons'], strand, rd['tes'], rd['exons'], tes_tol, inside_tol)
+                    d['tes'], d['exons'], strand, rd['tes'], rd['exons'], tes_tol, arch_tol)
     return iso, genes
 
 
@@ -314,7 +304,6 @@ STRUCTURAL_OF = {
     'SPLICING_EJC': 'EJC_SPLICING', 'SPLICED_EXON_UNIQUE': 'CASSETTE_EXON',
     'LAST_EXON_PROXIMAL_APA_FAVORED': 'TANDEM_APA', 'LAST_EXON_DISTAL_APA_FAVORED': 'TANDEM_APA',
     'LAST_EXON_DISTAL_ONLY': 'TANDEM_APA', 'ALTERNATIVE_LAST_EXON': 'ALTERNATIVE_LAST_EXON',
-    'INTERGENIC_TERMINAL_EXON': 'INTERGENIC_TERMINAL_EXON',
     'SHARED_TERMINAL_EXON': 'SHARED_TERMINAL_EXON', 'SHARED_INTERNAL_EXON': 'SHARED_INTERNAL_EXON',
     'UNEXPLAINED_SHARED': 'UNEXPLAINED', 'HI_INTRONIC_ARTIFACT': 'ARTIFACT', 'UNCLASSIFIED': 'UNCLASSIFIED',
 }
@@ -363,10 +352,11 @@ def make_class_key(structural_category, stoich_direction):
     return f"{structural_category}__{stoich_direction}" if stoich_direction else structural_category
 
 
-def same_last_exon_start(th, tl, strand, inside_tol):
+def same_last_exon_start(th, tl, strand, tol):
+    # `tol` is the last-exon acceptor match tolerance; every call site passes tes_tol.
     a = th[0] if strand == '+' else th[1]
     b = tl[0] if strand == '+' else tl[1]
-    return abs(a - b) <= inside_tol
+    return abs(a - b) <= tol
 
 
 def exon_gap(a, b):
@@ -520,7 +510,16 @@ def classify_tree(gene, pos, hiZN, loZN, iso, *, tes_tol, ejc_nt):
         long_is_last = hi_last if hi_longer else lo_last
         exon_dir = 'LONGER_EXON_HIGHER' if hi_longer else 'LONGER_EXON_LOWER'
         acc_diff = (acc_hi != acc_lo) and not (hi_first or lo_first)   # 5' end is the blind spot
-        don_diff = (don_hi != don_lo)
+        # F1: a first-exon acceptor difference is MASKED above because the 5' model is unreliable. Record
+        # it so the site is routed to FIVE_PRIME_UNCERTAIN below instead of silently leaking into (c)/(d)
+        # (where it was mislabeled IPA_NO_EXTENSION / DISTAL_*).
+        acc_masked = (acc_hi != acc_lo) and (hi_first or lo_first)
+        # F2: when the base exon is TERMINAL in BOTH forms its 3' boundary is a poly(A) site, not a splice
+        # donor. A sub-tes_tol difference there is tandem-APA jitter within the assembler's own TES
+        # clustering (real APA is handled by branch (a), which requires |dTES| > tes_tol) -- it must not
+        # be called ALT_DONOR. Only apply the tolerance to the poly(A) case (both terminal).
+        both_terminal = hi_last and lo_last
+        don_diff = (don_hi != don_lo) and not (both_terminal and abs(don_hi - don_lo) <= tes_tol)
         if acc_diff or don_diff:
             # IPA_EXTENSION: the longer form's base exon IS its terminal exon and ends at its own
             # poly(A) site (reads into the intron and terminates there), NOT co-terminal with the other
@@ -551,14 +550,21 @@ def classify_tree(gene, pos, hiZN, loZN, iso, *, tes_tol, ejc_nt):
                 info['delta_nt'] = abs(don_hi - don_lo)
                 return 'SHARED_LOCAL', 'ALT_DONOR', exon_dir, info
 
+        # F1: the only structural signal was a first-exon acceptor shift, masked as the 5' blind spot.
+        # The assembled model is unreliable at the 5' end, so this is not a real local event -- route it
+        # to FIVE_PRIME_UNCERTAIN rather than letting it fall into (c)/(d).
+        if acc_masked:
+            return 'UNEXPLAINABLE', 'FIVE_PRIME_UNCERTAIN', '', info
+
     # (c) IPA_NO_EXTENSION: the base's exon coordinates are identical in both forms (branch (b) already
-    # consumed every boundary shift), yet a junction sits within the EJC/cleavage footprint of the base
-    # in ONE form only. Structurally this can only mean one form SPLICES at the base's exon boundary
-    # while the other POLYADENYLATES (terminates) at that same coordinate -- a splicing-vs-cleavage
-    # decision at the base, not alternative splicing between two spliced forms (that residual is
-    # unreachable; see the classifier tests). jd_hi>ejc => the HIGHER form lacks the junction => it is
-    # the poly(A)/terminal form; else it is the spliced form.
-    if (info['jd_hi'] <= ejc_nt) != (info['jd_lo'] <= ejc_nt):
+    # consumed every boundary shift), and EXACTLY ONE form is exonic_TERMINAL at the base -- it
+    # POLYADENYLATES at its exon boundary while the other SPLICES onward at that same coordinate (the
+    # junction is within the EJC/cleavage footprint of the base in one form only). This is the genuine
+    # splicing-vs-cleavage decision. If BOTH forms are internal the differential junction is NOT a
+    # cleavage decision (chiefly a 5' blind-spot artifact, already handled above), so it is excluded
+    # here. jd_hi>ejc => the HIGHER form lacks the junction => it is the poly(A)/terminal form.
+    one_terminal = (sh == 'exonic_terminal') != (sl == 'exonic_terminal')
+    if one_terminal and ((info['jd_hi'] <= ejc_nt) != (info['jd_lo'] <= ejc_nt)):
         d = 'POLYA_FORM_HIGHER' if info['jd_hi'] > ejc_nt else 'SPLICED_FORM_HIGHER'
         return 'SHARED_LOCAL', 'IPA_NO_EXTENSION', d, info
 
@@ -573,7 +579,7 @@ CATEGORY_ORDER = [
     'IPA_UNIQUE', 'SPLICED_EXON_UNIQUE', 'LAST_EXON_DISTAL_ONLY',
     'IPA_SHARED_EJC', 'SPLICING_EJC',
     'LAST_EXON_PROXIMAL_APA_FAVORED', 'LAST_EXON_DISTAL_APA_FAVORED',
-    'ALTERNATIVE_LAST_EXON', 'INTERGENIC_TERMINAL_EXON',
+    'ALTERNATIVE_LAST_EXON',
     'SHARED_TERMINAL_EXON', 'SHARED_INTERNAL_EXON',
     'UNEXPLAINED_SHARED', 'HI_INTRONIC_ARTIFACT', 'UNCLASSIFIED',
 ]
@@ -687,11 +693,13 @@ def parse_args():
     ap.add_argument("--tes-tol", type=int, default=25,
                     help="TES match tolerance (bp); matches assembler.tes_match_tol. Default 25 "
                          "(was 200, which lumped sub-200bp tandem-APA into SHARED_TERMINAL_EXON).")
-    ap.add_argument("--inside-tol", type=int, default=50)
+    ap.add_argument("--arch-tol", type=int, default=50,
+                    help="tolerance (bp) for isoform-architecture classification (classify_arch): how "
+                         "far a TES may sit inside/outside the reference terminal exon to share its "
+                         "architecture (feeds the IPA vs full-length call). Default 50. "
+                         "(Renamed from --inside-tol, which was documented as a last-exon acceptor "
+                         "tolerance it never actually controlled.)")
     ap.add_argument("--ejc-nt", type=int, default=150)
-    ap.add_argument("--intergenic-gap", type=int, default=1000,
-                    help="min genomic gap (bp) between disjoint terminal exons to call "
-                         "INTERGENIC_TERMINAL_EXON. Default 1000")
     ap.add_argument("--verbose", action="store_true")
     # --- optional per-category figure rendering (the "same kind of graphs") ---
     ap.add_argument("--zn-long", default="",
@@ -1013,7 +1021,7 @@ def render_arch_figures(fig_records, iso, genes, figs_dir, per_category, verbose
 
 def main():
     args = parse_args()
-    iso, genes = load_isoforms(args.gtf, args.tes_tol, args.inside_tol)
+    iso, genes = load_isoforms(args.gtf, args.tes_tol, args.arch_tol)
     if args.verbose:
         print(f"[classify] isoform models: {len(iso)} over {len(genes)} genes", file=sys.stderr)
 
@@ -1080,6 +1088,20 @@ def main():
         hi = max(cov_tx, key=lambda t: t['frac'])
         lo = min(cov_tx, key=lambda t: t['frac'])
         hiZN = str(hi['ZN']); loZN = str(lo['ZN'])
+        # F4: if every covered form is tied in modified fraction, max()/min() return the SAME isoform,
+        # so classify_tree would compare a form against itself and always emit SHARED_DISTAL/
+        # DISTAL_SPLICING/SAME_3PRIME_END. There is no hi-vs-lo contrast to explain (effect is 0) --
+        # this is NO_MODEL, not an assertion that the difference lies elsewhere.
+        if hiZN == loZN:
+            n_no_model += 1
+            ck = 'UNEXPLAINABLE__NO_MODEL'
+            counts[ck] += 1
+            rows.append([gene, mod, r['chrom'], pos, r.get('end0', pos + 1), strand,
+                         ck, 'UNEXPLAINABLE', 'NO_MODEL', '', '',
+                         r.get('n_tx_tested', ''), f"{eff:.4f}", f"{padj:.3e}",
+                         '', '', '', '', '', '', '',
+                         '', '', '', '', '', ''])
+            continue
         anchorZN = anchor_of(gene, genes[gene], iso)
         bucket, event, direction, info = classify_tree(
             gene, cpos, hiZN, loZN, iso, tes_tol=args.tes_tol, ejc_nt=args.ejc_nt)

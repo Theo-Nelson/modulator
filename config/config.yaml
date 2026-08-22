@@ -188,7 +188,7 @@ test_diffs:
 # Post-test_diffs granular structural classification of significant ZN sites.
 # Assigns each significant between-isoform site a single MECE category explaining
 # WHY the isoforms differ in modification stoichiometry there (IPA-private, EJC
-# relief, tandem-APA, alternative/intergenic terminal exon, etc.), anchored to the
+# relief, tandem-APA, alternative last exon, etc.), anchored to the
 # longest-3'UTR isoform. Covers ALL detected modifications, not just m6A. Only sites
 # passing fdr AND min_effect (the >10% absolute rule) classify.
 classify_diffs:
@@ -198,9 +198,8 @@ classify_diffs:
   mod_filter: null      # null -> ALL detected modifications; e.g. ["a"] for m6A only
   min_cov: 0            # extra per-isoform Ncov floor (test_diffs already filters)
   tes_tol: 25           # TES match tolerance for architecture/APA calls; matches the assembler's tes_match_tol so "same TES" is consistent between assembly and classification (was 200, which lumped sub-200bp tandem-APA into SHARED_TERMINAL_EXON)
-  inside_tol: 50        # last-exon acceptor match tolerance
-  ejc_nt: 150           # EJC suppression zone (nt) for SPLICING_EJC
-  intergenic_gap: 1000  # min gap (bp) between disjoint terminal exons -> INTERGENIC_TERMINAL_EXON
+  arch_tol: 50          # isoform-architecture (IPA vs full-length) classification tolerance; how far a TES may sit inside/outside the reference terminal exon (feeds classify_arch). Renamed from inside_tol.
+  ejc_nt: 150           # EJC/cleavage footprint (nt): max base-to-decision distance for IPA_NO_EXTENSION (a splice-vs-poly(A) site at the base). NOTE this is a near-vs-distal boundary (a monotone tolerance): a base farther than ejc_nt from the same decision is classified DISTAL_APA instead, so widening ejc_nt moves sites from DISTAL_APA into IPA_NO_EXTENSION.
   figures: true         # render per-category figures (isoform architecture maps + 2-panel stoich)
   figs_per_category: 10 # top sites (by effect) to plot per category
 

@@ -1399,9 +1399,8 @@ class ModulatorPipeline:
             "--fdr", str(cfg.get("fdr", 0.05)),
             "--min-cov", str(cfg.get("min_cov", 0)),
             "--tes-tol", str(cfg.get("tes_tol", 25)),
-            "--inside-tol", str(cfg.get("inside_tol", 50)),
+            "--arch-tol", str(cfg.get("arch_tol", cfg.get("inside_tol", 50))),
             "--ejc-nt", str(cfg.get("ejc_nt", 150)),
-            "--intergenic-gap", str(cfg.get("intergenic_gap", 1000)),
             "--verbose",
         ]
         # Coverage-independent PRIVATE-site scan (needs the FILTERED long table; independent of the
