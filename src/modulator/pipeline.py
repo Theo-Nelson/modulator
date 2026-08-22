@@ -36,13 +36,13 @@ STAGE_ORDER = [
     "read_stats",
     "splice_junctions",
     "apa_motifs",
-    "multigene_filter",
     "modkit_zn",
     "aggregate_zn",
     "novel_loci",
     "sequence_elements",
     "test_diffs",
     "classify_diffs",
+    "multigene_filter",
     "genotype",
     "polya",
     "hierarchical_stoich",
@@ -347,7 +347,13 @@ class PipelinePaths:
     def zt_tagged_bam(self, sample: str) -> Path:
         return self.zt_tagged_dir / f"{sample}.zt_tagged.bam"
 
-    def clean_bam(self, sample: str) -> Path:
+    def multigene_clean_bam(self, sample: str) -> Path:
+        # The multigene-filter output: the ZT-tagged BAM with reads that ambiguously overlap
+        # >1 gene removed. This feeds the genotype/SNP path (a tag-agnostic pileup that would
+        # otherwise count those ambiguous reads) and polya's ZT-grouped tail tables. modkit
+        # reads the raw zt_tagged BAM directly -- its ZN partitioning already excludes untagged
+        # reads, so the removal has no effect on the modification pileups. Basename keeps the
+        # `.zt_tagged.clean.bam` suffix so genotype_utils.sample_name_from_bam() still resolves it.
         return self.zt_filtered_dir / f"{sample}.zt_tagged.clean.bam"
 
     def scrap_bam(self, sample: str) -> Path:
@@ -736,7 +742,7 @@ class ModulatorPipeline:
         if stage == "multigene_filter":
             if not as_bool(cfg.get("multigene_filter", {}).get("enable", True), True):
                 return True
-            return self._all_samples(p.clean_bam) and self._nonempty(p.multigene_scrap_tx_counts)
+            return self._all_samples(p.multigene_clean_bam) and self._nonempty(p.multigene_scrap_tx_counts)
         if stage == "modkit_zn":
             if not as_bool(toggles.get("enable_zn_pileup", True), True):
                 return True
@@ -1083,6 +1089,14 @@ class ModulatorPipeline:
         ], label="annotate_sequence_elements")
 
     def stage_multigene_filter(self) -> None:
+        """Remove reads that ambiguously overlap >1 gene, producing the multigene-cleaned BAM.
+
+        Scoped to the genotype path: it runs immediately before `genotype` because the SNP scan
+        is a tag-agnostic pileup over every read, so ambiguous multi-gene reads (chiefly no-ZT
+        reads at overlapping loci) would otherwise inflate allele counts there. The modkit ZN
+        pileup is unaffected -- it reads the raw ZT-tagged BAM and its ZN partitioning already
+        drops untagged reads -- so this stage does NOT gate or alter the modification calls.
+        """
         cfg = self.config.get("multigene_filter", {})
         if not as_bool(cfg.get("enable", True), True):
             return
@@ -1092,7 +1106,7 @@ class ModulatorPipeline:
         for sample in self.samples:
             input_bam = self.paths.zt_tagged_bam(sample)
             self._require_existing_file(input_bam, f"ZT-tagged BAM for sample {sample}")
-            output_clean = self.paths.clean_bam(sample)
+            output_clean = self.paths.multigene_clean_bam(sample)
             output_scrap = self.paths.scrap_bam(sample)
             output_summary = self.paths.multigene_summary(sample)
             output_removed = self.paths.multigene_removed(sample)
@@ -1127,8 +1141,18 @@ class ModulatorPipeline:
         self.run_python_script("aggregate_scrap_tx_counts.py", args, label="aggregate_scrap_tx_counts")
 
     def _modkit_input_bam(self, sample: str) -> Path:
+        # modkit ALWAYS reads the raw ZT-tagged BAM. Its `--partition-tag ZN` pileup only
+        # emits per-ZN partitions and drops untagged reads into ungrouped.bed (which the
+        # pileup step skips), so the multigene filter's read removal has no effect on the
+        # modification pileups. The filter output feeds only the genotype path below.
+        return self.paths.zt_tagged_bam(sample)
+
+    def _genotype_input_bam(self, sample: str) -> Path:
+        # The genotype/SNP scan is a tag-agnostic pileup over EVERY read, so it is the one
+        # consumer that ambiguous multi-gene reads would contaminate. Use the multigene-cleaned
+        # BAM when the filter is enabled; otherwise fall back to the raw tagged BAM.
         if as_bool(self.config.get("multigene_filter", {}).get("enable", True), True):
-            return self.paths.clean_bam(sample)
+            return self.paths.multigene_clean_bam(sample)
         return self.paths.zt_tagged_bam(sample)
 
     def _format_common_modkit_flags(self, common: dict[str, Any], *, sample: str, which: str, threads: int) -> list[str]:
@@ -1428,7 +1452,7 @@ class ModulatorPipeline:
         snp_jobs = max(1, min(self.top_threads if self.top_threads > 0 else 8,
                               _snp_cfg if _snp_cfg > 0 else (self.top_threads or 8)))
         sample_bams = [
-            str(self._require_existing_file(self._modkit_input_bam(sample), f"genotype input BAM for sample {sample}"))
+            str(self._require_existing_file(self._genotype_input_bam(sample), f"genotype input BAM for sample {sample}"))
             for sample in self.samples
         ]
         self._require_existing_file(self.paths.classification_summary, "classification summary TSV")
@@ -1778,7 +1802,7 @@ class ModulatorPipeline:
         if not as_bool(cfg.get("enable", True), True):
             return
         # Prefer the multigene-cleaned tagged BAMs (final assignment set); fall back to the tagged BAMs.
-        bams = [self.paths.clean_bam(s) for s in self.samples]
+        bams = [self.paths.multigene_clean_bam(s) for s in self.samples]
         if not all(self._nonempty(b) for b in bams):
             bams = [self.paths.zt_tagged_bam(s) for s in self.samples]
         bams = [b for b in bams if self._nonempty(b)]
