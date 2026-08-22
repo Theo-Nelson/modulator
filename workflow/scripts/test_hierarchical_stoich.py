@@ -266,7 +266,10 @@ def _process_chrom(ra, mods, gtf, args):
                         continue
                     am = ia.intersection_cardinality(mbm); au = ia.intersection_cardinality(ubm)
                     bm_ = ib.intersection_cardinality(mbm); bu = ib.intersection_cardinality(ubm)
-                    if min(am + au, bm_ + bu) < args.min_state_reads * 2:
+                    # require min_state_reads in EACH modification state of EACH fragmentform (per the
+                    # help text + the sibling scripts) -- checking the per-fragmentform TOTAL let a zero
+                    # cell through (e.g. 6 mod / 0 unmod) and inflated the BH family.
+                    if min(am, au, bm_, bu) < args.min_state_reads:
                         continue
                     if (am + au) == 0 or (bm_ + bu) == 0:
                         continue

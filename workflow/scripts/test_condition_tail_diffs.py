@@ -26,7 +26,7 @@ import diffstats
 from genotype_utils import benjamini_hochberg
 
 OUT_COLS = ["contrast", "level", "feature", "gene_name", "n_reference", "n_test",
-            "reads_reference", "reads_test", "median_tail_reference", "median_tail_test",
+            "reads_reference", "reads_test", "mean_tail_reference", "mean_tail_test",
             "delta_nt", "stat", "p_value", "p_adj_bh", "per_sample_json", "per_replicate_json"]
 
 
@@ -100,8 +100,10 @@ def main():
             "n_reference": r["n_reference"], "n_test": r["n_test"],
             "reads_reference": int(sum(n[s] for s in ref_s if s in n)),
             "reads_test": int(sum(n[s] for s in test_s if s in n)),
-            "median_tail_reference": round(r["mean_reference"], 2),
-            "median_tail_test": round(r["mean_test"], 2),
+            # these are the MEAN over replicates of each replicate's median tail (continuous_diff/Welch
+            # works on replicate summaries), so name them mean_* -- delta_nt = mean_test - mean_reference.
+            "mean_tail_reference": round(r["mean_reference"], 2),
+            "mean_tail_test": round(r["mean_test"], 2),
             "delta_nt": round(r["delta"], 2), "stat": round(r["stat"], 4), "p_value": r["p_value"],
             "per_sample_json": json.dumps({s: [round(float(m[s]), 1), int(n[s])] for s in sorted(m)},
                                           separators=(",", ":")),

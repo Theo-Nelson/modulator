@@ -163,27 +163,31 @@ def scan_pas(mrna, pas_window):
     region = mrna[max(0, L - pas_window):]
     off = max(0, L - pas_window)
     for motif in [PAS_CANON] + PAS_VARIANTS:
-        for m in re.finditer(motif, region):
-            t0 = off + m.start()
+        for m in re.finditer(f"(?=({motif}))", region):   # lookahead -> OVERLAPPING hexamer matches
+            t0 = off + m.start(1)
             dist = L - (t0 + 6)  # nt from hexamer 3' end to the transcript 3' end
             sub = "canonical" if motif == PAS_CANON else "variant"
             hits.append((f"{sub}:{motif}", t0, t0 + 6, dict(distance_to_3p=dist)))
     return hits
 
 
-def _scan_regex(seq, pat, lo, hi, subclass):
+def _scan_regex(seq, pat, lo, hi, subclass, overlapping=False):
+    # short motifs (ARE, CPE, PAS) can OVERLAP -- e.g. ATTTATTTA contains two ATTTA -- which plain
+    # re.finditer (non-overlapping) misses; a lookahead (?=(pat)) recovers them.
     hits = []
-    for m in re.finditer(pat, seq[lo:hi]):
-        hits.append((subclass, lo + m.start(), lo + m.end(), {}))
+    rx = f"(?=({pat}))" if overlapping else pat
+    for m in re.finditer(rx, seq[lo:hi]):
+        s, e = (m.start(1), m.end(1)) if overlapping else (m.start(), m.end())
+        hits.append((subclass, lo + s, lo + e, {}))
     return hits
 
 
 def scan_are(mrna, lo, hi):
-    return _scan_regex(mrna, r"ATTTA", lo, hi, "AUUUA")
+    return _scan_regex(mrna, r"ATTTA", lo, hi, "AUUUA", overlapping=True)
 
 
 def scan_cpe(mrna, lo, hi):
-    return _scan_regex(mrna, r"TTTTA[AT]", lo, hi, "UUUUAW")
+    return _scan_regex(mrna, r"TTTTA[AT]", lo, hi, "UUUUAW", overlapping=True)
 
 
 def scan_gre(mrna, lo, hi):

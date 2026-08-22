@@ -141,6 +141,11 @@ def _site_rows_for_chrom(mod_path, tail_map, args):
         mod = mod[(~mod["fail"].fillna(True)) & mod["within_alignment"].fillna(False)].copy()
     if mod.empty:
         return [], []
+    # a read at a site claimed by >1 overlapping gene appears once PER gene (mod_site_id omits gene_id),
+    # so dedup by (sample, qname, mod_site_id) -- this test, unlike its siblings, does not otherwise
+    # dedup by read, so duplicates were double-counted and flipped borderline significance.
+    if {"sample", "qname", "mod_site_id"}.issubset(mod.columns):
+        mod = mod.drop_duplicates(["sample", "qname", "mod_site_id"])
     key = mod["sample"].astype(str) + "\x00" + mod["qname"].astype(str)
     mod["tail_len"] = key.map(tail_map).to_numpy()
     mod = mod[mod["tail_len"].notna()]

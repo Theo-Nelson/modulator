@@ -1110,7 +1110,7 @@ class ModulatorPipeline:
                 "--out-removed-tsv", str(output_removed),
                 "--out-scrap-tx-counts-tsv", str(output_counts),
                 "--zero-gene-action", str(cfg.get("zero_gene_action", "keep")),
-                "--multi-gene-action", str(cfg.get("multi_gene_action", "scrap_conflict")),
+                "--multi-gene-action", str(cfg.get("multi_gene_action", "scrap_unresolved")),
             ]
             tasks.append((
                 f"multigene_filter[{sample}]",

@@ -205,12 +205,14 @@ def main():
     ap.add_argument(
         "--multi-gene-action",
         choices=["scrap_conflict", "scrap_unresolved", "keep"],
-        default="scrap_conflict",
+        default="scrap_unresolved",
         help="What to do with reads exonically overlapping >1 gene. "
-             "scrap_conflict (default): scrap only reads whose ZT-assigned gene is not among the "
-             "overlapping genes (multi_gene_assignment_conflict). scrap_unresolved: also scrap reads "
-             "with no ZT tag (multi_gene_no_zt). keep: retain all multi-gene reads (legacy no-op). "
-             "Reads resolved by their ZT tag (multi_gene_kept_by_zt) are always kept."
+             "scrap_unresolved (default): scrap reads with no ZT tag (multi_gene_no_zt) -- genuinely "
+             "ambiguous, they would otherwise contaminate the per-gene pileups at overlapping loci -- "
+             "AND reads whose ZT-assigned gene is not among the overlapping genes "
+             "(multi_gene_assignment_conflict). scrap_conflict: scrap only the assignment conflicts. "
+             "keep: retain all multi-gene reads (legacy no-op). Reads resolved by their ZT tag "
+             "(multi_gene_kept_by_zt) are always kept."
     )
     args = ap.parse_args()
 

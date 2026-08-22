@@ -1292,8 +1292,8 @@ def build_between_conditions_section(bc_dir, top_n, top_note=""):
                                                                  "mu_test", "delta", "p_adj_bh"], "delta"),
              ("junction_usage_diffs", "Differential junction usage", ["gene_name", "feature", "mu_reference",
                                                                       "mu_test", "delta", "p_adj_bh"], "delta"),
-             ("tail_diffs", "Differential poly(A) tail length", ["gene_name", "feature", "median_tail_reference",
-                                                                 "median_tail_test", "delta_nt", "p_adj_bh"], "delta_nt")]
+             ("tail_diffs", "Differential poly(A) tail length", ["gene_name", "feature", "mean_tail_reference",
+                                                                 "mean_tail_test", "delta_nt", "p_adj_bh"], "delta_nt")]
     found = {}
     for path in sorted(glob.glob(os.path.join(bc_dir, "*.tsv"))):
         base = os.path.basename(path)

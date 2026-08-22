@@ -73,11 +73,12 @@ multigene_filter:
   enable: true
   zero_gene_action: keep
   # What to do with reads exonically overlapping >1 gene:
-  #   scrap_conflict   (default) scrap reads whose ZT-assigned gene is not among the overlapping genes
-  #   scrap_unresolved  additionally scrap reads with no ZT tag
+  #   scrap_unresolved (default) scrap reads with NO ZT tag (genuinely ambiguous -- they would
+  #                    contaminate per-gene pileups at overlapping loci) AND ZT-assignment conflicts
+  #   scrap_conflict    scrap ONLY reads whose ZT-assigned gene is not among the overlapping genes
   #   keep              retain all multi-gene reads (legacy behavior; the filter was previously a no-op)
   # Reads resolved by their ZT tag (multi_gene_kept_by_zt) are always kept.
-  multi_gene_action: scrap_conflict
+  multi_gene_action: scrap_unresolved
 
 modkit:
   common:
