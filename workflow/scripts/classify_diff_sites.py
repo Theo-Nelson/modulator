@@ -1033,6 +1033,8 @@ def main():
             gene = r['gene_name']; pos = int(r['start0']); cpos = pos + 1; strand = r['strand']
         except (ValueError, TypeError, KeyError):
             continue  # one malformed row must not abort the whole classification stage
+        if pos < 0:
+            continue  # a negative/out-of-range coordinate is not a real base -> don't emit a spurious UNEXPLAINABLE row
         n_considered += 1
 
         try:
