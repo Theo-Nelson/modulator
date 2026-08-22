@@ -23,7 +23,8 @@ from pyroaring import BitMap
 import pandas as pd
 
 from genotype_utils import (benjamini_hochberg, binary_rate_delta, context_key_from_row,
-                            context_key_from_snp_row, load_molecule_mods_for_pairing,
+                            context_key_from_snp_row, context_keys_from_snp_row,
+                            load_molecule_mods_for_pairing,
                             run_contingency_test, shard_tsv_by_chrom, tsv_header)
 
 SNP_USECOLS = ["sample", "qname", "snp_id", "chrom", "pos1", "start0", "end0",
@@ -65,7 +66,12 @@ def _pairs_for_one_chrom(mod_path, snp_path, args):
     if snp_df.empty:
         return []
     mod_df["context_key"] = mod_df.apply(context_key_from_row, axis=1)
-    snp_df["context_key"] = snp_df.apply(context_key_from_snp_row, axis=1)
+    # Fan out each SNP over EVERY context (metagene) it spans, so a SNP overlapping >1 gene is paired
+    # with modifications in each -- collapsing to one CHR: key silently drops multi-metagene SNPs
+    # (0/123 reached snp_mod_assoc on real data before this).
+    snp_df = snp_df.copy()
+    snp_df["context_key"] = snp_df.apply(context_keys_from_snp_row, axis=1)
+    snp_df = snp_df.explode("context_key", ignore_index=True)
     snp_by_ctx = {k: v for k, v in snp_df.groupby("context_key", sort=False)}
 
     rows = []

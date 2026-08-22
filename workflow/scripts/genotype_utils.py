@@ -184,6 +184,28 @@ def context_key_from_snp_row(row) -> str:
     return build_context_key(str(row.get("chrom", "")))
 
 
+def context_keys_from_snp_row(row) -> list:
+    """ALL context keys a SNP should pair against (a superset of context_key_from_snp_row).
+
+    A SNP overlapping several metagenes (i.e. overlapping genes) is cis to modifications in EACH of
+    them, so it must be registered under every MG: track it spans. Collapsing such a SNP to a single
+    CHR: key -- as context_key_from_snp_row does -- leaves it unmatchable against the mod side, which
+    always keys on one metagene_index -> MG:x, silently dropping it from snp_mod_assoc / haplotype
+    associations. Falls back to per-gene GENE: keys, then a single CHR:, mirroring the single-key form
+    (a single-metagene SNP returns exactly [MG:x], so behaviour is unchanged for the common case)."""
+    metagenes = sorted({normalize_text_token(t, numeric=True)
+                        for t in str(row.get("metagene_indices", "")).split(";")
+                        if normalize_text_token(t, numeric=True)})
+    if metagenes:
+        return [f"MG:{m}" for m in metagenes]
+    genes = sorted({normalize_text_token(t)
+                   for t in str(row.get("gene_names", "")).split(";")
+                   if normalize_text_token(t)})
+    if genes:
+        return [f"GENE:{g}" for g in genes]
+    return [build_context_key(str(row.get("chrom", "")))]
+
+
 def context_key_from_row(
     row,
     *,
