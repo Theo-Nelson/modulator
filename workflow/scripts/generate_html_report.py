@@ -1042,19 +1042,60 @@ def definitions_html(items, *, summary="Definitions", open_by_default=False):
     )
 
 
+# Human-readable names for the modification codes that appear in tables. The single-letter codes are
+# the SAM/BAM MM-tag shorthands; the numeric ones are ChEBI IDs (dorado emits these for RNA mods). The
+# 2'-O-methyl codes are base-specific (each appears only on its cognate base): 69426=A, 19228=C,
+# 19229=G, 19227=U.
+MOD_CODE_LABELS = {
+    "a": "m6A", "m": "5mC", "h": "5hmC", "f": "5fC", "c": "5caC", "g": "5hmU", "e": "5fU", "b": "5caU",
+    "17596": "inosine", "17802": "pseudouridine",
+    "69426": "2'-O-methyladenosine, Am", "19228": "2'-O-methylcytidine, Cm",
+    "19229": "2'-O-methylguanosine, Gm", "19227": "2'-O-methyluridine, Um",
+    "21839": "4mC",
+}
+
+
+def label_mod_code(code):
+    """'a' -> 'a (m6A)', '17802' -> '17802 (pseudouridine)'. Unknown codes pass through unchanged."""
+    if code is None or (isinstance(code, float) and pd.isna(code)):
+        return code
+    s = str(code).strip()
+    lab = MOD_CODE_LABELS.get(s)
+    return f"{s} ({lab})" if lab else s
+
+
 def df_to_html(df, max_rows=25):
     if df is None or df.empty:
         return "<p class='muted'>No data available.</p>"
-    table = df.head(max_rows).to_html(index=False, escape=True, classes="datatable", border=0)
+    d = df.head(max_rows).copy()
+    # annotate raw modification codes with their common names, in place, for readability
+    for col in ("mod_code", "target_mod_code"):
+        if col in d.columns:
+            d[col] = d[col].map(label_mod_code)
+    table = d.to_html(index=False, escape=True, classes="datatable", border=0)
     return f"<div class='table-wrap'>{table}</div>"
+
+
+_USED_SLUGS = set()
+
+
+def _section_slug(title):
+    """Stable, unique anchor slug for a section title (drives the sidebar table of contents)."""
+    base = re.sub(r"[^a-z0-9]+", "-", str(title).lower()).strip("-") or "section"
+    slug, i = base, 2
+    while slug in _USED_SLUGS:
+        slug, i = f"{base}-{i}", i + 1
+    _USED_SLUGS.add(slug)
+    return slug
 
 
 def section(title, body, *, intro="", definitions=""):
     intro_html = f"<p class='section-intro'>{intro}</p>" if intro else ""
     # Each section is a collapsible open/close panel: the header (h2) lives in the <summary>, and
-    # everything after it collapses. Defaults open.
+    # everything after it collapses. Defaults open. The id anchors the sidebar table of contents.
+    slug = _section_slug(title)
     return (
-        "<section><details class='report-section' open>"
+        f"<section id='sec-{slug}'><details class='report-section' open>"
         f"<summary><h2>{html.escape(title)}</h2></summary>"
         f"<div class='section-body'>{intro_html}{definitions}{body}</div>"
         "</details></section>"
@@ -1063,6 +1104,52 @@ def section(title, body, *, intro="", definitions=""):
 
 def subsection(title, body, *, definitions=""):
     return f"<div class='subsection'><h3>{html.escape(title)}</h3>{definitions}{body}</div>"
+
+
+_GLOSSARY_TERMS = [
+    ("fragmentform", "A read-backed partial transcript — the exact exon / junction / 3'-end structure "
+                     "supported by reads. This is modulator's core unit of analysis, finer-grained than a "
+                     "gene or a single reference transcript."),
+    ("ZT", "BAM tag: the fragmentform a read was assigned to. Shown human-readably as zt_label (e.g. GENE.G3.T2)."),
+    ("ZN", "BAM tag: the aggregation TRACK (transcript partition) a fragmentform belongs to. Non-overlapping "
+           "fragmentforms can SHARE one ZN track, so ZN partitions ≤ fragmentforms. Modification calling is "
+           "done per ZN track."),
+    ("ZG", "BAM tag: the gene a read was assigned to."),
+    ("ZM", "BAM tag: the metagene a read belongs to."),
+    ("metagene", "A connected group of same-strand overlapping genes analyzed together; non-overlapping genes "
+                 "each form their own metagene, so metagenes ≤ genes."),
+    ("stoichiometry", "Fraction of reads modified at a site = Nmod / Nvalid_cov."),
+    ("delta / effect size", "A test − reference difference. Units are per section: modified/usage fraction, or "
+                            "nucleotides of poly(A) tail."),
+]
+# The RNA modifications dorado v6 emits, in a sensible reading order, for the glossary reference table.
+_GLOSSARY_MOD_ORDER = ["a", "m", "17596", "17802", "69426", "19228", "19229", "19227"]
+
+
+def build_glossary_section(observed_mods=None):
+    """A short glossary at the top of the report: modulator's core terms + the modification codes that
+    appear in the tables (labelled), so the reader never has to leave the report to decode 'ZN' or '17802'."""
+    term_rows = "".join(
+        f"<tr><td><code>{html.escape(t)}</code></td><td>{html.escape(d)}</td></tr>" for t, d in _GLOSSARY_TERMS)
+    term_tbl = ("<div class='table-wrap'><table class='datatable'><thead><tr><th>term</th>"
+                f"<th>meaning</th></tr></thead><tbody>{term_rows}</tbody></table></div>")
+    obs = {str(m) for m in observed_mods} if observed_mods else None
+    codes = [c for c in _GLOSSARY_MOD_ORDER if (obs is None or c in obs)]
+    codes += [c for c in sorted(obs or []) if c not in _GLOSSARY_MOD_ORDER]   # any extra observed codes
+    if not codes:
+        codes = _GLOSSARY_MOD_ORDER
+    mod_rows = "".join(
+        f"<tr><td><code>{html.escape(c)}</code></td><td>{html.escape(MOD_CODE_LABELS.get(c, 'unknown code'))}</td></tr>"
+        for c in codes)
+    mod_tbl = ("<div class='table-wrap'><table class='datatable'><thead><tr><th>mod_code</th>"
+               f"<th>modification</th></tr></thead><tbody>{mod_rows}</tbody></table></div>")
+    body = ("<div class='subsection'><h3>Core terms</h3>" + term_tbl + "</div>"
+            "<div class='subsection'><h3>Modification codes in this run</h3>"
+            "<p class='section-intro'>Raw <code>mod_code</code> values are the SAM MM-tag shorthand "
+            "(letters) or ChEBI IDs (numbers); they are also labelled inline throughout the tables below.</p>"
+            + mod_tbl + "</div>")
+    return section("Key Terms & Modification Codes", body,
+                   intro="Quick reference for modulator's terminology and the modification codes used in this run.")
 
 
 def category_figure_gallery(figs_dir, category, max_figs,
@@ -2341,7 +2428,16 @@ def main():
         intro="Associations between local haplotype blocks and fragmentform usage or modification stoichiometry.",
     )
 
+    # observed modification codes across the tables that carry them -> glossary lists only real mods
+    _observed_mods = set()
+    for _mdf in (diff_df, classified_df, class_df, snp_mod_assoc_df, hap_mod_assoc_df):
+        for _c in ("mod_code", "target_mod_code"):
+            if isinstance(_mdf, pd.DataFrame) and not _mdf.empty and _c in _mdf.columns:
+                _observed_mods |= {str(v) for v in _mdf[_c].dropna().unique()}
+    sec_glossary = build_glossary_section(_observed_mods or None)
+
     body = [s for s in [
+        sec_glossary,
         sec_overview, sec_top_ff, sec_sample_stats, sec_read_funnel, sec_gene_sites, sec_overlap,
         sec_novel, sec_splice, sec_apa, sec_diff, sec_class, sec_seq, sec_polya, sec_between,
         sec_snp_cand, sec_snp_ff, sec_snp_mod, sec_snp_mech, sec_modmod,
@@ -2369,11 +2465,24 @@ def main():
             _mtext = ""
     if _mtext.strip():
         manifest_html = (
-            "<section><details class='run-manifest' open>"
-            "<summary>Run inputs &amp; parameters</summary>"
+            "<section id='sec-run-parameters'><details class='run-manifest'>"
+            "<summary>Run inputs &amp; parameters <span class='muted'>(click to expand)</span></summary>"
             f"<pre class='manifest-pre'>{html.escape(_mtext)}</pre>"
             "</details></section>"
         )
+
+    # sidebar table of contents, in reading order, extracted from the assembled section anchors
+    _toc = []
+    if manifest_html:
+        _toc.append(("run-parameters", "Run inputs & parameters"))
+    for _sec in body:
+        _mid = re.search(r"id='sec-([^']+)'", _sec)
+        _mt = re.search(r"<h2>(.*?)</h2>", _sec, re.S)
+        if _mid and _mt:
+            _toc.append((_mid.group(1), html.unescape(_mt.group(1))))
+    toc_html = ("<nav class='toc' aria-label='Table of contents'><div class='toc-title'>Contents</div>"
+                + "".join(f"<a href='#sec-{s}'>{html.escape(t)}</a>" for s, t in _toc)
+                + "</nav>") if _toc else ""
 
     html_doc = f"""<!doctype html>
 <html lang="en">
@@ -2408,6 +2517,26 @@ def main():
       -webkit-font-smoothing:antialiased; text-rendering:optimizeLegibility;
     }}
     main {{ max-width:1240px; margin:0 auto; padding:28px 26px 80px; }}
+    /* ---- sidebar table of contents ---- */
+    .toc {{ position:fixed; top:0; left:0; width:236px; height:100vh; overflow-y:auto;
+            background:var(--panel); border-right:1px solid var(--line); padding:18px 12px 40px;
+            box-sizing:border-box; z-index:60; }}
+    .toc .toc-title {{ font-weight:700; color:var(--muted); margin:0 8px 10px; font-size:11px;
+            text-transform:uppercase; letter-spacing:.05em; }}
+    .toc a {{ display:block; padding:5px 8px; color:var(--ink-soft); text-decoration:none;
+            border-radius:6px; margin-bottom:1px; line-height:1.25; font-size:12.5px; }}
+    .toc a:hover {{ background:var(--accent-soft); color:var(--accent-ink); }}
+    @media (min-width:1001px) {{ body {{ padding-left:236px; }} }}
+    @media (max-width:1000px) {{
+      .toc {{ position:static; width:auto; height:auto; border-right:none;
+              border-bottom:1px solid var(--line); display:flex; flex-wrap:wrap; gap:2px; }}
+      .toc .toc-title {{ width:100%; margin-bottom:4px; }}
+    }}
+    section[id] {{ scroll-margin-top:12px; }}
+    /* keep the PCA hero compact so it doesn't dominate the first screen */
+    .hero {{ text-align:center; }}
+    .hero-figure {{ margin:0 auto; }}
+    .hero-figure img {{ max-width:430px; width:100%; }}
     header {{ margin:8px 0 26px; padding-bottom:20px; border-bottom:1px solid var(--line); }}
     h1 {{
       font-size:clamp(26px,3.4vw,36px); line-height:1.1; margin:0 0 6px;
@@ -2565,6 +2694,7 @@ def main():
   </style>
 </head>
 <body>
+  {toc_html}
   <main>
     <header>
       {logo_html}
