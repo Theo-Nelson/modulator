@@ -52,11 +52,34 @@ def _init_worker(gtf_path, beds, cfg):
     _CFG = cfg
 
 
+def _run_sig(cfg):
+    """Signature of the run parameters that determine a chrom's partial contents. A .done marker only
+    counts as done if its stored signature matches -- otherwise a resume with different flags (e.g.
+    filter_enable / emit_* / the k-ratio) would skip phase 1 and concatenate partials that were never
+    written, yielding a silent header-only FILTERED table."""
+    return "|".join(f"{k}={cfg.get(k)}" for k in
+                    ("min_cov", "count_diff_factor", "k_default", "k_per_mod",
+                     "filter_enable", "emit_raw", "emit_filtered"))
+
+
+def _marker_ok(marker, sig):
+    """True iff the marker exists AND its stored run signature matches (i.e. genuinely done for THIS run)."""
+    try:
+        with open(marker) as fh:
+            return fh.readline().rstrip("\n") == sig
+    except OSError:
+        return False
+
+
 def _bed_rows_for_chrom(path, chrom):
     """Yield parsed bed rows for `chrom` from a tabix-indexed bed, in file order."""
     try:
         tbx = pysam.TabixFile(path)
-    except Exception:
+    except Exception as e:
+        # don't drop a bed silently: the sort engine WOULD read it, so a skip here is an engine
+        # divergence (rows lost from the stream FILTERED table with no error).
+        print(f"[aggregate_zn_stream] WARNING: cannot open tabix bed {path} ({e}); its rows are SKIPPED.",
+              file=sys.stderr, flush=True)
         return
     try:
         if chrom not in tbx.contigs:
@@ -78,7 +101,7 @@ def process_chrom(chrom):
     filt_long_p = os.path.join(workdir, f"filt_long.{agg.sanitize_filename_token(chrom)}.tsv")
     dedup_raw_p = os.path.join(workdir, f"dedup_raw.{agg.sanitize_filename_token(chrom)}.tsv")
     dedup_filt_p = os.path.join(workdir, f"dedup_filt.{agg.sanitize_filename_token(chrom)}.tsv")
-    if os.path.exists(marker):
+    if _marker_ok(marker, _run_sig(cfg)):
         return (chrom, "skipped", 0)
 
     min_cov = cfg["min_cov"]
@@ -175,7 +198,7 @@ def process_chrom(chrom):
         if dedup_filt: dedup_filt.close()
 
     with open(marker, "w") as m:
-        m.write(f"{chrom}\t{n_sites}\n")
+        m.write(f"{_run_sig(cfg)}\n{chrom}\t{n_sites}\n")   # sig on line 1 (see _marker_ok)
     return (chrom, "done", n_sites)
 
 
@@ -257,7 +280,9 @@ def main():
                emit_filtered=args.emit_filtered)
 
     # ---- Phase 1: per-chromosome streaming merge (parallel, resumable) ----
-    todo = [c for c in chroms if not os.path.exists(os.path.join(workdir, f".done.{agg.sanitize_filename_token(c)}"))]
+    _sig = _run_sig(cfg)
+    todo = [c for c in chroms
+            if not _marker_ok(os.path.join(workdir, f".done.{agg.sanitize_filename_token(c)}"), _sig)]
     if args.verbose:
         print(f"[stream] phase1: {len(chroms)-len(todo)} chrom(s) already done, {len(todo)} to do", file=sys.stderr, flush=True)
     if todo:

@@ -590,7 +590,9 @@ def iter_numbered_beds(modkit_dir: str) -> List[Tuple[str, str, str, int]]:
       - ungrouped.bed(.gz)
       - *_filtered_mod.bed(.gz)
     """
-    out = []
+    # dedup by (root, sample, ZN): if BOTH N.bed and N.bed.gz exist in a dir, the partition would
+    # otherwise be read TWICE (silently doubling Nvalid_cov/Nmod/Nfail). Keep one, preferring .gz.
+    picked = {}
     for root, _, files in os.walk(modkit_dir):
         rel = os.path.relpath(root, modkit_dir)
         if rel == ".":
@@ -607,7 +609,11 @@ def iter_numbered_beds(modkit_dir: str) -> List[Tuple[str, str, str, int]]:
             if not m:
                 continue
             zn = int(m.group(1))
-            out.append((root, sample_name, os.path.join(root, fname), zn))
+            key = (root, sample_name, zn)
+            prev = picked.get(key)
+            if prev is None or (fname.endswith(".gz") and not prev.endswith(".gz")):
+                picked[key] = os.path.join(root, fname)
+    out = [(root, sample_name, path, zn) for (root, sample_name, zn), path in picked.items()]
     return sorted(out)
 
 

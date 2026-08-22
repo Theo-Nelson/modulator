@@ -618,6 +618,7 @@ def scan_private_sites(zn_long_path, iso, genes, *, min_frac, min_cov, tes_tol=2
                 blind = pos <= exons[0][1] if strand == '+' else pos >= exons[-1][0]
                 if not blind:
                     absent.append(z)
+        absent.sort()   # deterministic: absent[0] drives direction/delta, so GTF line order must not decide it
         if not absent:
             continue
         carriers = [(z, zdict[z][0], zdict[z][1]) for z in present
@@ -840,7 +841,10 @@ def plot_locus_arch(rec, iso, genes, out_png):
     from matplotlib.patches import Rectangle, Patch
     from matplotlib.lines import Line2D
 
-    gene = rec['gene']; chrom = rec['chrom']; pos = int(rec['start0'])
+    # use cpos = start0 + 1 (the base's 1-based coordinate, == end0) for status/exon lookups, exactly
+    # as the classifier body does -- passing raw 0-based start0 here flips the exonic marker at exon
+    # boundaries so the figure can disagree with the table it illustrates.
+    gene = rec['gene']; chrom = rec['chrom']; pos = int(rec['start0']) + 1
     strand = rec['strand']; cat = rec['class_key']; mod = rec['mod']
     hiZN = str(rec.get('hiZN', '')); loZN = str(rec.get('loZN', ''))
     anchorZN = str(rec.get('anchorZN', '') or '')
