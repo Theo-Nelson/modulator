@@ -512,10 +512,19 @@ def _scan_perff_by_allele(mol_mods_path, mol_snps_path, sites):
             chunk = chunk.dropna(subset=["start0"])
             chunk["start0"] = chunk["start0"].astype(int)
             # coerce target_modified up front so a NaN/blank can never raise inside the row loop
-            # (a raise there would drop the whole result and silently erase every allele-split figure)
-            chunk["_tmod"] = pd.to_numeric(chunk.get("target_modified", 0), errors="coerce").fillna(0).astype(int)
+            # (a raise there would drop the whole result and silently erase every allele-split figure).
+            # A MISSING column must degrade to mod=0, not raise on a scalar .fillna (which the bare
+            # except below would swallow -> whole scan silently returns {}).
+            if "target_modified" in chunk.columns:
+                chunk["_tmod"] = pd.to_numeric(chunk["target_modified"], errors="coerce").fillna(0).astype(int)
+            else:
+                chunk["_tmod"] = 0
             if "usable" in chunk.columns:
-                chunk = chunk[chunk["usable"].astype(str).str.lower().isin(("true", "1"))]
+                # accept True/1 AND the float encoding '1.0' (a NaN anywhere makes the column float64,
+                # so 'usable' stringifies as '1.0' and the old ("true","1") test dropped EVERY read).
+                _u = chunk["usable"]
+                _ok = (pd.to_numeric(_u, errors="coerce") > 0) | _u.astype(str).str.strip().str.lower().eq("true")
+                chunk = chunk[_ok.fillna(False)]
             for (c, s, mc), grp in chunk.groupby(["chrom", "start0", "target_mod_code"]):
                 key = (str(c), int(s), str(mc))
                 if key not in reads_at:
@@ -1525,11 +1534,15 @@ def build_snp_mechanism_section(mech_df, top_n):
     if fig:
         parts.append(clickable_image_html(fig, "SNP positional class distribution",
                                           caption="Where each SNP sits relative to the modified base."))
-    padj = pd.to_numeric(mech_df.get("p_adj_bh"), errors="coerce")
+    # index-align so an absent p_adj_bh column yields an all-NaN mask of the right length, not a
+    # scalar NaN (mech_df[np.False_] would raise a cryptic KeyError: np.False_ and kill the section).
+    padj = (pd.to_numeric(mech_df["p_adj_bh"], errors="coerce") if "p_adj_bh" in mech_df.columns
+            else pd.Series(float("nan"), index=mech_df.index))
     sig = mech_df[padj < 0.05]
     n_art_sig = int(sig["artifact_flag"].ne("NONE").sum()) if "artifact_flag" in sig.columns else 0
     clean = mech_df[mech_df["artifact_flag"].eq("NONE")] if "artifact_flag" in mech_df.columns else mech_df
-    conc = clean[clean["direction_concordance"].isin(["CONCORDANT", "DISCORDANT"])]
+    conc = (clean[clean["direction_concordance"].isin(["CONCORDANT", "DISCORDANT"])]
+            if "direction_concordance" in clean.columns else clean.iloc[0:0])
     rate = (100.0 * conc["direction_concordance"].eq("CONCORDANT").mean()) if len(conc) else float("nan")
     parts.append(
         "<ul>"
@@ -1549,8 +1562,8 @@ def build_snp_mechanism_section(mech_df, top_n):
         mt = me["motif_effect"].value_counts().reset_index()
         mt.columns = ["motif_effect", "n_pairs"]
         parts.append(subsection("Motif effect (SNPs inside the 5-mer)", df_to_html(mt, max_rows=8)))
-    causal = clean[clean["motif_effect"].eq("MOTIF_DISRUPTED") & clean["direction_concordance"].eq("CONCORDANT")] \
-        if "motif_effect" in clean.columns else pd.DataFrame()
+    causal = (clean[clean["motif_effect"].eq("MOTIF_DISRUPTED") & clean["direction_concordance"].eq("CONCORDANT")]
+              if {"motif_effect", "direction_concordance"}.issubset(clean.columns) else pd.DataFrame())
     if not causal.empty:
         cols = [c for c in ["snp_id", "gene_names", "mod_site_id", "distance_bp", "ref_5mer", "alt_5mer",
                             "ref_mod_rate", "alt_mod_rate", "p_adj_bh"] if c in causal.columns]
@@ -1610,10 +1623,13 @@ def build_polya_section(frag_df, diffs_df, mod_df, top_n, diff_figs_dir="", mod_
         parts.append(clickable_image_html(fig, "poly(A) tail-length distribution",
                                           caption="Left: per-fragmentform median tail length. "
                                                   "Right: median tail by fragmentform class."))
-    if frag_df is not None and not frag_df.empty:
+    if frag_df is not None and not frag_df.empty and "median_tail" in frag_df.columns:
         med_all = pd.to_numeric(frag_df["median_tail"], errors="coerce").dropna()
-        n_sig_diff = int((pd.to_numeric(diffs_df.get("p_adj_bh"), errors="coerce") < 0.05).sum()) if diffs_df is not None and not diffs_df.empty else 0
-        n_sig_mod = int((pd.to_numeric(mod_df.get("p_adj_bh"), errors="coerce") < 0.05).sum()) if mod_df is not None and not mod_df.empty else 0
+        # a missing p_adj_bh column would make .get return None -> NaN scalar -> False.sum() crash
+        _n_sig = lambda d: (int((pd.to_numeric(d["p_adj_bh"], errors="coerce") < 0.05).sum())
+                            if d is not None and not d.empty and "p_adj_bh" in d.columns else 0)
+        n_sig_diff = _n_sig(diffs_df)
+        n_sig_mod = _n_sig(mod_df)
         parts.append("<h3>Summary Across All Poly(A) Tail Measurements</h3>")
         _med = med_all.median()
         _med_s = f"{_med:.0f} nt" if pd.notna(_med) else "n/a"
@@ -1778,6 +1794,8 @@ def build_classification_section(class_df, private_df, class_figs_dir, arch_figs
             return 0
         m = df["bucket"] == bucket
         if event is not None:
+            if "event" not in df.columns:   # can't match a specific event without the column
+                return 0
             m &= df["event"] == event
         return int(m.sum())
 
@@ -1786,7 +1804,17 @@ def build_classification_section(class_df, private_df, class_figs_dir, arch_figs
     # so a PRIVATE row that happens to sit in class_df (the differential test also emits PRIVATE calls)
     # is still recognized and must NOT be dumped into the catch-all. Only genuinely-unknown labels
     # (taxonomy drift: the classifier emitted a newer label than the report knows) go to UNRECOGNIZED.
-    def _recognized_mask(df):
+    _SITE_KEY_COLS = ["gene_name", "chrom", "start0", "strand", "mod_code"]
+
+    def _site_keys(df):
+        cols = [c for c in _SITE_KEY_COLS if df is not None and not df.empty and c in df.columns]
+        if df is None or df.empty or len(cols) < 3:
+            return set()
+        return {tuple(k) for k in df[cols].astype(str).itertuples(index=False, name=None)}
+
+    _priv_keys = _site_keys(private_df)
+
+    def _recognized_mask(df, is_private):
         if df is None or df.empty or "bucket" not in df.columns:
             return None
         m = pd.Series(False, index=df.index)
@@ -1796,11 +1824,27 @@ def build_classification_section(class_df, private_df, class_figs_dir, arch_figs
                 if "event" in df.columns:
                     sub &= (df["event"] == e)
                 m |= sub
+        if not is_private:
+            # The PRIVATE bucket is rendered from private_df. A PRIVATE-bucket row that lives ONLY in
+            # class_df (the differential test also emits PRIVATE calls) would otherwise be counted and
+            # shown nowhere -> silently dropped. Recognize it only if the private scan actually holds
+            # that site (then it renders there, no double-show); else mark it unrecognized so it
+            # surfaces in the catch-all instead of vanishing.
+            priv_rows = df["bucket"] == "PRIVATE"
+            if priv_rows.any():
+                cols = [c for c in _SITE_KEY_COLS if c in df.columns]
+                if len(cols) >= 3 and _priv_keys:
+                    covered = pd.Series(
+                        [tuple(k) in _priv_keys for k in df[cols].astype(str).itertuples(index=False, name=None)],
+                        index=df.index)
+                    m &= ~(priv_rows & ~covered)
+                else:
+                    m &= ~priv_rows
         return m
 
     leftover_frames = []
-    for _df in (private_df, class_df):
-        rm = _recognized_mask(_df)
+    for _df, _is_priv in ((private_df, True), (class_df, False)):
+        rm = _recognized_mask(_df, _is_priv)
         if rm is not None and (~rm).any():
             leftover_frames.append(_df[~rm])
     leftover_df = pd.concat(leftover_frames, ignore_index=True) if leftover_frames else pd.DataFrame()
@@ -1810,7 +1854,7 @@ def build_classification_section(class_df, private_df, class_figs_dir, arch_figs
 
     def count_dir(bucket, event, direction):
         df = src_for(bucket)
-        if df is None or df.empty or "bucket" not in df.columns:
+        if df is None or df.empty or "bucket" not in df.columns or "event" not in df.columns:
             return 0
         m = (df["bucket"] == bucket) & (df["event"] == event)
         if "direction" in df.columns:
@@ -1873,7 +1917,7 @@ def build_classification_section(class_df, private_df, class_figs_dir, arch_figs
         n_b = len(bdf)
         events_html = []
         for event in CLASS_TAXONOMY[bucket]:
-            edf = bdf[bdf["event"] == event] if not bdf.empty else bdf
+            edf = bdf[bdf["event"] == event] if (not bdf.empty and "event" in bdf.columns) else bdf.iloc[0:0]
             n_e = len(edf)
             defn = EVENT_DEFINITIONS.get(event, "")
             dir_list = EVENT_DIRECTIONS.get(event, [])

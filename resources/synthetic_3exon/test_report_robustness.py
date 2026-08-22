@@ -65,6 +65,42 @@ def checks():
     out.append(("build_between_conditions_section w/o p_adj_bh",
                 _no_crash(R.build_between_conditions_section, d, 10)))
 
+    # ---- F7-F10 audit (schema-drift crashes + silent total-loss paths) ----
+    # F2/F3: _scan_perff_by_allele must not silently return {} when target_modified is missing or
+    # when 'usable' is float-encoded ('1.0' from a NaN-forced float64 column).
+    def _scan(usable, tmod_col=True):
+        dd = tempfile.mkdtemp(); mp = os.path.join(dd, "m.tsv"); sp = os.path.join(dd, "s.tsv")
+        cols = {"sample": ["S"] * 3, "qname": ["r0", "r1", "r2"], "chrom": ["chr1"] * 3, "start0": [100] * 3,
+                "target_mod_code": ["a"] * 3, "ZN": [5, 5, 5], "usable": usable}
+        if tmod_col:
+            cols["target_modified"] = [1, 0, 1]
+        pd.DataFrame(cols).to_csv(mp, sep="\t", index=False)
+        pd.DataFrame({"sample": ["S"] * 3, "qname": ["r0", "r1", "r2"], "snp_id": ["snp1"] * 3,
+                      "allele_class": ["ref", "ref", "alt"]}).to_csv(sp, sep="\t", index=False)
+        return R._scan_perff_by_allele(mp, sp, [("GENEA", "chr1", 100, "a", "snp1")])
+    out.append(("_scan_perff_by_allele: missing target_modified still scans", bool(_scan(["True"] * 3, tmod_col=False))))
+    out.append(("_scan_perff_by_allele: float64 usable ('1.0') still scans", bool(_scan([1, 1, np.nan]))))
+
+    # F4: build_polya_section must not crash when frag_df lacks median_tail
+    out.append(("build_polya_section w/o median_tail",
+                _no_crash(R.build_polya_section, pd.DataFrame({"ZT": ["G.T1"], "n_reads": [10]}), None, None, 10)))
+    # F5/F6: build_snp_mechanism_section must not crash w/o p_adj_bh / direction_concordance
+    out.append(("build_snp_mechanism_section w/o p_adj_bh & direction_concordance",
+                _no_crash(R.build_snp_mechanism_section, pd.DataFrame({"positional_class": ["AT_MOD_BASE"], "gene_names": ["G"]}), 10)))
+    # F7: build_classification_section must not crash w/o an 'event' column
+    _cls = pd.DataFrame({"bucket": ["SHARED_LOCAL"], "gene_name": ["G"], "chrom": ["c"], "start0": [1],
+                         "strand": ["+"], "mod_code": ["a"]})
+    out.append(("build_classification_section w/o event col", _no_crash(R.build_classification_section, _cls, pd.DataFrame(), "", "", 0, 5)))
+    # F1(report): a PRIVATE row that lives only in class_df surfaces; one in both frames isn't double-shown
+    _priv = pd.DataFrame({"bucket": ["PRIVATE"], "event": ["ALT_LAST_EXON"], "direction": ["PROXIMAL_HIGHER"],
+                          "gene_name": ["INBOTH"], "chrom": ["c"], "start0": [1], "strand": ["+"], "mod_code": ["a"]})
+    _cls2 = pd.DataFrame({"bucket": ["PRIVATE", "PRIVATE"], "event": ["SKIPPED_EXON", "SKIPPED_EXON"],
+                          "direction": ["", ""], "gene_name": ["ONLYCLASS", "INBOTH"], "chrom": ["c", "c"],
+                          "start0": [9, 1], "strand": ["+", "+"], "mod_code": ["a", "a"]})
+    _h = R.build_classification_section(_cls2, _priv, "", "", 0, 20)
+    out.append(("class-only PRIVATE row surfaces (not silently dropped)", "ONLYCLASS" in _h))
+    out.append(("PRIVATE row in both frames shown once (no double-count)", _h.count("INBOTH") == 1))
+
     return out
 
 
