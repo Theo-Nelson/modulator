@@ -15,7 +15,7 @@ base-modification tags and, in a single command:
 
 The supported interface is the `modulator` Python CLI.
 
-**See a live example → [sample HTML report](https://raw.githack.com/Theo-Nelson/modulator/test/docs/sample_report/demo14_report.html)** (rendered from the bundled 14-gene demo).
+**See a live example → [sample HTML report](https://raw.githack.com/Theo-Nelson/modulator/test/docs/sample_report/demo14_report.html) · [sample gene browser](https://raw.githack.com/Theo-Nelson/modulator/test/docs/sample_report/demo14_gene_browser.html)** (both rendered from the bundled 14-gene demo).
 
 **Full parameter, output, and HPC reference -> [ADVANCED_USAGE.md](ADVANCED_USAGE.md)**
 
