@@ -764,7 +764,8 @@ def category_distribution_png(counts, mod_label=None):
 def _bc_feature_label(row):
     """Compact y-axis label for a between-condition feature, adapting to the analysis:
     modification (per-transcript) -> 'GENE ZNk chr:pos mod'; usage/tail -> 'GENE feature'."""
-    g = str(row.get("gene_name", "") or "").strip()
+    _gn = row.get("gene_name", "")
+    g = "" if pd.isna(_gn) else str(_gn).strip()
     zn = row.get("ZN_transcript_index", None)
     if zn is not None and pd.notna(zn) and str(row.get("start0", "")) != "":
         try:
@@ -801,14 +802,29 @@ def between_cond_topn_png(df, eff_col, title, xlabel, ref_name, test_name, chart
         return ""
     d = d.iloc[::-1].reset_index(drop=True)   # largest effect on top
     REF_C, TEST_C = "#4c72b0", "#c1121f"
+    def _rep_vals(pr, side):
+        # tolerate malformed per_replicate_json: side may be missing / a list / a scalar, and any
+        # value may be non-numeric -- never let one bad cell abort the whole report.
+        grp = pr.get(side) if isinstance(pr, dict) else None
+        if not isinstance(grp, dict):
+            return []
+        out = []
+        for v in grp.values():
+            try:
+                f = float(v)
+            except (TypeError, ValueError):
+                continue
+            if np.isfinite(f):
+                out.append(f)
+        return out
+
     rows_ok = []
     for _, row in d.iterrows():
         try:
             pr = json.loads(row[per_rep_col]) if isinstance(row[per_rep_col], str) else {}
         except Exception:
             pr = {}
-        rv = [float(v) for v in (pr.get("reference") or {}).values() if v is not None and np.isfinite(float(v))]
-        tv = [float(v) for v in (pr.get("test") or {}).values() if v is not None and np.isfinite(float(v))]
+        rv, tv = _rep_vals(pr, "reference"), _rep_vals(pr, "test")
         if rv or tv:
             rows_ok.append((_bc_feature_label(row), rv, tv))
     if not rows_ok:
@@ -1055,11 +1071,21 @@ MOD_CODE_LABELS = {
 }
 
 
+def _norm_mod_code(code):
+    """Canonical string form of a mod code. A TSV whose codes are ALL numeric (no letter codes like
+    'a'/'m') plus any blank cell is read as float64, so '17802' arrives as 17802.0 -> 'the .0 must go
+    or the label/glossary lookup misses. Letter codes and already-clean strings pass through."""
+    s = str(code).strip()
+    if s.endswith(".0") and s[:-2].isdigit():
+        s = s[:-2]
+    return s
+
+
 def label_mod_code(code):
-    """'a' -> 'a (m6A)', '17802' -> '17802 (pseudouridine)'. Unknown codes pass through unchanged."""
+    """'a' -> 'a (m6A)', '17802'/'17802.0' -> '17802 (pseudouridine)'. Unknown codes pass through."""
     if code is None or (isinstance(code, float) and pd.isna(code)):
         return code
-    s = str(code).strip()
+    s = _norm_mod_code(code)
     lab = MOD_CODE_LABELS.get(s)
     return f"{s} ({lab})" if lab else s
 
@@ -1133,7 +1159,7 @@ def build_glossary_section(observed_mods=None):
         f"<tr><td><code>{html.escape(t)}</code></td><td>{html.escape(d)}</td></tr>" for t, d in _GLOSSARY_TERMS)
     term_tbl = ("<div class='table-wrap'><table class='datatable'><thead><tr><th>term</th>"
                 f"<th>meaning</th></tr></thead><tbody>{term_rows}</tbody></table></div>")
-    obs = {str(m) for m in observed_mods} if observed_mods else None
+    obs = {_norm_mod_code(m) for m in observed_mods} if observed_mods else None
     codes = [c for c in _GLOSSARY_MOD_ORDER if (obs is None or c in obs)]
     codes += [c for c in sorted(obs or []) if c not in _GLOSSARY_MOD_ORDER]   # any extra observed codes
     if not codes:
@@ -1263,8 +1289,11 @@ def build_between_conditions_section(bc_dir, top_n, top_note=""):
             df = by_kind.get(suffix)
             if df is None or df.empty:
                 continue
-            padj = pd.to_numeric(df.get("p_adj_bh", pd.Series(dtype=float)), errors="coerce")
-            e = pd.to_numeric(df.get(eff, pd.Series(dtype=float)), errors="coerce").abs()
+            # index-align the defaults to df: an absent column must yield an all-NaN column of the
+            # SAME length, else `df[padj < 0.05]` raises "Unalignable boolean Series" and kills the report.
+            _nan_col = pd.Series(float("nan"), index=df.index)
+            padj = pd.to_numeric(df["p_adj_bh"], errors="coerce") if "p_adj_bh" in df.columns else _nan_col
+            e = (pd.to_numeric(df[eff], errors="coerce").abs() if eff in df.columns else _nan_col)
             # Effect thresholds differ by units, so name the column consistently and report the
             # threshold in its own column (otherwise each analysis makes its own NaN-filled column).
             thr = 10.0 if eff == "delta_nt" else 0.10     # 10 nt of tail, or 10 percentage points
@@ -1401,7 +1430,10 @@ def _elem_mods_string(mods_json):
         ms = json.loads(mods_json) if isinstance(mods_json, str) and mods_json.strip() else []
     except (ValueError, TypeError):
         return ""
-    return "; ".join(f"{m.get('code')}@{m.get('gpos')} ({m.get('frac')})" for m in ms)
+    if not isinstance(ms, list):
+        return ""
+    return "; ".join(f"{m.get('code')}@{m.get('gpos')} ({m.get('frac')})"
+                     for m in ms if isinstance(m, dict))
 
 
 def build_sequence_elements_section(se_df, summ_df, top_n):
@@ -2033,7 +2065,9 @@ def main():
     top_tx_df = class_df.sort_values(["read_support", "exact_chain_reads"], ascending=False) if not class_df.empty else class_df
 
     top_gene_sites_df = pd.DataFrame()
-    if not zn_long_df.empty and "gene_name" in zn_long_df.columns:
+    # require every column the body indexes (not just gene_name) -- a missing coord column here would
+    # raise KeyError out of main() and write NO report at all, instead of degrading this one section.
+    if not zn_long_df.empty and {"gene_name", "chrom", "start0", "end0", "strand", "mod_code"}.issubset(zn_long_df.columns):
         top_gene_sites_df = (
             zn_long_df.assign(site_key=zn_long_df[["chrom", "start0", "end0", "strand", "mod_code"]].astype(str).agg(":".join, axis=1))
             .groupby(["gene_name", "mod_code"], as_index=False)["site_key"].nunique()
@@ -2172,7 +2206,13 @@ def main():
         _have = set(tx_lengths_df["zt_label"])
         _order = [z for z in top_tx_df["zt_label"].tolist() if z in _have]
         if _order:
-            tx_lengths_ordered = tx_lengths_df.set_index("zt_label").reindex(_order).reset_index()
+            # a duplicate zt_label would make reindex raise ("cannot reindex on an axis with
+            # duplicate labels") and abort the whole report; dedup first, fall back on any error.
+            try:
+                tx_lengths_ordered = (tx_lengths_df.drop_duplicates("zt_label")
+                                      .set_index("zt_label").reindex(_order).reset_index())
+            except Exception:
+                tx_lengths_ordered = tx_lengths_df
     sec_top_ff = section(
         "Most Expressed Fragmentforms",
         (df_to_html(top_tx_df[top_tx_cols], max_rows=args.top_transcripts) if top_tx_cols
@@ -2433,7 +2473,7 @@ def main():
     for _mdf in (diff_df, classified_df, class_df, snp_mod_assoc_df, hap_mod_assoc_df):
         for _c in ("mod_code", "target_mod_code"):
             if isinstance(_mdf, pd.DataFrame) and not _mdf.empty and _c in _mdf.columns:
-                _observed_mods |= {str(v) for v in _mdf[_c].dropna().unique()}
+                _observed_mods |= {_norm_mod_code(v) for v in _mdf[_c].dropna().unique()}
     sec_glossary = build_glossary_section(_observed_mods or None)
 
     body = [s for s in [
