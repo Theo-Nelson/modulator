@@ -39,10 +39,36 @@ def parse_args():
     ap.add_argument("--min-haplotype-reads", type=int, default=4)
     return ap.parse_args()
 
-def split_component(snps_sorted, max_block_snps):
-    if len(snps_sorted) <= max_block_snps:
-        return [snps_sorted]
-    return [snps_sorted[i:i + max_block_snps] for i in range(0, len(snps_sorted), max_block_snps)]
+def split_component(snps_sorted, max_block_snps, read_snps=None, min_reads=1):
+    """Split a phased component into PHASEABLE blocks (>= min_reads reads co-cover every SNP in the
+    block), each <= max_block_snps SNPs.
+
+    The old blind fixed-index windowing had three failure modes: a chunk whose SNPs no single read
+    fully covered was silently discarded (so a WIDER --max-block-snps LOST blocks); a size-1 remainder
+    was dropped; and --max-block-snps 1 produced ZERO blocks (every chunk failed the >=2 rule). This
+    read-aware greedy grows a block from the sorted SNPs while it stays within the cap AND enough reads
+    still co-cover the whole block, closing it (and restarting) otherwise -- so every emitted block is
+    actually phaseable and SNPs are grouped by real co-coverage rather than array index."""
+    cap = max(2, int(max_block_snps))   # a haplotype block needs >= 2 SNPs; cap 1 would emit nothing
+    if read_snps is None:
+        # coverage-agnostic fallback (preserves old behaviour when no read map is supplied)
+        return [snps_sorted[i:i + cap] for i in range(0, len(snps_sorted), cap)]
+
+    def n_complete(chunk):
+        return sum(1 for v in read_snps.values() if all(s in v for s in chunk))
+
+    blocks, cur = [], []
+    for s in snps_sorted:
+        trial = cur + [s]
+        if len(trial) <= cap and (len(trial) < 2 or n_complete(trial) >= min_reads):
+            cur = trial
+        else:
+            if len(cur) >= 2:
+                blocks.append(cur)
+            cur = [s]
+    if len(cur) >= 2:
+        blocks.append(cur)
+    return blocks
 
 
 def block_context(chunk, snp_meta):
@@ -186,7 +212,7 @@ def main():
 
         for comp in components:
             comp = sorted(comp, key=lambda x: (snp_meta[x]["chrom"], safe_int(snp_meta[x]["pos1"])))
-            for chunk in split_component(comp, int(args.max_block_snps)):
+            for chunk in split_component(comp, int(args.max_block_snps), read_snps=read_snps, min_reads=1):
                 if len(chunk) < 2:
                     continue
                 block_idx += 1
