@@ -25,6 +25,12 @@ def parse_args():
     ap.add_argument("--gtf", required=True, help="Assembler GTF used to define transcribed loci")
     ap.add_argument("--out-tsv", required=True, help="Output candidate SNP TSV")
     ap.add_argument("--min-alt-reads", type=int, default=4)
+    ap.add_argument("--min-second-alt-reads", type=int, default=4,
+                    help="Absolute read floor for the SECOND alt in the multiallelic drop. Kept SEPARATE "
+                         "from --min-alt-reads (default matches its default): sharing one value made the "
+                         "caller non-monotone -- raising --min-alt-reads TIGHTENED the first-alt floor "
+                         "but simultaneously LOOSENED the multiallelic gate, so sites appeared only at a "
+                         "stricter setting.")
     ap.add_argument("--min-total-cov", type=int, default=8)
     ap.add_argument("--min-alt-frac", type=float, default=0.10)
     ap.add_argument("--max-alt-frac", type=float, default=0.90)
@@ -231,8 +237,15 @@ def main():
     # the degenerate Mode B (no primary_only, no mapq) keeps pysam's default 'all' filter on the raw
     # BAM -- exactly what make_read_callback returned as "all" before this refactor.
     use_prefilter = bool(args.primary_only) or int(args.min_mapq) > 0
-    exclude_flag = 0x4 | (0x900 if args.primary_only else 0)  # UNMAP + (SECONDARY|SUPPLEMENTARY)
-    tmp_dir = os.path.join(os.path.dirname(args.out_tsv) or ".", "._snp_prefilter")
+    # UNMAP | QCFAIL | DUP  + (SECONDARY|SUPPLEMENTARY if primary_only). QCFAIL(0x200) and DUP(0x400)
+    # MUST be excluded: a marked duplicate is the same molecule (not independent allele support) and a
+    # QC-failed read should not vote. Previously Mode A (the prefilter path, which the pipeline always
+    # takes via --primary-only) counted both, while Mode B (pysam 'all') dropped them -- so the shipped
+    # callset over-counted duplicate/QCFAIL reads AND the two modes disagreed (non-monotone in min_mapq).
+    exclude_flag = 0x4 | 0x200 | 0x400 | (0x900 if args.primary_only else 0)
+    # Per-PROCESS temp dir: a fixed name was shared by two concurrent CLI runs writing to the same
+    # out dir, and the finally-cleanup then deleted the other run's prefiltered bams mid-scan.
+    tmp_dir = os.path.join(os.path.dirname(args.out_tsv) or ".", f"._snp_prefilter_{os.getpid()}")
 
     bam_specs = []  # (sample, scan_bam_path, chroms_with_reads_or_None, count_mode)
     try:
@@ -244,12 +257,14 @@ def main():
                 (
                     sample_name_from_bam(b),
                     b,
-                    os.path.join(tmp_dir, f"{sample_name_from_bam(b)}.prefiltered.bam"),
+                    # index-prefix the prefiltered path so two input BAMs sharing a basename do not
+                    # collapse onto one file (their scans would otherwise clobber each other).
+                    os.path.join(tmp_dir, f"{i:03d}_{sample_name_from_bam(b)}.prefiltered.bam"),
                     exclude_flag,
                     int(args.min_mapq),
                     pf_threads,
                 )
-                for b in args.bams
+                for i, b in enumerate(args.bams)
             ]
             pf_jobs = max(1, min(len(pf_tasks), int(args.jobs)))
             pf_results = run_process_jobs(
@@ -325,9 +340,10 @@ def main():
             continue
         # multiallelic: the SECOND alt must be a real fraction of coverage, not merely past the absolute
         # floor -- otherwise a deep clean biallelic het is discarded once accumulated basecall error on a
-        # third base clears min_alt_reads (worse at higher depth, i.e. the highest-power sites).
+        # third base clears the floor (worse at higher depth, i.e. the highest-power sites). The second-alt
+        # floor is its OWN parameter (--min-second-alt-reads), decoupled from --min-alt-reads.
         second_alt_frac = (second_alt_count / total_cov) if total_cov > 0 else 0.0
-        if second_alt_count >= args.min_alt_reads and second_alt_frac >= args.multiallelic_frac:
+        if second_alt_count >= args.min_second_alt_reads and second_alt_frac >= args.multiallelic_frac:
             drops["multiallelic"] += 1
             continue
 

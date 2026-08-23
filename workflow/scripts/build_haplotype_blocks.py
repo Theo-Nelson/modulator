@@ -7,7 +7,7 @@ import os
 
 import pandas as pd
 
-from genotype_utils import context_key_from_snp_row, safe_int, tsv_header
+from genotype_utils import context_keys_from_snp_row, safe_int, tsv_header
 
 # Columns actually consumed (grouping/keys + per-SNP metadata + the ZT/ZG/ZN/ZM tags copied into
 # the molecules output). Loading only these -- with repeated string columns as categoricals --
@@ -111,7 +111,12 @@ def main():
         )
         return
 
-    df["context_key"] = df.apply(context_key_from_snp_row, axis=1)
+    # Fan a SNP out to ALL its metagene (MG:) contexts, then explode -- matching the snp_mod_assoc fix
+    # (715916d). The old singular context_key_from_snp_row collapsed a multi-metagene SNP to a single
+    # CHR:-keyed context, so those blocks never received a haplotype x mod test.
+    df["context_key"] = df.apply(context_keys_from_snp_row, axis=1)
+    df = df.explode("context_key", ignore_index=True)
+    df = df[df["context_key"].astype(str) != ""]
     # Order-invariance: block numbering (HAPBLOCK<i>) follows context_key first-appearance
     # and read iteration follows row order, so a deterministic sort makes the haplotype
     # blocks independent of upstream (BAM x chrom) shard completion order.

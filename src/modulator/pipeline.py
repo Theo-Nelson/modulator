@@ -1467,6 +1467,7 @@ class ModulatorPipeline:
                     "--gtf", str(self.paths.out_gtf),
                     "--out-tsv", str(self.paths.geno_candidate_snps),
                     "--min-alt-reads", str(int(geno.get("min_alt_reads", 4))),
+                    "--min-second-alt-reads", str(int(geno.get("min_second_alt_reads", 4))),
                     "--min-total-cov", str(int(geno.get("min_total_cov", 8))),
                     "--min-alt-frac", str(float(geno.get("min_alt_frac", 0.10))),
                     "--max-alt-frac", str(float(geno.get("max_alt_frac", 0.90))),
