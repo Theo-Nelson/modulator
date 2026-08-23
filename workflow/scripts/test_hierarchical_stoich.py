@@ -261,17 +261,21 @@ def _process_chrom(ra, mods, gtf, args):
                     inf_bm, _ = span_cache[thr]
                     ia = zt_bm[a] & inf_bm
                     ib = zt_bm[b] & inf_bm
-                    if len(ia) < args.min_informative_reads or len(ib) < args.min_informative_reads:
-                        n_skipped += 1
-                        continue
                     am = ia.intersection_cardinality(mbm); au = ia.intersection_cardinality(ubm)
                     bm_ = ib.intersection_cardinality(mbm); bu = ib.intersection_cardinality(ubm)
+                    # --min-informative-reads applies to the reads that actually ENTER the 2x2 (span the
+                    # divergence AND carry a mod call at the site) -- NOT the spanning count len(ia),
+                    # which also includes no-call reads that contribute no power. Gating on len(ia) let
+                    # pairs with only 6-9 test reads pass a threshold of 10; n_informative_* is now the
+                    # test-read count so it matches what was actually tested.
+                    n_a = am + au; n_b = bm_ + bu
+                    if n_a < args.min_informative_reads or n_b < args.min_informative_reads:
+                        n_skipped += 1
+                        continue
                     # require min_state_reads in EACH modification state of EACH fragmentform (per the
                     # help text + the sibling scripts) -- checking the per-fragmentform TOTAL let a zero
                     # cell through (e.g. 6 mod / 0 unmod) and inflated the BH family.
                     if min(am, au, bm_, bu) < args.min_state_reads:
-                        continue
-                    if (am + au) == 0 or (bm_ + bu) == 0:
                         continue
                     tab = [[float(am), float(au)], [float(bm_), float(bu)]]
                     tname, _sn, sval, pval = run_contingency_test(tab, test=args.test, pseudocount=args.pseudocount)
@@ -281,8 +285,8 @@ def _process_chrom(ra, mods, gtf, args):
                         "fragmentform_a": a, "fragmentform_b": b,
                         "divergence_pos": int(d), "divergence_from_3p_nt": int(abs(tes - d)),
                         "mod_site_id": sid, "site_pos": int(spos), "site_from_3p_nt": int(abs(tes - spos)),
-                        "n_informative": int(len(ia) + len(ib)),
-                        "n_informative_a": int(len(ia)), "n_informative_b": int(len(ib)),
+                        "n_informative": int(n_a + n_b),
+                        "n_informative_a": int(n_a), "n_informative_b": int(n_b),
                         "a_modified": am, "a_unmodified": au, "b_modified": bm_, "b_unmodified": bu,
                         "frac_modified_a": round(fa, 5), "frac_modified_b": round(fb, 5),
                         "delta": round(fb - fa, 5), "test_name": tname,

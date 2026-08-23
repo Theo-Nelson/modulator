@@ -69,6 +69,17 @@ def load_structures(gtf_path):
     return genes
 
 
+def _padj(v):
+    """Coerce a p_adj_bh cell to a float for the browser. A missing/NaN/non-numeric value defaults to
+    1.0 (non-significant); a real 0.0 is PRESERVED. (The previous `float(v or 1)` treated 0.0 as falsy
+    and turned the most-significant rows into p=1.0 -- rendering them as completely non-significant.)"""
+    try:
+        f = float(v)
+    except (TypeError, ValueError):
+        return 1.0
+    return f if f == f else 1.0   # NaN -> 1.0; 0.0 kept
+
+
 def main():
     args = parse_args()
     genes = load_structures(args.gtf)
@@ -147,13 +158,13 @@ def main():
             for r in dg.itertuples(index=False):
                 rec["diffs"].append({"pos": int(getattr(r, "start0", 0)), "mod": str(getattr(r, "mod_code", "")),
                                      "effect": float(getattr(r, "effect_max_abs_frac_diff", float("nan")) or 0),
-                                     "padj": float(getattr(r, "p_adj_bh", float("nan")) or 1)})
+                                     "padj": _padj(getattr(r, "p_adj_bh", None))})
         cg = cond_by_gene.get(gene)
         if cg is not None:
             for r in cg.itertuples(index=False):
                 rec["cond"].append({"pos": int(getattr(r, "start0", 0)), "mod": str(getattr(r, "mod_code", "")),
                                     "delta": float(getattr(r, "delta", 0) or 0),
-                                    "padj": float(getattr(r, "p_adj_bh", 1) or 1),
+                                    "padj": _padj(getattr(r, "p_adj_bh", None)),
                                     "contrast": str(getattr(r, "contrast", ""))})
         hg = hier_by_gene.get(gene)
         if hg is not None:
@@ -162,7 +173,7 @@ def main():
                                     "a": _gtfkey(getattr(r, "fragmentform_a", "")),
                                     "b": _gtfkey(getattr(r, "fragmentform_b", "")),
                                     "delta": float(getattr(r, "delta", 0) or 0),
-                                    "padj": float(getattr(r, "p_adj_bh", 1) or 1),
+                                    "padj": _padj(getattr(r, "p_adj_bh", None)),
                                     "ninf": int(getattr(r, "n_informative", 0) or 0),
                                     "div3p": int(getattr(r, "divergence_from_3p_nt", 0) or 0)})
         payload[gene] = rec
