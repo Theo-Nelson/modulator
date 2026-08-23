@@ -70,7 +70,13 @@ def main():
     df = pd.read_csv(args.tail_tsv, sep="\t", low_memory=False, usecols=[c for c in want if c in hdr])
     df["sample"] = df["sample"].astype(str)
     df = df[df["sample"].isin(ref_s | test_s)]
-    df = df[pd.to_numeric(df["tail_len"], errors="coerce").fillna(0) >= int(args.min_tail)]
+    # pt:i:0 = dorado "no estimate", not a 0-nt tail: require an actual estimate (tail_estimated).
+    _tl = pd.to_numeric(df["tail_len"], errors="coerce").fillna(0)
+    if "tail_estimated" in df.columns:
+        _est = df["tail_estimated"].astype(str).str.strip().str.lower().isin(("true", "1", "yes"))
+    else:
+        _est = _tl > 0
+    df = df[_est & (_tl >= int(args.min_tail))]
     if df.empty:
         pd.DataFrame(columns=OUT_COLS).to_csv(args.out_tsv, sep="\t", index=False)
         return

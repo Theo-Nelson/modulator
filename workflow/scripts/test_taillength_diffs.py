@@ -128,7 +128,14 @@ def main():
     diff_out = args.out_prefix + "_taillength_diffs.tsv"
 
     if not df.empty:
-        df = df[pd.to_numeric(df["tail_len"], errors="coerce").fillna(0) >= int(args.min_tail)].copy()
+        # pt:i:0 is dorado's "NO ESTIMATE" sentinel, not a real 0-nt tail; require an actual estimate
+        # (tail_estimated) so --min-tail 0 does not pull no-estimate reads in as zero-length tails.
+        _tl = pd.to_numeric(df["tail_len"], errors="coerce").fillna(0)
+        if "tail_estimated" in df.columns:
+            _est = df["tail_estimated"].astype(str).str.strip().str.lower().isin(("true", "1", "yes"))
+        else:
+            _est = _tl > 0
+        df = df[_est & (_tl >= int(args.min_tail))].copy()
         df["tail_len"] = df["tail_len"].astype(float)
         df = df[df["ZT"].astype(str).ne("")]
         if args.gene_filter:

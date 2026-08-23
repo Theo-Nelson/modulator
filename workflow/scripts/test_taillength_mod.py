@@ -120,12 +120,18 @@ def _plot_site(mod_t, unmod_t, meta, path, per_ff=None):
 
 
 def _load_tail_map(path, min_tail):
-    """(sample,qname) -> tail_len for reads with an estimated tail."""
-    cols = ["sample", "qname", "tail_len"]
+    """(sample,qname) -> tail_len for reads with an ESTIMATED tail (pt:i:0 = no estimate, excluded)."""
+    cols = ["sample", "qname", "tail_len", "tail_estimated"]
     df = pd.read_csv(path, sep="\t", low_memory=False, usecols=lambda c: c in cols)
     if df.empty:
         return {}
-    df = df[pd.to_numeric(df["tail_len"], errors="coerce").fillna(0) >= int(min_tail)]
+    # pt:i:0 is dorado's "no estimate" sentinel, not a 0-nt tail: require an actual estimate.
+    _tl = pd.to_numeric(df["tail_len"], errors="coerce").fillna(0)
+    if "tail_estimated" in df.columns:
+        _est = df["tail_estimated"].astype(str).str.strip().str.lower().isin(("true", "1", "yes"))
+    else:
+        _est = _tl > 0
+    df = df[_est & (_tl >= int(min_tail))]
     key = df["sample"].astype(str) + "\x00" + df["qname"].astype(str)
     return dict(zip(key, df["tail_len"].astype(float)))
 
@@ -159,7 +165,12 @@ def _site_rows_for_chrom(mod_path, tail_map, args):
         unmod_t = g.loc[g["target_modified"] == 0, "tail_len"].values
         if mod_t.size < int(args.min_state_reads) or unmod_t.size < int(args.min_state_reads):
             continue
-        stat, p = mannwhitneyu(mod_t, unmod_t, alternative="two-sided")
+        try:
+            stat, p = mannwhitneyu(mod_t, unmod_t, alternative="two-sided")
+        except ValueError:
+            stat, p = float("nan"), float("nan")
+        if not np.isfinite(p):
+            continue  # all-identical tails -> untestable (scipy may return nan rather than raise)
         f = g.iloc[0]
         # per-FRAGMENTFORM (ZN) breakdown: does the modified-vs-unmodified tail gap hold WITHIN a
         # fragmentform, or is it just the modification tracking a differently-tailed fragmentform?
@@ -191,7 +202,10 @@ def _site_rows_for_chrom(mod_path, tail_map, args):
                                  if mt.size and ut.size else None),
                 }
         row = {
-            "mod_site_id": sid, "chrom": f.get("chrom", ""), "gene_name": f.get("gene_name", ""),
+            # a mod site can sit in a metagene spanning >1 gene; label with ALL of them (sorted, unique)
+            # rather than the arbitrary first row -- the bug already fixed in test_taillength_diffs.
+            "mod_site_id": sid, "chrom": f.get("chrom", ""),
+            "gene_name": "+".join(sorted(g["gene_name"].dropna().astype(str).unique())) or "",
             "target_mod_code": f.get("target_mod_code", ""),
             "n_reads": int(mod_t.size + unmod_t.size), "n_modified": int(mod_t.size), "n_unmodified": int(unmod_t.size),
             "median_tail_modified": round(float(np.median(mod_t)), 2),
