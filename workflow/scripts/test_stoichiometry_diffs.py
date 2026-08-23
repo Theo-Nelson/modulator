@@ -173,7 +173,7 @@ def summarize_site(df_site, min_cov, which_test, pseudocount, alternative):
     def do_fisher_2x2(tab):
         odds, p = fisher_exact(tab.astype(int), alternative=alternative)
         # single zero cell -> odds genuinely infinite (keep inf); nan margins handled below.
-        odds = float(odds) if math.isfinite(odds) else float("inf")
+        odds = float(odds) if np.isfinite(odds) else float("inf")
         return "fisher_exact_2x2", "fisher_odds", odds, float(p)
 
     def do_chi2_rx2(tab, pc):
