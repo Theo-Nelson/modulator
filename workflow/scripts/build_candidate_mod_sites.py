@@ -5,7 +5,7 @@ import os
 
 import pandas as pd
 
-from genotype_utils import context_key_from_row, context_key_from_snp_row, normalize_text_token
+from genotype_utils import context_key_from_row, context_keys_from_snp_row, normalize_text_token
 
 
 def parse_args():
@@ -87,7 +87,11 @@ def main():
             # with a SNP, and may keep a few extra same-gene/different-metagene sites (safe).
             snp_keys = set()
             for r in snps.to_dict("records"):
-                snp_keys.add(context_key_from_snp_row(r))
+                # Fan a SNP out to ALL its metagene (MG:) contexts -- the singular
+                # context_key_from_snp_row collapsed a multi-metagene SNP to a single CHR: key and never
+                # emitted its MG: keys, dropping linkable mod sites at this UPSTREAM filter (invisible to
+                # the already-fixed snp_mod_assoc / haplotype consumers). Matches 715916d.
+                snp_keys.update(context_keys_from_snp_row(r))
                 for g in str(r.get("gene_names", "")).split(";"):
                     g = normalize_text_token(g)
                     if g:

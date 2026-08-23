@@ -68,6 +68,11 @@ def split_component(snps_sorted, max_block_snps, read_snps=None, min_reads=1):
             cur = [s]
     if len(cur) >= 2:
         blocks.append(cur)
+    elif len(cur) == 1 and blocks and n_complete(blocks[-1] + cur) >= min_reads:
+        # A trailing SNP orphaned at the cap boundary (n_snps % cap == 1) would otherwise be dropped --
+        # the exact size-1-remainder loss this greedy was meant to fix. Attach it to the previous block
+        # (soft cap+1) when reads still co-cover the extended block; drop only if genuinely unphaseable.
+        blocks[-1] = blocks[-1] + cur
     return blocks
 
 
@@ -212,7 +217,8 @@ def main():
 
         for comp in components:
             comp = sorted(comp, key=lambda x: (snp_meta[x]["chrom"], safe_int(snp_meta[x]["pos1"])))
-            for chunk in split_component(comp, int(args.max_block_snps), read_snps=read_snps, min_reads=1):
+            for chunk in split_component(comp, int(args.max_block_snps), read_snps=read_snps,
+                                         min_reads=int(args.min_cocover_reads)):
                 if len(chunk) < 2:
                     continue
                 block_idx += 1

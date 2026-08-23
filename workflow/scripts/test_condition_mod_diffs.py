@@ -114,17 +114,33 @@ def main():
     cov, mod = cov[samples], mod[samples]
     gidx = np.array([0 if s in ref_s else 1 for s in samples], dtype=int)
 
-    keep = cov.notna().all(axis=1) & (cov.min(axis=1) >= args.min_cov)
+    # Require the coverage floor in at least min_samples_per_group samples WITHIN EACH group, NOT in
+    # every sample. `cov.min(axis=1) >= min_cov` demanded the floor in all samples, so one low-coverage
+    # library in either arm killed a site that was well-covered in the rest -- and the beta-binomial
+    # already models per-sample coverage and drops n<=0, so the floor's job is only to guarantee each
+    # group has enough covered libraries to estimate. (This is coverage-robustness; it does NOT report
+    # isoform-switching-driven site changes -- that stays with the isoform-usage test by design.)
+    _covn = cov.to_numpy(dtype=float)
+    _ok = (~np.isnan(_covn)) & (_covn >= args.min_cov)          # (site x sample) meets the floor
+    _nref = _ok[:, gidx == 0].sum(axis=1)
+    _ntest = _ok[:, gidx == 1].sum(axis=1)
+    keep = pd.Series((_nref >= args.min_samples_per_group) & (_ntest >= args.min_samples_per_group),
+                     index=cov.index)
     cov, mod = cov[keep], mod[keep]
     unit = "site x transcript" if by_tx else "site"
     if args.verbose:
-        print(f"[condition_mod] {name}: {len(cov):,} {unit}s with >={args.min_cov}x in all "
-              f"{len(samples)} samples ({len(ref_s)} {args.reference} vs {len(test_s)} {args.test})", flush=True)
+        print(f"[condition_mod] {name}: {len(cov):,} {unit}s with >={args.min_cov}x in >="
+              f"{args.min_samples_per_group} samples/group ({len(ref_s)} {args.reference} vs "
+              f"{len(test_s)} {args.test})", flush=True)
     if cov.empty:
         pd.DataFrame(columns=out_cols).to_csv(args.out_tsv, sep="\t", index=False)
         return
 
-    K, N = mod.to_numpy(dtype=float), cov.to_numpy(dtype=float)
+    # A site may now include samples uncovered at this (site, ZN) (NaN) -- the per-group filter above
+    # only guarantees ENOUGH covered samples per group. Map NaN -> 0 so beta_binomial_diff drops those
+    # as n<=0 (rather than propagating NaN into the likelihood).
+    K = np.nan_to_num(mod.to_numpy(dtype=float), nan=0.0)
+    N = np.nan_to_num(cov.to_numpy(dtype=float), nan=0.0)
     K = np.minimum(K, N)   # defensive: Nmod>Nvalid_cov (upstream glitch) otherwise yields a garbage significant p
     ref_names = [s for s in samples if s in ref_s]
     test_names = [s for s in samples if s in test_s]

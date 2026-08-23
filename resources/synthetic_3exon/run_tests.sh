@@ -6,7 +6,7 @@
 #   4. validate_outputs.py -- 30 ground-truth assertions
 # Exits non-zero if anything fails. Run from the repo root.
 set -uo pipefail
-ENV=/home/fs01/thn4005/.local/share/mamba/envs/modulator
+ENV=${ENV:-/home/fs01/thn4005/.local/share/mamba/envs/modulator}   # override: ENV=/path ./run_tests.sh
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 cd "$ROOT"
 PY="$ENV/bin/python"

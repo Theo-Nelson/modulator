@@ -59,7 +59,16 @@ modification (≈130 vs ≈85) for a tail×mod signal.
 | **mod_mod (co-dependency)** | **P×Q CONCORDANT sig; R×S INDEPENDENT n.s.; X×Y MUT.EXCL. sig** | OR 2.5e5 / 1.03 / 0.0 |
 | **hierarchical_stoich** | GENE_TR `reads_dropped_as_uninformative` > 0 | 144 dropped |
 | **polya** | GENE_B B1 vs B2 tail sig; tail×mod at D sig | matches |
-| **between-cond mod** | COND sig (mock hi vs zikv lo) | delta −0.74, p_adj 7e-8 |
+| **between-cond mod** | COND sig (mock hi vs zikv lo) | delta −0.74, p_adj 7e-8 — see NOTE |
+
+> **NOTE (COND under `--by-transcript`):** COND is a *direct* condition effect at chrSyn:3450, but that
+> base's isoform usage also switches (A1 dominant in mock, A2 in zikv), so under `--by-transcript` each
+> ZN partition has its minor-condition arm at only 18× — below `--min-cov 20`. The per-transcript mod
+> test therefore cannot compare COND within either isoform, and the condition effect surfaces instead
+> in the **isoform-usage** test (GENE_A A1↔A2, which this suite also asserts). This is a deliberate
+> trade of the isoform-resolved design, not a bug: a pooled (per-site) companion test would recover
+> COND at the cost of Simpson's-paradox exposure. The `delta −0.74` expectation was written for the
+> pre-`--by-transcript` pooled behaviour and is retained here only as the documented tension.
 | **between-cond isoform / tail** | GENE_A A1↔A2 usage sig; GENE_B tail sig | matches |
 | **sequence_elements** | PAS/ARE/CPE/GRE/M6AM detected on synthetic; unbiased mod-code join | produced (Kozak/stop/uORF + mod-join validated on the real 5-gene demo, which has CDS) |
 | **calibration** | within-mock 2v2 null → ref_df grid report | runs (see README) |

@@ -2,7 +2,7 @@
 # Run the full modulator pipeline on the synthetic 3-exon dataset.
 # Usage: bash resources/synthetic_3exon/run_pipeline.sh   (from the repo root)
 set -uo pipefail
-ENV=/home/fs01/thn4005/.local/share/mamba/envs/modulator
+ENV=${ENV:-/home/fs01/thn4005/.local/share/mamba/envs/modulator}   # override: ENV=/path ./run_pipeline.sh
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 cd "$ROOT"
 export TMPDIR="$ROOT/results/tmp"; mkdir -p "$TMPDIR"
