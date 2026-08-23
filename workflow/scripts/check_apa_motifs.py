@@ -93,8 +93,11 @@ def _find_pas(upstream_seq, max_dist):
             dist = len(upstream_seq) - (i + len(motif))
             if dist <= max_dist:
                 is_canon = motif == PAS_CANONICAL
-                # prefer canonical, then the hexamer closest to the cleavage site
-                key = (0 if is_canon else 1, dist)
+                # CLOSEST hexamer to the cleavage site wins; canonical breaks a distance TIE. (Was
+                # (is_canon, dist), which let a canonical hexamer far upstream beat a nearer variant --
+                # making pas_motif/pas_distance_nt/apa_motif_class a function of the search window, not
+                # the site.)
+                key = (dist, 0 if is_canon else 1)
                 if best is None or key < best[0]:
                     best = (key, motif, dist)
             start = i + 1
@@ -143,11 +146,17 @@ def main():
         chrom, strand, tes = str(r.chrom), str(r.strand), r.iso_tes
         if pd.isna(tes) or strand not in ("+", "-"):
             continue
-        up_seq, down_seq = _windows(fa, chrom, tes, strand, args.upstream, args.downstream)
+        # Fetch enough downstream sequence for BOTH the U/GU scoring (--downstream nt) and the
+        # A-richness internal-priming test (--internal-priming-window nt); previously down_seq was only
+        # --downstream long, so a larger --internal-priming-window was silently CLIPPED to it (a short
+        # --downstream then made the A-fraction spuriously high -> false PAS_NONE_INTERNAL_PRIMING).
+        down_fetch = max(args.downstream, args.internal_priming_window)
+        up_seq, down_seq = _windows(fa, chrom, tes, strand, args.upstream, down_fetch)
         if up_seq is None:
             continue
         motif, dist = _find_pas(up_seq, args.pas_max_distance)
         a_frac = _frac(down_seq[:args.internal_priming_window], "A")
+        down_seq_score = down_seq[:args.downstream]   # U/GU scoring uses exactly --downstream nt
         if motif == PAS_CANONICAL:
             cls = "PAS_CANONICAL"
         elif motif:
@@ -163,8 +172,8 @@ def main():
             "read_support": getattr(r, "read_support", ""),
             "apa_motif_class": cls, "pas_motif": motif or "", "pas_distance_nt": dist if dist is not None else "",
             "downstream_a_frac": a_frac,
-            "downstream_u_frac": _frac(down_seq, "T"), "downstream_gu_frac": _frac(down_seq, "GT"),
-            "upstream_seq": up_seq, "downstream_seq": down_seq,
+            "downstream_u_frac": _frac(down_seq_score, "T"), "downstream_gu_frac": _frac(down_seq_score, "GT"),
+            "upstream_seq": up_seq, "downstream_seq": down_seq_score,
         })
     fa.close()
 

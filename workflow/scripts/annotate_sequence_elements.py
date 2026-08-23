@@ -284,6 +284,23 @@ def main():
     if a.verbose:
         log(f"{len(tx)} fragmentforms, {sum(len(v) for v in mods.values())} mod sites")
 
+    # Preflight: the per-fragmentform `chrom not in fa.references` skip below would silently drop EVERY
+    # row on a reference-name mismatch (e.g. 'chr1' vs '1') -> a header-only table with exit 0 that
+    # reads as "this sample has no cis-elements". Fail loudly on zero contig overlap, warn on partial.
+    fa_contigs = set(fa.references)
+    tx_contigs = {d["chrom"] for d in tx.values() if d.get("chrom")}
+    if tx_contigs and not (tx_contigs & fa_contigs):
+        sys.exit(
+            f"[seq_elements] ERROR: none of the {len(tx_contigs)} fragmentform contig name(s) are in "
+            f"the reference FASTA ({a.reference_fa}). Example fragmentform contigs: "
+            f"{sorted(tx_contigs)[:5]}; example FASTA contigs: {sorted(fa_contigs)[:5]}. "
+            f"This is almost always a reference-name mismatch."
+        )
+    _missing = sorted(tx_contigs - fa_contigs)
+    if _missing:
+        log(f"[seq_elements] WARNING: {len(_missing)} contig(s) absent from the reference FASTA; their "
+            f"fragmentforms are skipped: {_missing[:10]}{' ...' if len(_missing) > 10 else ''}")
+
     cols = ["zt_label", "gene_name", "chrom", "strand", "element_type", "element_subclass",
             "elem_gstart0", "elem_gend0", "spans_junction", "matched_seq", "region", "detail",
             "n_mod_sites", "mod_codes", "mods_json"]
@@ -310,8 +327,13 @@ def main():
                 cds_start_t = g2t.get(g5)
             if c["stop"]:
                 g3 = c["stop"][1] - 1 if strand == "+" else c["stop"][0]     # 3'-most base of stop codon
-                st_first = g2t.get(c["stop"][0] if strand == "+" else c["stop"][1] - 1)
-                cds_end_t = (st_first + 3) if st_first is not None else None
+                # Anchor on the stop codon's ACTUAL 3'-most base in THIS fragmentform's transcript
+                # coordinates (g2t reflects the fragmentform's own exon structure). st_first+3 assumed
+                # the 3 codon bases are contiguous in transcript space; a fragmentform that retains an
+                # intron the reference splices out (or a junction-spanning codon) makes them
+                # non-contiguous, so st_first+3 walked into unrelated bases -> wrong / spurious stops.
+                st_last = g2t.get(g3)
+                cds_end_t = (st_last + 1) if st_last is not None else None
 
         utr3_lo = cds_end_t if cds_end_t is not None else max(0, L - a.utr3_window)
         utr3_region = "3UTR" if cds_end_t is not None else "3p_window"
