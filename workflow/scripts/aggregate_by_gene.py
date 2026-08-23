@@ -1200,13 +1200,17 @@ def _write_one_gene_group(lines, gene_name, gene_id, mod, out_dir, prefix_base,
     """Write the per-gene row TSV and/or the 3 pivots for ONE (gene_name, gene_id, mod) group.
     `lines` are the already-grouped rows (18 tab-cols each) from the sorted per_gene file. Each
     group writes to its own basepath files, so this is safe to run in parallel across groups."""
-    # Include gene_id in the filename: two distinct gene_ids can share a gene_name, and they are
-    # separate groups (grouped on gene_name, gene_id, mod) -- a gene_name-only filename would make
-    # them overwrite each other (serial: open("w") truncation; jobs>1: concurrent-write race).
+    # The filename must be INJECTIVE over the (gene_name, gene_id, mod) group key. Including gene_id
+    # is not sufficient on its own: sanitize_filename_token maps every char outside [A-Za-z0-9._+-] to
+    # '_', so two genuinely distinct keys that differ only in a sanitized character collide on one path
+    # -- and "w" mode then truncates (serial) or two workers tear the file (jobs>1). Append a short hash
+    # of the RAW key so the path is unique even when the human-readable part collides.
+    import hashlib
+    _keyhash = hashlib.sha1(f"{gene_name}\x00{gene_id}\x00{mod}".encode("utf-8", "replace")).hexdigest()[:8]
     safe_g = sanitize_filename_token(gene_name if gene_name else "NA")
     safe_gid = sanitize_filename_token(gene_id if gene_id else "NA")
     safe_mod = sanitize_filename_token(str(mod))
-    bp = os.path.join(out_dir, f"{prefix_base}__{safe_g}__{safe_gid}__{safe_mod}")
+    bp = os.path.join(out_dir, f"{prefix_base}__{safe_g}__{safe_gid}__{safe_mod}__{_keyhash}")
 
     row_fh = open(f"{bp}.tsv", "w") if write_per_gene else None
     if row_fh is not None:
@@ -1317,6 +1321,16 @@ def generate_per_gene_outputs_from_dedup(
 
     out_dir = f"{out_prefix}_{tag}__per_gene_mod"
     ensure_dir(out_dir)
+    # Prune stale per-gene files from a previous run of the same prefix (e.g. a looser filter): the
+    # long table is authoritative and is rewritten, but orphaned per-gene files would survive and make
+    # a per-gene-view Nmod total exceed the long table. Clear the dir so it only ever holds THIS run.
+    for _stale in os.listdir(out_dir):
+        _sp = os.path.join(out_dir, _stale)
+        if os.path.isfile(_sp):
+            try:
+                os.remove(_sp)
+            except OSError:
+                pass
     prefix_base = os.path.basename(out_prefix)
 
     per_gene_uns = os.path.join(workdir, f"{tag}.per_gene.uns.tsv")

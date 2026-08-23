@@ -52,14 +52,35 @@ def _init_worker(gtf_path, beds, cfg):
     _CFG = cfg
 
 
+def _inputs_fingerprint(gtf_path, beds):
+    """Fingerprint the INPUTS that determine a chrom's partial contents: the GTF (gene labels) and the
+    exact bed set (which samples/ZN partitions). Without this a resume after a new sample's beds arrive
+    -- or after a re-assembled GTF -- would keep the old .done markers, skip phase 1 for the already-done
+    chroms, and silently drop the new sample's rows (or emit stale gene names). Uses size+mtime (cheap)
+    rather than hashing multi-GB beds."""
+    import hashlib
+    h = hashlib.sha1()
+    try:
+        st = os.stat(gtf_path); h.update(f"gtf:{st.st_size}:{int(st.st_mtime)}".encode())
+    except OSError:
+        h.update(b"gtf:missing")
+    for (_root, sample, path, zn) in sorted(beds):
+        try:
+            sz = os.stat(path).st_size
+        except OSError:
+            sz = -1
+        h.update(f"|{sample}:{zn}:{path}:{sz}".encode())
+    return h.hexdigest()[:16]
+
+
 def _run_sig(cfg):
-    """Signature of the run parameters that determine a chrom's partial contents. A .done marker only
-    counts as done if its stored signature matches -- otherwise a resume with different flags (e.g.
-    filter_enable / emit_* / the k-ratio) would skip phase 1 and concatenate partials that were never
-    written, yielding a silent header-only FILTERED table."""
+    """Signature of the run parameters + INPUTS that determine a chrom's partial contents. A .done
+    marker only counts as done if its stored signature matches -- otherwise a resume with different
+    flags (filter_enable / emit_* / the k-ratio), a NEW SAMPLE's beds, or a re-assembled GTF would skip
+    phase 1 and concatenate partials that were never written / are stale (silent row loss)."""
     return "|".join(f"{k}={cfg.get(k)}" for k in
                     ("min_cov", "count_diff_factor", "k_default", "k_per_mod",
-                     "filter_enable", "emit_raw", "emit_filtered"))
+                     "filter_enable", "emit_raw", "emit_filtered", "inputs_sig"))
 
 
 def _marker_ok(marker, sig):
@@ -277,7 +298,8 @@ def main():
     cfg = dict(workdir=workdir, min_cov=args.min_cov, count_diff_factor=args.count_diff_factor,
                k_default=_k_default, k_per_mod=_k_per_mod,
                filter_enable=args.filter_enable, emit_raw=args.emit_raw,
-               emit_filtered=args.emit_filtered)
+               emit_filtered=args.emit_filtered,
+               inputs_sig=_inputs_fingerprint(args.gtf, beds))
 
     # ---- Phase 1: per-chromosome streaming merge (parallel, resumable) ----
     _sig = _run_sig(cfg)
