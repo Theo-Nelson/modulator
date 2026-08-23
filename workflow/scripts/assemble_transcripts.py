@@ -155,10 +155,16 @@ def query_len(aln):
     return int(len(seq)) if seq else 0
 
 def cluster_positions(sorted_positions, window):
+    # WIDTH-CAPPED clustering: a position joins the current cluster only if it is within `window` of the
+    # cluster's FIRST (smallest) member, so every cluster spans at most `window` nt. Single-linkage
+    # (comparing to cur[-1]) let a chain of near-neighbours grow arbitrarily wide -- so a fragmentform's
+    # reported 3' end could sit far outside the `window` the parameter promises, and removing one
+    # bridging read could SPLIT a cluster and conjure a "novel APA site" (non-monotone in read filters).
+    # Capping the width makes the fragmentform set honour `window` and be far more stable to read drops.
     clusters = []
     cur = [sorted_positions[0]]
     for p in sorted_positions[1:]:
-        if p - cur[-1] <= window:
+        if p - cur[0] <= window:
             cur.append(p)
         else:
             clusters.append(cur); cur = [p]
@@ -208,9 +214,14 @@ def compute_chain_features(exact_counts):
         ]
         max_suffix_len = max((len(other) for other in shorter_suffixes), default=0)
         unique_prefix = tuple(chain[: max(0, len(chain) - max_suffix_len)])
+        # Use the SAME 3'-anchored test as the downstream collapse (chain[-len(other):] == other),
+        # NOT is_suffix(). is_suffix() specially returns True for an empty `other` (an unspliced read's
+        # chain), but the collapse never absorbs an empty chain into a spliced canon -- so counting it
+        # here inflated the denominator and DEFLATED anchor_frac, letting added unspliced reads DELETE a
+        # fragmentform. For an unspliced canon (chain==()) the empty self-match still counts (correct).
         reachable_count = sum(
             exact_counts[other] for other in observed
-            if is_suffix(chain, other)
+            if len(other) <= len(chain) and chain[-len(other):] == other
         )
         exact_count = exact_counts[chain]
         anchor_frac = (exact_count / reachable_count) if reachable_count else 0.0
@@ -366,7 +377,9 @@ def annotate_isoform(iso, gtf_by_cs, tes_sorted_index, tes_match_tol, exact_tes_
     if best:
         tes_delta = abs(best.tes_1based - tes)
         same_chain = (best.chain_tx == iso["chain_tx"])
-        if same_chain and tes_delta < exact_tes_tol:
+        # <= (inclusive): a strict `< exact_tes_tol` was off by one -- exact_tes_tol=0 could NEVER call
+        # EXACT (not even a perfect tes_delta==0 match), and "10" meant "<=9".
+        if same_chain and tes_delta <= exact_tes_tol:
             cls = "EXACT"
         elif same_chain:
             cls = "NOVEL_APA"
@@ -739,16 +752,21 @@ def _process_core(core_args):
                 rep_exons = list(rep["exons"])
                 tes = rep_pos
 
-                # enforce TES boundary -- but never past the terminal exon's OTHER end, or we
-                # would emit an inverted (start > end) exon. rep_pos (the cluster mode) can be up
-                # to apa_window from the rep read's own TES, so a terminal exon shorter than the
-                # window could otherwise be flipped. Clamp so the exon stays non-empty.
+                # Enforce the TES boundary, keeping tes INSIDE the terminal exon. rep_pos (the cluster
+                # mode) can differ from the rep read's own TES; when it falls at/before the terminal
+                # exon's start (a terminal exon shorter than the difference), extending would invert the
+                # exon, so we fall back to the rep read's actual 3' end rather than reporting a tes that
+                # sits OUTSIDE the fragmentform's own exon span (previously left uncorrected).
                 if strand == "+":
-                    if rep_exons[-1][1] != tes and tes > rep_exons[-1][0]:
+                    if tes > rep_exons[-1][0]:
                         rep_exons[-1] = (rep_exons[-1][0], tes)
+                    else:
+                        tes = rep_exons[-1][1]
                 else:
-                    if rep_exons[0][0] != tes and tes < rep_exons[0][1]:
+                    if tes < rep_exons[0][1]:
                         rep_exons[0] = (tes, rep_exons[0][1])
+                    else:
+                        tes = rep_exons[0][0]
 
                 polya_ok = sum(
                     1 for m in grp
