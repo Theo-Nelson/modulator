@@ -53,6 +53,12 @@ def _read(path):
     return df
 
 
+# Fragmentform id suffix: "G<gene_index>.T<tx_index>". Anchored at end-of-string so a dotted gene
+# name in the prefix cannot match. This is the dot-safe join key between the GTF and the annotation
+# tables (see _fragkey in main()).
+_FRAG_SUFFIX = re.compile(r'G\d+\.T\d+$')
+
+
 def load_structures(gtf_path):
     """gene -> [{zt, chrom, strand, exons:[[s,e]..]}]  (transcript_id -> gene via the GTF attrs)."""
     tx = {}
@@ -67,8 +73,11 @@ def load_structures(gtf_path):
             if not m:
                 continue
             g = re.search(r'gene_name "([^"]+)"', f[8]) or re.search(r'gene_id "([^"]+)"', f[8])
+            # Fallback gene name (only when the GTF lacks gene_name/gene_id): strip the trailing
+            # ".G<n>.T<n>" rather than splitting on the first "." -- the latter truncates a dotted
+            # gene name (CTC-338M12.4 -> CTC-338M12).
             t = tx.setdefault(m.group(1), {"zt": m.group(1), "chrom": f[0], "strand": f[6],
-                                           "gene": g.group(1) if g else m.group(1).split(".")[0],
+                                           "gene": g.group(1) if g else _FRAG_SUFFIX.sub("", m.group(1)).rstrip("."),
                                            "exons": []})
             t["exons"].append([int(f[3]) - 1, int(f[4])])
     genes = {}
@@ -103,26 +112,32 @@ def main():
     cond = _read(args.condition_mod_diffs)
     hier = _read(args.hierarchical_stoich)
 
-    # per-fragmentform annotations, keyed by the zt_label used in the GTF (gene name stripped)
-    def _gtfkey(zt):
-        p = str(zt).split(".")
-        return ".".join(p[1:]) if len(p) > 3 else str(zt)
+    # Per-fragmentform annotations, joined to the GTF structures by the trailing "G<gene_index>.T<tx>"
+    # of the id. That suffix is globally unique AND dot-SAFE: gene names can contain dots (GENCODE
+    # clone names like CTC-338M12.4, versioned Ensembl ids), so the old key -- split on "." and drop the
+    # first field to strip the gene name -- corrupted the key for those genes (e.g.
+    # "CTC-338M12.4.G842.T1" -> "4.G842.T1"), silently dropping their annotations. Both the GTF
+    # transcript_id (<gene>.G<n>.T<n>) and the table zt_label (<gene>.<gene_id>.G<n>.T<n>) end in this
+    # suffix, so keying both sides on it joins them regardless of dots in the name.
+    def _fragkey(zt):
+        m = _FRAG_SUFFIX.search(str(zt))
+        return m.group(0) if m else str(zt)
 
     ff_ann = {}
     if not summ.empty and "zt_label" in summ.columns:
         for r in summ.itertuples(index=False):
-            ff_ann[_gtfkey(r.zt_label)] = {
+            ff_ann[_fragkey(r.zt_label)] = {
                 "classification": getattr(r, "classification", ""),
                 "reads": int(getattr(r, "read_support", 0) or 0),
                 "tes": int(getattr(r, "iso_tes", 0) or 0),
             }
     if not apa.empty and "zt_label" in apa.columns:
         for r in apa.itertuples(index=False):
-            ff_ann.setdefault(_gtfkey(r.zt_label), {}).update({
+            ff_ann.setdefault(_fragkey(r.zt_label), {}).update({
                 "pas": getattr(r, "apa_motif_class", ""), "pas_motif": getattr(r, "pas_motif", "") or ""})
     if not tails.empty and "ZT" in tails.columns:
         for r in tails.itertuples(index=False):
-            ff_ann.setdefault(_gtfkey(r.ZT), {}).update({
+            ff_ann.setdefault(_fragkey(r.ZT), {}).update({
                 "tail": float(getattr(r, "median_tail", float("nan"))),
                 "tail_n": int(getattr(r, "n_reads", 0) or 0)})
 
@@ -149,11 +164,11 @@ def main():
 
     payload = {}
     for gene, forms in genes.items():
-        ann_reads = sum(ff_ann.get(f["zt"], {}).get("reads", 0) for f in forms)
+        ann_reads = sum(ff_ann.get(_fragkey(f["zt"]), {}).get("reads", 0) for f in forms)
         rec = {
             "gene": gene, "chrom": forms[0]["chrom"], "strand": forms[0]["strand"],
             "reads": ann_reads,
-            "forms": [{"zt": f["zt"], "exons": f["exons"], **ff_ann.get(f["zt"], {})} for f in forms],
+            "forms": [{"zt": f["zt"], "exons": f["exons"], **ff_ann.get(_fragkey(f["zt"]), {})} for f in forms],
             "sites": [], "diffs": [], "cond": [], "hier": [],
         }
         sg = site_by_gene.get(gene)
@@ -179,8 +194,8 @@ def main():
         if hg is not None:
             for r in hg.itertuples(index=False):
                 rec["hier"].append({"pos": int(getattr(r, "site_pos", 0)),
-                                    "a": _gtfkey(getattr(r, "fragmentform_a", "")),
-                                    "b": _gtfkey(getattr(r, "fragmentform_b", "")),
+                                    "a": _fragkey(getattr(r, "fragmentform_a", "")),
+                                    "b": _fragkey(getattr(r, "fragmentform_b", "")),
                                     "delta": float(getattr(r, "delta", 0) or 0),
                                     "padj": _padj(getattr(r, "p_adj_bh", None)),
                                     "ninf": int(getattr(r, "n_informative", 0) or 0),
