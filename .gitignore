@@ -33,4 +33,8 @@ __pycache__/
 # OS
 .DS_Store
 Thumbs.db
-LICENSE.md
+
+# Build artifacts (do not track the generated egg-info)
+*.egg-info/
+build/
+dist/

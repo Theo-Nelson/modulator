@@ -10,7 +10,18 @@ readme = "README.md"
 requires-python = ">=3.11"
 dependencies = [
   "PyYAML",
+  "pandas",
+  "numpy",
+  "pysam",
+  "scipy",
+  "matplotlib",
 ]
+
+# NOTE: the stage implementations live in workflow/scripts/*.py and are executed as subprocesses by the
+# runner (they are NOT importable package modules). A bare `pip install modulator` installs only the
+# src/modulator package; run the pipeline from a repo checkout (or a layout that keeps workflow/ next to
+# the config) so the runner can find them. modkit (>=0.5.0, <0.6), samtools, bgzip and tabix must also
+# be on PATH.
 
 [project.scripts]
 modulator = "modulator.cli:main"
