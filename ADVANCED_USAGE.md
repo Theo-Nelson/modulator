@@ -46,7 +46,7 @@ modulator run --config config/config.yaml [--workdir .] [--jobs N] [--stages all
 | `--config` | `config/config.yaml` | YAML config (relative to `--workdir` or absolute). |
 | `--workdir` | `.` | Project dir containing `workflow/`, `config/`, `results/`, `resources/`. |
 | `--jobs` | `1` | Independent sample-level jobs in parallel. (`genotype.jobs` is separate.) |
-| `--stages` | `all` | Comma-separated subset of: `assemble, read_stats, multigene_filter, modkit_zn, aggregate_zn, test_diffs, classify_diffs, genotype, report`. |
+| `--stages` | `all` | Comma-separated subset of: `assemble, read_stats, splice_junctions, apa_motifs, modkit_zn, aggregate_zn, novel_loci, sequence_elements, test_diffs, classify_diffs, multigene_filter, genotype, polya, hierarchical_stoich, between_conditions, report` (this is the execution order). |
 | `--resume` | off | Skip stages whose outputs (or `results/.checkpoints/<stage>.done` markers) already exist. |
 | `--set` | — | Simple overrides: `key=value` / `nested.key=value` (e.g. `genotype.enable=true`). |
 
@@ -203,7 +203,6 @@ Partition tags are hard-coded to split reads by fragment assignment:
 | Section | Key | Default | Meaning |
 |---------|-----|--------:|---------|
 | `zn` | `partition_tag` | `"ZN"` | metagene-aware partition index from the assembler |
-| `zn` | `per_mod_bed` | `true` | one BED per modification |
 | `zt` | `partition_tag` | `"ZT"` | gene+fragment human-readable code |
 
 > `modkit` is pinned to **0.5.0**: 0.6.x removed `--partition-tag`, which the
@@ -439,6 +438,7 @@ dispersion shrunk across features.
 |-----|--------:|-------------|
 | `between_conditions.enable` | `true` | Run the stage (no-op without a samplesheet/contrasts). |
 | `between_conditions.mod_diffs` | `true` | Differential modification (needs `aggregate_zn`). |
+| `between_conditions.mod_by_transcript` | `true` | ALSO write a per-fragmentform (ZN) table (`_mod_diffs_by_transcript.tsv`) resolving *which* isoform carries the change. The site-level `_mod_diffs.tsv` (pooled across fragmentforms) is written regardless; set `false` to skip only the extra per-transcript table. |
 | `between_conditions.isoform_usage` | `true` | Differential isoform usage (needs `assemble`). |
 | `between_conditions.apa_usage` | `true` | Differential APA-site usage. |
 | `between_conditions.junction_usage` | `true` | Differential junction usage (needs `splice_junctions`). |
@@ -525,7 +525,6 @@ pivots. FILTERED long tables keep every ZN/sample row at kept sites.
 - `<prefix>_molecule_snps.tsv` — one row per read per candidate SNP
 - `<prefix>_candidate_mod_sites.tsv`, `<prefix>_molecule_mod_calls.tsv`
 - `<prefix>_snp_transcript_assoc.tsv`, `<prefix>_snp_mod_assoc.tsv`
-- `<prefix>_snp_tx_mod_dependency.tsv` — fragment-conditioned SNP-mod dependency
 - `<prefix>_haplotype_blocks.tsv` (gene_names / region / span_bp / snp_coords), `<prefix>_haplotype_transcript_assoc.tsv`, `<prefix>_haplotype_mod_assoc.tsv`
 - `<prefix>__snp_figs/` — per-example figures
 

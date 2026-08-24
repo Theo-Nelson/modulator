@@ -42,7 +42,9 @@ def build_parser() -> argparse.ArgumentParser:
     demo.add_argument("--reference-gtf", required=True, help="Reference GTF to use for the demo run.")
     demo.add_argument(
         "--dataset",
-        choices=["MXD1_reads", "RPL13_reads", "ALCAM_NHSL1_SERAC1_MXD1_RIOK3_reads"],
+        # Only datasets actually bundled under resources/test_bams/ -- RPL13_reads was advertised but
+        # never shipped, so `demo --dataset RPL13_reads` failed at bams_dir resolution.
+        choices=["MXD1_reads", "ALCAM_NHSL1_SERAC1_MXD1_RIOK3_reads"],
         default="MXD1_reads",
         help="Bundled test dataset to use.",
     )

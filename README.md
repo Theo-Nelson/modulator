@@ -101,17 +101,18 @@ Fifteen stages, run in order and individually **resumable** (`--resume`):
 | 2 | `read_stats` | per-sample read-retention funnel + length summaries | `<prefix>_per_sample_read_stats.tsv` |
 | 3 | `splice_junctions` | donor/acceptor dinucleotides of every assembled intron | `<prefix>_splice_junctions.tsv` |
 | 4 | `apa_motifs` | polyadenylation-signal check per APA site + internal-priming flag | `<prefix>_apa_motifs.tsv` |
-| 5 | `multigene_filter` | resolve/keep reads over overlapping genes -> cleaned tagged BAMs | `zt_filtered/*.bam` |
-| 6 | `modkit_zn` | `modkit pileup` partitioned by `ZN` (per-transcript modification calls) | `modkit_zn/<sample>/*.bed` |
-| 7 | `aggregate_zn` | merge into per-site × transcript × sample stoichiometry | `<prefix>_FILTERED_sites_long.tsv` |
-| 8 | `novel_loci` | read-backed loci matching no reference gene | `<prefix>_novel_loci.tsv` |
+| 5 | `modkit_zn` | `modkit pileup` partitioned by `ZN` (per-transcript modification calls) | `modkit_zn/<sample>/*.bed` |
+| 6 | `aggregate_zn` | merge into per-site × transcript × sample stoichiometry | `<prefix>_FILTERED_sites_long.tsv` |
+| 7 | `novel_loci` | read-backed loci matching no reference gene | `<prefix>_novel_loci.tsv` |
+| 8 | `sequence_elements` | annotate PAS / 3'UTR / codon context around each fragmentform's modification sites | `<prefix>_sequence_elements.tsv` |
 | 9 | `test_diffs` | between-transcript differential-modification test per site | `<prefix>__ZN_site_diff_results.tsv` |
 | 10 | `classify_diffs` | assign a structural category to each significant site (+ figures) | `<prefix>__ZN_site_classified.tsv` |
-| 11 | `genotype` | SNP discovery, SNP-mod/fragment association, dependency, haplotypes, and why each SNP changes a modification | `genotype/<prefix>_*.tsv` |
-| 12 | `polya` | dorado poly(A) tail length per read -> per-fragmentform distributions, differential tail, tail × modification | `polya/<prefix>_*.tsv` |
-| 13 | `hierarchical_stoich` *(optional)* | truncation-aware differential stoichiometry: compares fragmentforms using only reads that demonstrably span their divergence point (the 5' complement to `test_diffs`) | `<prefix>_hierarchical_stoich.tsv` |
-| 14 | `between_conditions` *(needs a samplesheet)* | replicate-aware differential modification / isoform / APA / junction usage / tail length between conditions | `between_conditions/<prefix>_<contrast>_*.tsv` |
-| 15 | `report` | self-contained HTML report + interactive gene browser | `report/<prefix>_report.html`, `report/<prefix>_gene_browser.html` |
+| 11 | `multigene_filter` | resolve reads over overlapping genes -> cleaned tagged BAMs for the genotype stage | `zt_filtered/*.bam` |
+| 12 | `genotype` | SNP discovery, SNP-mod/fragment association, haplotypes, and why each SNP changes a modification | `genotype/<prefix>_*.tsv` |
+| 13 | `polya` | dorado poly(A) tail length per read -> per-fragmentform distributions, differential tail, tail × modification | `polya/<prefix>_*.tsv` |
+| 14 | `hierarchical_stoich` *(optional)* | truncation-aware differential stoichiometry: compares fragmentforms using only reads that demonstrably span their divergence point (the 5' complement to `test_diffs`) | `<prefix>_hierarchical_stoich.tsv` |
+| 15 | `between_conditions` *(needs a samplesheet)* | replicate-aware differential modification / isoform / APA / junction usage / tail length between conditions | `between_conditions/<prefix>_<contrast>_*.tsv` |
+| 16 | `report` | self-contained HTML report + interactive gene browser | `report/<prefix>_report.html`, `report/<prefix>_gene_browser.html` |
 
 ### Comparing conditions (samplesheet)
 
