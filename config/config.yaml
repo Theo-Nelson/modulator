@@ -324,6 +324,7 @@ between_conditions:
   enable: true
   # Which of the five differentials to run (each writes its own per-contrast TSV).
   mod_diffs: true              # differential modification (needs aggregate_zn)
+  mod_by_transcript: true      # ALSO write a per-fragmentform (ZN) between-condition mod table (_mod_diffs_by_transcript.tsv) showing WHICH isoform carries the change. The site-level *_mod_diffs.tsv (pooled across fragmentforms) is ALWAYS written regardless — set false to skip only the extra per-transcript table.
   isoform_usage: true          # which isoform the gene uses      (needs assemble)
   apa_usage: true              # which 3' end / APA site it uses   (needs assemble)
   junction_usage: true         # which junctions it splices        (needs splice_junctions)

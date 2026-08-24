@@ -155,25 +155,27 @@ def query_len(aln):
     return int(len(seq)) if seq else 0
 
 def cluster_positions(sorted_positions, window):
-    # WIDTH-CAPPED clustering: a position joins the current cluster only if it is within `window` of the
-    # cluster's FIRST (smallest) member, so every cluster spans at most `window` nt. Single-linkage
-    # (comparing to cur[-1]) let a chain of near-neighbours grow arbitrarily wide -- so a fragmentform's
-    # reported 3' end could sit far outside the `window` the parameter promises, and removing one
-    # bridging read could SPLIT a cluster and conjure a "novel APA site" (non-monotone in read filters).
-    # Capping the width makes the fragmentform set honour `window` and be far more stable to read drops.
-    clusters = []
-    cur = [sorted_positions[0]]
-    for p in sorted_positions[1:]:
-        if p - cur[0] <= window:
-            cur.append(p)
-        else:
-            clusters.append(cur); cur = [p]
-    clusters.append(cur)
+    # MODE-SEEKING clustering: repeatedly take the highest-count position as a seed, absorb every
+    # remaining position within `window` of that seed, remove them, and repeat. Every member is within
+    # `window` of the reported 3' end (the seed == the mode, matching how `rep` is chosen), and any two
+    # reported ends are > `window` apart. This replaces BOTH earlier schemes: single-linkage let a chain
+    # grow arbitrarily wide (reported end outside the window; dropping a bridge split a cluster), and the
+    # fixed width-cap (anchored on each cluster's first member) had the MIRROR bug -- widening `window`
+    # moved a bucket boundary and split two 3' ends only a few nt apart into separate APA sites (adding
+    # fragmentforms as the tolerance loosened). Mode-seeking bounds the width AND can never separate two
+    # positions closer than `window`, so the fragmentform set is monotone in `window` in both directions.
+    counts = Counter(sorted_positions)
+    remaining = dict(counts)
     out = []
-    for cl in clusters:
-        c = Counter(cl)
-        rep = sorted(c.items(), key=lambda x: (x[1], x[0]))[-1][0]
-        out.append({"positions": cl, "rep": rep, "count": sum(c.values())})
+    while remaining:
+        seed = max(remaining, key=lambda p: (remaining[p], -p))   # highest count; tie -> smallest pos
+        members = [p for p in remaining if abs(p - seed) <= window]
+        positions = []
+        for p in members:
+            positions.extend([p] * counts[p])
+            del remaining[p]
+        out.append({"positions": sorted(positions), "rep": seed, "count": len(positions)})
+    out.sort(key=lambda d: d["rep"])   # stable downstream ordering
     return out
 
 def is_suffix(longer, shorter):

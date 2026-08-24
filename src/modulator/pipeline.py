@@ -310,6 +310,9 @@ class PipelinePaths:
     def cond_mod_diffs(self, contrast: str) -> Path:
         return self.between_conditions / f"{self.prefix}_{contrast}_mod_diffs.tsv"
 
+    def cond_mod_diffs_by_tx(self, contrast: str) -> Path:
+        return self.between_conditions / f"{self.prefix}_{contrast}_mod_diffs_by_transcript.tsv"
+
     def cond_usage_diffs(self, contrast: str, feature: str) -> Path:
         return self.between_conditions / f"{self.prefix}_{contrast}_{feature}_usage_diffs.tsv"
 
@@ -1935,17 +1938,23 @@ class ModulatorPipeline:
                       "--contrast-name", name, "--verbose"]
             # 1) differential modification (per-sample site counts from the ZN long table)
             if as_bool(cfg.get("mod_diffs", True), True) and self._nonempty(self.paths.zn_filtered_long):
-                args = ["--in-tsv", str(self.paths.zn_filtered_long),
-                        "--out-tsv", str(self.paths.cond_mod_diffs(name)),
-                        "--min-cov", str(int(cfg.get("min_cov", 20))), *common, *common_stat]
+                base_args = ["--in-tsv", str(self.paths.zn_filtered_long),
+                             "--min-cov", str(int(cfg.get("min_cov", 20))), *common, *common_stat]
                 if mod_filter:
-                    args += ["--mod-filter", *mod_filter]
-                # Resolve the differential modification PER TRANSCRIPT PARTITION (ZN) by default, so the
-                # report shows which fragmentform carries the between-condition change (not just the site).
-                if as_bool(cfg.get("mod_by_transcript", True), True):
-                    args.append("--by-transcript")
-                self.run_python_script("test_condition_mod_diffs.py", args,
+                    base_args += ["--mod-filter", *mod_filter]
+                # ALWAYS write the SITE-LEVEL table (pooled across fragmentforms) -- this is the headline
+                # result. `--by-transcript` alone put the ZN partition in the coverage key, so a site
+                # whose isoform usage switches between conditions failed --min-cov in every partition and
+                # the site-level answer was lost entirely. The per-transcript view (which fragmentform
+                # carries the change) is written as an ADDITIONAL table when mod_by_transcript is on.
+                self.run_python_script("test_condition_mod_diffs.py",
+                                       ["--out-tsv", str(self.paths.cond_mod_diffs(name)), *base_args],
                                        label=f"condition_mod_diffs:{name}")
+                if as_bool(cfg.get("mod_by_transcript", True), True):
+                    self.run_python_script("test_condition_mod_diffs.py",
+                                           ["--out-tsv", str(self.paths.cond_mod_diffs_by_tx(name)),
+                                            "--by-transcript", *base_args],
+                                           label=f"condition_mod_diffs_by_tx:{name}")
                 # Flag between-condition sites that sit on a segregating SNP at the modified base
                 # (genotype confounder). Needs candidate SNPs from the genotype stage.
                 if self._nonempty(self.paths.geno_candidate_snps) and self._nonempty(self.paths.cond_mod_diffs(name)):

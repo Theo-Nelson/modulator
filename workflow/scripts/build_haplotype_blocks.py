@@ -68,11 +68,19 @@ def split_component(snps_sorted, max_block_snps, read_snps=None, min_reads=1):
             cur = [s]
     if len(cur) >= 2:
         blocks.append(cur)
-    elif len(cur) == 1 and blocks and n_complete(blocks[-1] + cur) >= min_reads:
-        # A trailing SNP orphaned at the cap boundary (n_snps % cap == 1) would otherwise be dropped --
-        # the exact size-1-remainder loss this greedy was meant to fix. Attach it to the previous block
-        # (soft cap+1) when reads still co-cover the extended block; drop only if genuinely unphaseable.
-        blocks[-1] = blocks[-1] + cur
+    elif len(cur) == 1 and blocks:
+        # DISJOINT rebalance: the greedy commits maximally leftward, so a SNP that only pairs rightward
+        # (or a trailing n%cap==1 remainder) is stranded as a size-1 block and would be dropped -- and
+        # a WIDER --max-block-snps then LOSES SNPs. Move the previous block's LAST SNP into a new
+        # [prev[-1], orphan] block so no SNP is lost and blocks stay NON-overlapping (keeping the
+        # haplotype-mod tests independent). Requires prev to remain >= 2 after the move and both blocks
+        # to stay phaseable; otherwise the orphan cannot be recovered disjointly at this cap and is
+        # dropped (unavoidable when the cap is too small to tile the component without overlap).
+        prev = blocks[-1]
+        newblk = [prev[-1], cur[0]]
+        if len(prev) >= 3 and n_complete(newblk) >= min_reads:
+            blocks[-1] = prev[:-1]
+            blocks.append(newblk)
     return blocks
 
 
