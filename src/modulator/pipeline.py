@@ -376,7 +376,7 @@ class PipelinePaths:
 
 
 class ModulatorPipeline:
-    def __init__(self, config: dict[str, Any], *, workdir: str | Path, jobs: int = 1, verbose: bool = True, resume: bool = False):
+    def __init__(self, config: dict[str, Any], *, workdir: str | Path, jobs: int = 1, verbose: bool = True, resume: bool = False, stage_inputs: bool = True):
         self.root = find_project_root(workdir)
         ensure_mpl_config_dir(self.root)
         self.config = config
@@ -402,6 +402,11 @@ class ModulatorPipeline:
         self.jobs = max(1, int(jobs))
         self.verbose = verbose
         self.resume = bool(resume)
+        # validate-config constructs the pipeline purely to resolve+report config; it must not touch
+        # the filesystem (stage BAM symlinks, write metadata). When False, _load_samplesheet reads the
+        # samplesheet and resolves contrasts (so validation still catches errors) but stages nothing.
+        self._stage_inputs = bool(stage_inputs)
+        self._samplesheet_rows: list[dict] | None = None
         # When set to a list (only during the genotype stage), run_python_script records
         # each substep's peak RSS into it, so per-substep memory can be written out.
         self._substep_mem: list[tuple[str, float]] | None = None
@@ -433,11 +438,13 @@ class ModulatorPipeline:
         if not is_set(ss):
             return
         rows = read_samplesheet(resolve_path(self.root, str(ss)))
-        stage_bams(rows, self.paths.staged_bams_dir, self._config_bams_dir)
-        self._staged_bams_dir = self.paths.staged_bams_dir
+        self._samplesheet_rows = rows
         self.sample_meta = sample_metadata(rows)
         self.contrasts = resolve_contrasts(self.config.get("contrasts"), rows)
-        write_metadata_tsv(rows, self.paths.sample_metadata)
+        if self._stage_inputs:
+            stage_bams(rows, self.paths.staged_bams_dir, self._config_bams_dir)
+            self._staged_bams_dir = self.paths.staged_bams_dir
+            write_metadata_tsv(rows, self.paths.sample_metadata)
         if self.verbose:
             groups: dict[str, list[str]] = {}
             for r in rows:
@@ -449,6 +456,16 @@ class ModulatorPipeline:
                 print(f"[modulator]   contrasts: {', '.join(c['name'] for c in self.contrasts)}", flush=True)
 
     def _discover_samples(self) -> list[str]:
+        # With a samplesheet the sample SET is the samplesheet -- derive it from the rows, not from
+        # globbing the staged dir. Globbing picked up stale <sample>.bam symlinks left by a PRIOR run
+        # with a different samplesheet (staging replaces links but never prunes removed samples), so a
+        # dropped sample silently re-entered every stage. It also lets validate-config report the count
+        # without staging anything.
+        if self._samplesheet_rows is not None:
+            samples = sorted({r["sample"] for r in self._samplesheet_rows})
+            if not samples:
+                raise FileNotFoundError("samplesheet has no samples")
+            return samples
         bams_dir = self.bams_dir
         bam_glob = self.bam_glob
         found = sorted(glob.glob(str(bams_dir / bam_glob)))

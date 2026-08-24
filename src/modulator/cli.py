@@ -75,7 +75,9 @@ def cmd_validate(args: argparse.Namespace) -> None:
     if not config_path.is_absolute():
         config_path = project_root / config_path
     config = apply_overrides(load_config(config_path), args.overrides)
-    pipeline = ModulatorPipeline(config, workdir=project_root, jobs=1, verbose=False)
+    # validate-config must not mutate the filesystem: stage_inputs=False resolves + validates the
+    # samplesheet/contrasts without staging BAM symlinks or writing the metadata TSV.
+    pipeline = ModulatorPipeline(config, workdir=project_root, jobs=1, verbose=False, stage_inputs=False)
     print(f"project_root={pipeline.root}")
     print(f"prefix={pipeline.prefix}")
     print(f"samples={len(pipeline.samples)}")

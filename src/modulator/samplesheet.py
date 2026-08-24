@@ -135,6 +135,20 @@ def stage_bams(rows: list[dict], staging_dir: str | Path, bams_dir: str | Path) 
             ext = ".bam.csi" if idx.suffix == ".csi" else ".bam.bai"
             _link(idx, staging / f"{sample}{ext}")
         samples.append(sample)
+    # Prune stale links from a PRIOR samplesheet: a re-run with a sample removed would otherwise leave
+    # its <sample>.bam symlink behind, and anything that globs the staged dir would silently re-include
+    # the dropped sample. Only remove symlinks (never real files a user may have dropped in) whose
+    # sample stem is not in the current set.
+    keep = set(samples)
+    for link in staging.glob("*.bam*"):
+        if not link.is_symlink():
+            continue
+        stem = link.name.split(".bam")[0]
+        if stem not in keep:
+            try:
+                link.unlink()
+            except OSError:
+                pass
     return samples
 
 
