@@ -104,6 +104,12 @@ def main():
                 f"({len(snp_keys)} SNP context_keys)",
                 flush=True,
             )
+        else:
+            # We were given a candidate-SNP file (require-snp-link is on) but it is header-only: there
+            # are NO candidate SNPs, so NO mod site can be SNP-linked. Keep none -- the old `if not
+            # snps.empty` skipped the filter entirely and silently kept EVERY mod site.
+            print(f"[info] mod-site SNP-link filter: {len(out)} -> 0 sites (no candidate SNPs)", flush=True)
+            out = out.iloc[0:0].copy()
 
     os.makedirs(os.path.dirname(args.out_tsv) or ".", exist_ok=True)
     out.to_csv(args.out_tsv, sep="\t", index=False)

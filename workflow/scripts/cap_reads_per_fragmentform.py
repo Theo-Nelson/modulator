@@ -78,10 +78,10 @@ def main():
             else:
                 outp.write(aln)
                 n_out += 1
-    try:
-        pysam.index(args.out_bam)
-    except Exception:
-        pass
+    # Do NOT swallow an index failure: every downstream reader fetch()es the capped BAM by region and
+    # would fail (or silently read nothing) without a .bai. A cap run that could not index its output
+    # is not a usable result -- fail loudly here instead of hours later.
+    pysam.index(args.out_bam)
 
     if args.verbose:
         print(f"[cap] {args.in_bam}: fragmentforms={len(tag_qnames)} capped={n_capped} "

@@ -71,7 +71,9 @@ def extract_rows_from_bam(
                     stepper="samtools",
                     min_base_quality=min_baseq,
                     min_mapping_quality=min_mapq,
-                ):
+                    max_depth=10_000_000,   # pysam defaults to 8000 -> a high-depth candidate SNP found
+                ):                          # by discover_candidate_snps was silently capped here
+
                     pos1 = int(col.reference_pos) + 1
                     cand_row = pos_map.get(pos1)
                     if cand_row is None:

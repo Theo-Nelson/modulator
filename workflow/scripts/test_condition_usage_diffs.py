@@ -86,6 +86,9 @@ def _feature_map(args, zts) -> pd.DataFrame:
 
 def main():
     args = parse_args()
+    # Ensure the output directory exists BEFORE any early-return writes an empty table -- the
+    # pipeline does not pre-create between_conditions/, so a no-result contrast otherwise crashes.
+    os.makedirs(os.path.dirname(args.out_tsv) or ".", exist_ok=True)
     name = args.contrast_name or f"{args.test}_vs_{args.reference}"
 
     meta = pd.read_csv(args.sample_metadata, sep="\t", low_memory=False, keep_default_na=False)

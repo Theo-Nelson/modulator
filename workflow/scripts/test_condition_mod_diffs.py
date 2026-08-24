@@ -71,6 +71,9 @@ def parse_args():
 
 def main():
     args = parse_args()
+    # Ensure the output directory exists BEFORE any early-return writes an empty table -- the
+    # pipeline does not pre-create between_conditions/, so a no-result contrast otherwise crashes.
+    os.makedirs(os.path.dirname(args.out_tsv) or ".", exist_ok=True)
     name = args.contrast_name or f"{args.test}_vs_{args.reference}"
 
     meta = pd.read_csv(args.sample_metadata, sep="\t", low_memory=False, keep_default_na=False)
@@ -92,7 +95,9 @@ def main():
     df["sample"] = df["sample"].astype(str)
     df = df[df["sample"].isin(ref_s | test_s)]
     if args.mod_filter:
-        df = df[df["mod_code"].isin(set(args.mod_filter))]
+        # compare as STRINGS: a numeric-only mod_code (e.g. 17802) is read as int64, so isin() against
+        # the string CLI values silently matched nothing and dropped every row.
+        df = df[df["mod_code"].astype(str).isin({str(m) for m in args.mod_filter})]
     if df.empty:
         pd.DataFrame(columns=build_out_cols(args.by_transcript)).to_csv(args.out_tsv, sep="\t", index=False)
         return
