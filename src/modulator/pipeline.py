@@ -692,8 +692,12 @@ class ModulatorPipeline:
         try:
             self._checkpoint_dir.mkdir(parents=True, exist_ok=True)
             self._stage_marker(stage).write_text(f"done\t{stage}\t{self._config_sig()}\n")
-        except Exception:
-            pass
+        except Exception as exc:
+            # A failed marker write is not fatal (the stage already produced its outputs), but it must
+            # be VISIBLE: without the marker a later --resume will re-run this stage (safe -- it never
+            # silently reuses stale outputs now, see _stage_done). Warn so the cause is diagnosable.
+            print(f"[modulator] warning: could not write checkpoint marker for stage {stage!r} "
+                  f"({exc}); --resume will re-run it.", file=sys.stderr, flush=True)
 
     def _nonempty(self, path: Path) -> bool:
         try:
@@ -828,8 +832,13 @@ class ModulatorPipeline:
             except OSError:
                 stored_sig = None
             return stored_sig == self._config_sig()
-        # No marker at all: best-effort resume of a results folder produced before markers existed.
-        return self._outputs_present(stage)
+        # No marker at all. We must NOT config-blindly trust pre-existing outputs (finding P): a results
+        # folder from a prior run (or one whose .checkpoints were cleared, or whose marker write failed)
+        # carries no stored config signature, so skipping an ENABLED stage would silently reuse stale
+        # outputs while the manifest is rewritten with the NEW parameters -- the exact false-provenance
+        # bug the signatures exist to prevent. Only a DISABLED stage is safe to skip without a marker
+        # (it produces nothing regardless of config); everything else re-runs.
+        return self._stage_disabled(stage)
 
     def _stage_disabled(self, stage: str) -> bool:
         """True when the stage is toggled off (or a no-op, like between_conditions with no
@@ -951,15 +960,13 @@ class ModulatorPipeline:
         for stage in selected:
             if self.resume and self._stage_done(stage):
                 if self.verbose:
-                    # Report the ACCURATE reason: a disabled/no-op stage was never run (so nothing
-                    # was "reused"); a real checkpoint marker means outputs were reused; otherwise
-                    # pre-existing outputs (from a pre-marker run) satisfied the resume check.
+                    # Report the ACCURATE reason. _stage_done only returns True now for a disabled
+                    # stage (never run) or a matching config-signed checkpoint (outputs reused); a
+                    # marker-less enabled stage always re-runs (finding P), so there is no third case.
                     if self._stage_disabled(stage):
                         reason = "disabled (off) — skipping"
-                    elif self._stage_marker(stage).exists():
-                        reason = "checkpoint found — reusing existing outputs"
                     else:
-                        reason = "existing outputs found (no checkpoint) — skipping"
+                        reason = "checkpoint found — reusing existing outputs"
                     print(f"[modulator] stage: {stage} — {reason}", flush=True)
                 continue
             if self.verbose:
