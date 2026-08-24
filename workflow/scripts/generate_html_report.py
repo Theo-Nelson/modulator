@@ -1281,9 +1281,17 @@ def build_between_conditions_section(bc_dir, top_n, top_note=""):
     """Replicate-aware between-condition results, one subsection per contrast."""
     if not bc_dir or not os.path.isdir(bc_dir):
         return ""
-    kinds = [("mod_diffs", "Differential modification", ["gene_name", "ZN_transcript_index", "chrom", "start0",
-                                                         "strand", "mod_code",
-                                                         "mu_reference", "mu_test", "delta", "p_adj_bh"], "delta"),
+    # The A fix writes TWO modification tables: the site-level *_mod_diffs.tsv (counts pooled across a
+    # site's fragmentforms -- the headline) and, when mod_by_transcript is on, the per-fragmentform
+    # *_mod_diffs_by_transcript.tsv (one row per ZN partition). They are rendered as SEPARATE kinds:
+    # the site-level one has NO ZN_transcript_index column, the by-transcript one does. The two suffixes
+    # are mutually exclusive under endswith() (`_mod_diffs.tsv` never matches `_mod_diffs_by_transcript.tsv`).
+    kinds = [("mod_diffs", "Differential modification (site-level, pooled across fragmentforms)",
+              ["gene_name", "chrom", "start0", "strand", "mod_code",
+               "mu_reference", "mu_test", "delta", "p_adj_bh"], "delta"),
+             ("mod_diffs_by_transcript", "Differential modification per fragmentform (ZN partition)",
+              ["gene_name", "ZN_transcript_index", "chrom", "start0", "strand", "mod_code",
+               "mu_reference", "mu_test", "delta", "p_adj_bh"], "delta"),
              ("isoform_usage_diffs", "Differential isoform usage", ["gene_name", "feature", "mu_reference",
                                                                     "mu_test", "delta", "p_adj_bh"], "delta"),
              ("apa_usage_diffs", "Differential APA-site usage", ["gene_name", "feature", "mu_reference",
@@ -1372,14 +1380,17 @@ def build_between_conditions_section(bc_dir, top_n, top_note=""):
               "test with dispersion shrinkage across features; poly(A) tail length is continuous and is "
               "compared with Welch's t-test across per-replicate medians. Reads are never pooled across "
               "replicates -- the biological unit is the replicate, and pooling would make trivial "
-              "differences look overwhelmingly significant. Differential modification is resolved PER "
-              "TRANSCRIPT PARTITION (ZN), so the same fragmentform is compared across conditions and you "
-              "can see which transcript carries the change. Each analysis shows a top-by-effect figure "
+              "differences look overwhelmingly significant. Differential modification is reported two "
+              "ways: a SITE-LEVEL table (counts summed across a site's fragmentforms -- the headline "
+              "change at the modified position), and, when the per-transcript table is enabled, a "
+              "PER-FRAGMENTFORM table that tests each ZN transcript partition on its own to resolve "
+              "which fragmentform carries the change. Each analysis shows a top-by-effect figure "
               "with the individual replicate values, so effect size and replicate agreement are visible "
               "together.",
         definitions=definitions_html([
-            ("ZN_transcript_index", "Transcript partition the modification site belongs to (differential "
-                                    "modification is tested per transcript, not pooled across the site)."),
+            ("ZN_transcript_index", "Transcript partition (ZN) the modification site belongs to. Present "
+                                    "only in the per-fragmentform table; the site-level table pools "
+                                    "counts across a site's partitions and omits this column."),
             ("mu_reference / mu_test", "Fitted modified (or usage) fraction in the reference and test condition."),
             ("delta", "mu_test - mu_reference: the effect size, in fraction units (delta_nt = nucleotides of tail)."),
             ("p_adj_bh", "Benjamini-Hochberg FDR over all features in that analysis."),
