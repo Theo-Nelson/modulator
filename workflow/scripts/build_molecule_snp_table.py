@@ -60,7 +60,13 @@ def extract_rows_from_bam(
 
     rows = []
     with pysam.AlignmentFile(bam, "rb") as fh:
+        bam_contigs = set(fh.references)
         for chrom, pos_map in cand_by_chrom.items():
+            # A candidate SNP's contig may be absent from THIS sample's BAM header (e.g. samples aligned
+            # to different references); pileup() on an unknown contig raises and would abort the scan.
+            # Nothing to extract for this (bam, chrom), so skip it.
+            if chrom not in bam_contigs:
+                continue
             windows = build_windows(pos_map.keys())
             for win_start1, win_end1 in windows:
                 for col in fh.pileup(

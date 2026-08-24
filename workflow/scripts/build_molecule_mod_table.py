@@ -359,6 +359,13 @@ def extract_rows_pysam(bam, chrom_lookup, chrom, shard_path, chunk_rows, verbose
     f32 = np.float32
     total = 0
     bamf = pysam.AlignmentFile(bam, "rb")
+    # A candidate site's contig may be absent from THIS sample's BAM header (multi-sample runs where a
+    # contig -- e.g. a viral/alt chrom -- has reads in one sample but not another). fetch() on an
+    # unknown contig raises ValueError and would abort the whole genotype stage; there is simply nothing
+    # to extract for this (bam, chrom), so skip it.
+    if chrom not in bamf.references:
+        bamf.close()
+        return chrom, [], 0
     for read in bamf.fetch(chrom):
         if read.is_unmapped or read.is_secondary or read.is_supplementary:
             continue
