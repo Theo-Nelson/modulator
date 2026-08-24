@@ -66,10 +66,10 @@ def _inputs_fingerprint(gtf_path, beds):
         h.update(b"gtf:missing")
     for (_root, sample, path, zn) in sorted(beds):
         try:
-            sz = os.stat(path).st_size
-        except OSError:
-            sz = -1
-        h.update(f"|{sample}:{zn}:{path}:{sz}".encode())
+            st = os.stat(path); tag = f"{st.st_size}:{int(st.st_mtime)}"   # size AND mtime: a same-size
+        except OSError:                                                    # in-place edit must invalidate
+            tag = "missing"                                                # the marker too
+        h.update(f"|{sample}:{zn}:{path}:{tag}".encode())
     return h.hexdigest()[:16]
 
 
@@ -225,13 +225,22 @@ def process_chrom(chrom):
 
 def _chroms_from_beds(beds):
     chroms = set()
+    failed = []
     for (_root, _sample, path, _zn) in beds:
         try:
             tbx = pysam.TabixFile(path)
             chroms.update(tbx.contigs)
             tbx.close()
-        except Exception:
-            continue
+        except Exception as e:
+            failed.append((path, str(e)))
+    if failed:
+        # A bed we cannot open would silently vanish from the chromosome list, dropping ALL of its
+        # contigs from the merge with exit 0 (the downstream _bed_rows_for_chrom warning never runs for
+        # a chrom that was already dropped here). A partial merge is not a valid result -- fail loudly.
+        for p, e in failed:
+            print(f"[stream] ERROR: cannot open tabix bed {p}: {e}", file=sys.stderr, flush=True)
+        raise SystemExit(f"[stream] {len(failed)} of {len(beds)} bed(s) could not be opened; their "
+                         f"chromosomes would be silently dropped. Re-index the beds (tabix -p bed) and rerun.")
     return sorted(chroms)
 
 
@@ -283,8 +292,15 @@ def main():
     args = parse_args()
     base = args.out_prefix
     agg.ensure_dir(os.path.dirname(base) or ".")
-    # Stable per-prefix workdir so re-runs resume completed chromosomes.
-    workdir = f"{base}__zn_stream_work"
+    # Stable per-prefix workdir (holds per-chrom partials, which can be large) so re-runs resume
+    # completed chromosomes. Honour --tmpdir when given: on a whole-transcriptome run the partials
+    # would otherwise pile up on the RESULTS filesystem beside the outputs instead of the configured
+    # scratch/tmp. The name is prefix-derived (not random) so it stays stable for resume.
+    if args.tmpdir:
+        agg.ensure_dir(args.tmpdir)
+        workdir = os.path.join(args.tmpdir, os.path.basename(base) + "__zn_stream_work")
+    else:
+        workdir = f"{base}__zn_stream_work"
     agg.ensure_dir(workdir)
 
     beds = agg.iter_numbered_beds(args.modkit_dir)

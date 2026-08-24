@@ -662,10 +662,19 @@ class ModulatorPipeline:
     def _stage_marker(self, stage: str) -> Path:
         return self._checkpoint_dir / f"{stage}.done"
 
+    def _config_sig(self) -> str:
+        """Stable signature of the fully-resolved config (base + every --set override). A checkpoint
+        written under a DIFFERENT config must not count as done -- otherwise --resume with changed
+        parameters reuses stale outputs AND rewrites the run manifest to claim the new parameters
+        (false provenance). Conservative: any config change invalidates every stage's marker."""
+        import hashlib
+        import json
+        return hashlib.sha1(json.dumps(self.config, sort_keys=True, default=str).encode()).hexdigest()[:16]
+
     def _mark_stage_done(self, stage: str) -> None:
         try:
             self._checkpoint_dir.mkdir(parents=True, exist_ok=True)
-            self._stage_marker(stage).write_text(f"done\t{stage}\n")
+            self._stage_marker(stage).write_text(f"done\t{stage}\t{self._config_sig()}\n")
         except Exception:
             pass
 
@@ -765,11 +774,15 @@ class ModulatorPipeline:
         if stage == "genotype":
             if not as_bool(cfg.get("genotype", {}).get("enable", False), False):
                 return True
-            return self._nonempty(p.geno_hap_mod)
+            # bracket the stage (first substep .. last substep) so a KILLED partial genotype does not
+            # read as done just because a previous run's haplotype-mod output happens to exist.
+            return (self._nonempty(p.geno_candidate_snps) and self._nonempty(p.geno_molecule_mod_calls)
+                    and self._nonempty(p.geno_snp_mod) and self._nonempty(p.geno_hap_mod))
         if stage == "polya":
             if not as_bool(cfg.get("polya", {}).get("enable", True), True):
                 return True
-            return self._nonempty(p.polya_read_tails) and self._nonempty(p.polya_taillength_diffs)
+            return (self._nonempty(p.polya_read_tails) and self._nonempty(p.polya_fragmentform)
+                    and self._nonempty(p.polya_taillength_diffs) and self._nonempty(p.polya_taillength_mod))
         if stage == "hierarchical_stoich":
             if not as_bool(cfg.get("hierarchical_stoich", {}).get("enable", False), False):
                 return True
@@ -782,11 +795,24 @@ class ModulatorPipeline:
         if stage == "report":
             if not as_bool(cfg.get("report", {}).get("enable", True), True):
                 return True
-            return self._nonempty(p.report_html)
+            # the report stage emits BOTH the HTML report and the gene browser; checking only the
+            # report let a partial run (browser missing) resume-skip and never build the browser.
+            return self._nonempty(p.report_html) and self._nonempty(p.gene_browser_html)
         return False
 
     def _stage_done(self, stage: str) -> bool:
-        return self._stage_marker(stage).exists() or self._outputs_present(stage)
+        marker = self._stage_marker(stage)
+        if marker.exists():
+            # A checkpoint only counts if it was written under the SAME resolved config. A sig-less
+            # (legacy) or mismatched marker is treated as NOT done, so changed parameters force a re-run.
+            try:
+                parts = marker.read_text().strip().split("\t")
+                stored_sig = parts[2] if len(parts) >= 3 else None
+            except OSError:
+                stored_sig = None
+            return stored_sig == self._config_sig()
+        # No marker at all: best-effort resume of a results folder produced before markers existed.
+        return self._outputs_present(stage)
 
     def _stage_disabled(self, stage: str) -> bool:
         """True when the stage is toggled off (or a no-op, like between_conditions with no
