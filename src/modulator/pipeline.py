@@ -2111,9 +2111,12 @@ class ModulatorPipeline:
             ):
                 if self._nonempty(path):
                     gb += [flag, str(path)]
+            # Pass EVERY contrast's site-level mod_diffs table (not just the first): the browser
+            # concatenates them and groups by the 'contrast' column. glob(*_mod_diffs.tsv) excludes
+            # the *_mod_diffs_by_transcript.tsv companions by construction.
             cm = sorted(self.paths.between_conditions.glob(f"{self.prefix}_*_mod_diffs.tsv")) \
                 if self.paths.between_conditions.is_dir() else []
             if cm:
-                gb += ["--condition-mod-diffs", str(cm[0])]
+                gb += ["--condition-mod-diffs", *[str(p) for p in cm]]
             if self._nonempty(self.paths.out_gtf):
                 self.run_python_script("build_gene_browser.py", gb, label="build_gene_browser")

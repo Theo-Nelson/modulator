@@ -27,7 +27,9 @@ def parse_args():
     ap.add_argument("--classification-summary", default="", help="*_classification_summary.tsv")
     ap.add_argument("--apa-motifs", default="", help="*_apa_motifs.tsv")
     ap.add_argument("--polya-fragmentform", default="", help="*_polya_fragmentform.tsv")
-    ap.add_argument("--condition-mod-diffs", default="", help="between_conditions *_mod_diffs.tsv")
+    ap.add_argument("--condition-mod-diffs", nargs="*", default=[],
+                    help="between_conditions *_mod_diffs.tsv (one per contrast; all are concatenated "
+                         "and the browser groups rows by the 'contrast' column)")
     ap.add_argument("--hierarchical-stoich", default="", help="*_hierarchical_stoich.tsv")
     ap.add_argument("--out-html", required=True)
     ap.add_argument("--max-genes", type=int, default=4000, help="Cap genes embedded (largest by read support)")
@@ -37,6 +39,13 @@ def parse_args():
 
 
 def _read(path):
+    # Accept a single path OR a list of paths (--condition-mod-diffs is one table per contrast):
+    # concat them so the browser sees every contrast, not just the first. The 'contrast' column
+    # already carried in each table keeps the rows distinguishable downstream.
+    if isinstance(path, (list, tuple)):
+        frames = [_read(p) for p in path]
+        frames = [f for f in frames if not f.empty]
+        return pd.concat(frames, ignore_index=True) if frames else pd.DataFrame()
     if not path or not os.path.exists(path) or os.path.getsize(path) == 0:
         return pd.DataFrame()
     df = pd.read_csv(path, sep="\t", low_memory=False)

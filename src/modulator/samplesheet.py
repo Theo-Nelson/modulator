@@ -156,11 +156,26 @@ def write_metadata_tsv(rows: list[dict], out_path: str | Path) -> Path:
     return out_path
 
 
+def _safe_contrast_name(name: str) -> str:
+    """Make a contrast name safe to embed in a filename.
+
+    Contrast names become path components (``{prefix}_{name}_mod_diffs.tsv`` etc.), so a name with a
+    ``/`` would silently redirect the output into a subdirectory (or fail), and stray whitespace makes
+    brittle paths. Keep alnum / ``-`` / ``.``; collapse every other run to a single ``_``; trim
+    leading/trailing ``._``. Collisions AFTER sanitizing are caught by the caller.
+    """
+    import re
+    s = re.sub(r"[^A-Za-z0-9._-]+", "_", str(name).strip())
+    s = s.strip("._")
+    return s or "contrast"
+
+
 def resolve_contrasts(config_contrasts, rows: list[dict], column: str = "condition") -> list[dict]:
     """Normalise the configured contrasts, or derive every pairwise one from ``column``.
 
     Each contrast -> {name, column, test, reference}. Validated against the samplesheet so a typo
-    fails loudly here rather than silently producing an empty comparison.
+    fails loudly here rather than silently producing an empty comparison. Names are sanitized to be
+    filesystem-safe (they become output-filename components) and checked for post-sanitize collisions.
     """
     levels: list[str] = []
     for r in rows:
@@ -182,10 +197,26 @@ def resolve_contrasts(config_contrasts, rows: list[dict], column: str = "conditi
                     raise SamplesheetError(
                         f"contrast {c.get('name', '')!r}: {side}={val!r} not found in samplesheet "
                         f"column {col!r} (levels: {', '.join(sorted(v for v in have if v))})")
-            out.append({"name": c.get("name") or f"{test}_vs_{ref}", "column": col,
-                        "test": test, "reference": ref})
+            out.append({"name": _safe_contrast_name(c.get("name") or f"{test}_vs_{ref}"),
+                        "column": col, "test": test, "reference": ref})
+        _reject_name_collisions(out)
         return out
     for i, ref in enumerate(levels):          # no explicit contrasts -> all pairwise
         for test in levels[i + 1:]:
-            out.append({"name": f"{test}_vs_{ref}", "column": column, "test": test, "reference": ref})
+            out.append({"name": _safe_contrast_name(f"{test}_vs_{ref}"),
+                        "column": column, "test": test, "reference": ref})
+    _reject_name_collisions(out)
     return out
+
+
+def _reject_name_collisions(contrasts: list[dict]) -> None:
+    """Two contrasts whose sanitized names collide would overwrite each other's output tables."""
+    seen: dict[str, dict] = {}
+    for c in contrasts:
+        n = c["name"]
+        if n in seen:
+            raise SamplesheetError(
+                f"contrast name {n!r} is not unique after sanitizing (also used by "
+                f"{seen[n]['test']}_vs_{seen[n]['reference']} vs {c['test']}_vs_{c['reference']}); "
+                f"give each contrast a distinct 'name'")
+        seen[n] = c
