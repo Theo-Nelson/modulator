@@ -26,6 +26,11 @@ PYTHONPATH=src "$PY" "$HERE/test_scaling_features.py" || rc=1
 echo "### 3/4 full pipeline on the synthetic dataset"
 bash "$HERE/run_pipeline.sh" || rc=1
 
+# stream-vs-sort aggregation parity: the pipeline step above just wrote results/modkit_zn +
+# results/assemble/syn3exon.gtf, so this runs for real (not a vacuous skip) on the synthetic fixture.
+echo "### 3b/4 aggregation engine parity (stream vs sort)"
+"$PY" "$HERE/test_aggregate_engine_parity.py" || rc=1
+
 echo "### 4/4 validate outputs against ground truth"
 "$PY" "$HERE/validate_outputs.py" --results results --prefix syn3exon || rc=1
 

@@ -21,10 +21,18 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[2]
 SCRIPTS = ROOT / "workflow" / "scripts"
-# demo run sits next to the repo checkout
-DEMO = ROOT.parent / "demo14genes_run"
-MODKIT = DEMO / "results" / "modkit_zn"
-GTF = DEMO / "results" / "assemble" / "demo14.gtf"
+# Default to the SYNTHETIC fixture that run_pipeline.sh produces (modkit_zn + GTF are written before
+# the genotype stage, so they exist whenever the suite has run the pipeline). Fall back to an external
+# demo14 run if the synthetic fixture is absent. This is what makes the parity check non-vacuous inside
+# run_tests.sh: the pipeline step immediately before it guarantees the input exists.
+SYN_MODKIT = ROOT / "results" / "modkit_zn"
+SYN_GTF = ROOT / "results" / "assemble" / "syn3exon.gtf"
+if SYN_MODKIT.is_dir() and SYN_GTF.exists():
+    MODKIT, GTF = SYN_MODKIT, SYN_GTF
+else:
+    DEMO = ROOT.parent / "demo14genes_run"          # external demo run next to the checkout
+    MODKIT = DEMO / "results" / "modkit_zn"
+    GTF = DEMO / "results" / "assemble" / "demo14.gtf"
 
 
 def _rows(long_tsv):
@@ -52,7 +60,10 @@ def run_engine(script, out_prefix, filter_on):
 
 def main():
     if not (MODKIT.is_dir() and GTF.exists()):
-        print(f"  SKIP: demo ZN bedMethyl input not found at {MODKIT} — run the demo first.")
+        # Non-vacuous inside run_tests.sh (run_pipeline.sh writes the synthetic modkit_zn + GTF first);
+        # this branch only fires when the test is run STANDALONE before any pipeline run.
+        print(f"  SKIP: no ZN bedMethyl fixture at {MODKIT} — run the synthetic pipeline "
+              f"(resources/synthetic_3exon/run_pipeline.sh) or the demo first.")
         sys.exit(0)
 
     checks = []
