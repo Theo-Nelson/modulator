@@ -915,7 +915,13 @@ def main():
     ap.add_argument("--apa-window", type=int, default=20)
     ap.add_argument("--tes-window", type=int, default=None)
     ap.add_argument("--min-reads", type=int, default=10)
-    ap.add_argument("--min-frac", type=float, default=0.05)
+    # min-frac is a GENOME-WIDE fraction (count / total reads across the WHOLE assembly), so in any
+    # multi-gene run no single fragmentform reaches even 1% and a nonzero default silently drops
+    # everything. Default 0.0 -> the read-count floor (--min-reads) is the real support filter; this
+    # matches the config default and the documented "Typical use" example.
+    ap.add_argument("--min-frac", type=float, default=0.0,
+                    help="min fraction of ALL assembly reads a fragmentform must hold (genome-wide; "
+                         "0 disables -- use --min-reads for the support floor)")
     ap.add_argument("--min-introns", type=int, default=0)
 
     # Poly(A) heuristics

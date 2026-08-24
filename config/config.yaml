@@ -115,7 +115,6 @@ modkit:
     suppress_progress: true
   zn:
     partition_tag: "ZN"
-    per_mod_bed: true
 
 toggles:
   enable_zn_pileup: true
@@ -155,8 +154,11 @@ aggregate_outputs:
   write_long: true
   write_pivots: auto        # auto | on | off (see aggregation.zn.write_pivots)
   pivot_max_groups: 2000
-  write_raw_per_gene_tables: true
-  write_filtered_per_gene_tables: true
+  # NOTE: the code reads these WITHOUT the old `_tables` suffix (aggregate_outputs.write_raw_per_gene).
+  # The previously-shipped `write_raw_per_gene_tables` keys were silently ignored -- renamed so this
+  # legacy fallback actually takes effect.
+  write_raw_per_gene: false
+  write_filtered_per_gene: true
 
 aggregation_tmpdir: null   # optional override; can set on CLI
 aggregation_chunk_lines: null
