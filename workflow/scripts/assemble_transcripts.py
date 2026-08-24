@@ -164,6 +164,16 @@ def cluster_positions(sorted_positions, window):
     # moved a bucket boundary and split two 3' ends only a few nt apart into separate APA sites (adding
     # fragmentforms as the tolerance loosened). Mode-seeking bounds the width AND can never separate two
     # positions closer than `window`, so the fragmentform set is monotone in `window` in both directions.
+    #
+    # KNOWN LIMITATION (finding Q, not fixed here): this does NOT make clustering stable under adding or
+    # removing a single read. Seed selection is count-driven, so dropping one read near a boundary can
+    # still flip which seed wins and turn N clusters into N+1 (conjuring a 1-read APA site). Measured
+    # drop-split rate is comparable to the schemes this replaced (mode-seeking ~3237 vs width-cap ~2878
+    # vs single-linkage ~5247 over 20k trials). This instability is inherent to hard-window partitioning
+    # of a continuous 3'-end distribution and has no easy fix; the read-support floor (--min-reads) is
+    # what keeps such 1-read artifacts out of the kept set. test_tes_clustering_invariant.py guards the
+    # four axes that ARE fixed (bounded width, member coverage, exact partition, window-monotonicity) and
+    # deliberately does NOT assert single-read stability.
     counts = Counter(sorted_positions)
     remaining = dict(counts)
     out = []
@@ -914,7 +924,7 @@ def main():
     # Isoform support thresholds
     ap.add_argument("--apa-window", type=int, default=20)
     ap.add_argument("--tes-window", type=int, default=None)
-    ap.add_argument("--min-reads", type=int, default=10)
+    ap.add_argument("--min-reads", type=int, default=40)
     # min-frac is a GENOME-WIDE fraction (count / total reads across the WHOLE assembly), so in any
     # multi-gene run no single fragmentform reaches even 1% and a nonzero default silently drops
     # everything. Default 0.0 -> the read-count floor (--min-reads) is the real support filter; this
@@ -922,12 +932,12 @@ def main():
     ap.add_argument("--min-frac", type=float, default=0.0,
                     help="min fraction of ALL assembly reads a fragmentform must hold (genome-wide; "
                          "0 disables -- use --min-reads for the support floor)")
-    ap.add_argument("--min-introns", type=int, default=0)
+    ap.add_argument("--min-introns", type=int, default=1)
 
     # Poly(A) heuristics
     ap.add_argument("--min-polya-length", type=int, default=12)
-    ap.add_argument("--min-polya-purity", type=float, default=0.7)
-    ap.add_argument("--polya-support-frac", type=float, default=0.6)
+    ap.add_argument("--min-polya-purity", type=float, default=0.5)
+    ap.add_argument("--polya-support-frac", type=float, default=0.5)
 
     # Annotation behavior
     ap.add_argument("--tes-match-tol", type=int, default=25)

@@ -15,6 +15,7 @@ dependencies = [
   "pysam",
   "scipy",
   "matplotlib",
+  "pyroaring",
 ]
 
 # NOTE: the stage implementations live in workflow/scripts/*.py and are executed as subprocesses by the
