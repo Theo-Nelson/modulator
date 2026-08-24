@@ -49,6 +49,36 @@ def main():
     check("all fragmentforms classified EXACT vs reference",
           (cs["classification"] == "EXACT").all(),
           f"classes={sorted(cs['classification'].unique())}")
+    # Finding L invariant: no two fragmentforms of a metagene may share an intron chain AND have
+    # TESs within apa_window (default 20). Two such partitions are the SAME isoform, and test_diffs
+    # would compare it against itself. Parse it straight from the assembled GTF (the source of the
+    # zn partitions) so the check is independent of the summary tables.
+    import re as _re
+    from collections import defaultdict as _dd
+    _apa_window = 20
+    _by = _dd(list)  # (metagene_index, intron_chain) -> [tes,...]
+    with open(R / f"assemble/{P}.gtf") as _fh:
+        for _ln in _fh:
+            if _ln.startswith("#"):
+                continue
+            _f = _ln.rstrip("\n").split("\t")
+            if len(_f) < 9 or _f[2] != "transcript":
+                continue
+            _g = lambda k: (_re.search(rf'{k} "([^"]*)"', _f[8]) or [None, None])[1]
+            _tes, _chain, _mg = _g("tes"), _g("intron_chain"), _g("metagene_index")
+            if _tes is None or _chain is None:
+                continue
+            _by[(_mg, _chain)].append(int(_tes))
+    _lviol = 0
+    for _tesses in _by.values():
+        _u = sorted(set(_tesses))
+        for _i in range(len(_u)):
+            for _j in range(_i + 1, len(_u)):
+                if abs(_u[_i] - _u[_j]) <= _apa_window:
+                    _lviol += 1
+    check("no same-chain fragmentforms within apa_window in a metagene (finding L: isoform-vs-self)",
+          _lviol == 0, f"{_lviol} within-window same-chain partition pairs")
+
     check("GENE_A has exactly 2 fragmentforms (boundary-TES duplication bug fixed)",
           (genes == "GENE_A").sum() == 2, f"observed {(genes=='GENE_A').sum()}")
 
