@@ -178,10 +178,20 @@ cleaned tagged BAMs. Keys under `modkit.common` map directly to modkit flags
 |-----|------|--------:|---------|
 | `log_file_template` | str | `results/{which}/{sample}.log` | `--log-filepath` |
 | `region` | str/null | `null` | `--region` |
-| `max_depth` | int | `1000` | `--max-depth` |
+| `max_depth` | int | `1000` | `--max-depth` — see note below |
 | `include_bed` | str/null | `null` | `--include-bed` |
 | `include_unmapped` | bool | `false` | `--include-unmapped` |
 | `edge_filter` / `invert_edge_filter` | str/bool | `null`/`false` | `--edge-filter` / `--invert-edge-filter` |
+
+> **`max_depth` and what it does to the denominator.** At a site deeper than `max_depth`, modkit
+> *subsamples* to that many reads. The modified **fraction** stays unbiased (subsampling, not
+> head-truncation — measured mean shift +0.004 pp, median |shift| 0.02 pp on a 6,000× locus), but
+> `Nvalid_cov` — the binomial **denominator** every differential test uses, and the depth that
+> `min_cov` / `test_diffs.min_cov` filter on — is the **capped** number, not the true depth. On deep
+> direct-RNA (real loci exceed 5,000×) the default `1000` discards ~2/3 of the evidence at the deepest
+> sites, so those sites are tested at n≈1,500 regardless of true coverage. This is a **precision**
+> setting, not an accuracy one. Raise it (e.g. `--set modkit.common.max_depth=10000`) to keep the full
+> depth in the denominator; higher values cost modkit time and memory.
 | `threads` | int | top-level `threads` | `-t/--threads` |
 | `interval_size` | int | `100000` | `--interval-size` |
 | `queue_size` | int | `1000` | `--queue-size` |
@@ -306,6 +316,17 @@ association layers. Enable with `--set genotype.enable=true`.
 | `max_haplotype_snps` | int | `4` | Maximum SNPs per local haplotype block before chunking. |
 | `test` | str | `"auto"` | `auto`/`fisher`/`chi2`. |
 | `pseudocount` | float | `0.5` | Pseudocount for non-2×2 chi-square. |
+
+> **Base counting does not apply BAQ (by design).** Candidate-SNP allele counts come from pysam
+> `count_coverage` with a base-quality floor (`min_baseq`), which does **not** run samtools' Base
+> Alignment Quality realignment. `samtools mpileup` applies BAQ by *default*, which downgrades base
+> qualities near indels and so reports fewer reads there — comparing modulator's counts against a
+> default-mpileup callset shows modulator higher at indel-adjacent sites (measured: 123/535 chr21
+> sites, always higher, up to +38 alt reads), and **exact** agreement once mpileup is run with `-B`
+> (BAQ off). This is deliberate: BAQ is designed for DNA and is often actively harmful on spliced RNA
+> alignments and in the homopolymers where ONT direct-RNA basecalls are least reliable — precisely the
+> indel-adjacent sites in question. It is a scientific choice, recorded here so a samtools-based
+> comparison is not mistaken for inflation.
 
 The BAM-heavy genotype steps shard the work unit per **(BAM × chromosome)** for
 parallelism beyond the sample count, and producer tables are written in a

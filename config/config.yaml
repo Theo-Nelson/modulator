@@ -84,6 +84,13 @@ modkit:
   common:
     log_file_template: "results/{which}/{sample}.log"
     region: null
+    # modkit pileup --max-depth: at a site deeper than this, modkit SUBSAMPLES to this many reads.
+    # The modified-FRACTION stays unbiased (subsampling, not head-truncation: measured mean shift
+    # +0.004 pp, median |shift| 0.02 pp on a 6000x locus), but Nvalid_cov -- the binomial denominator
+    # every downstream test uses, and the depth `min_cov`/`test_diffs.min_cov` filter on -- is CAPPED,
+    # not the true depth. On deep direct-RNA (real loci reach >5000x) the default 1000 discards ~2/3 of
+    # the evidence at the deepest sites, costing precision (a 6000x site is tested at n~1500). Raise it
+    # (e.g. 10000+) if you need the full depth in the denominator; higher costs modkit time/memory.
     max_depth: 1000
     include_bed: null
     include_unmapped: false

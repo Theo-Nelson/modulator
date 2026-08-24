@@ -201,6 +201,12 @@ def scan_bam_counts(
             for chrom, intervals in merged_intervals.items():
                 for start1, end1 in intervals:
                     ref_seq = fasta.fetch(chrom, start1 - 1, end1).upper()
+                    # NB: count_coverage filters on raw base quality only -- it does NOT apply BAQ
+                    # (Base Alignment Quality realignment). That is deliberate: BAQ is a DNA heuristic
+                    # that downgrades qualities near indels/homopolymers and is often harmful on spliced
+                    # RNA alignments -- exactly where ONT dRNA basecalls already need care. Consequence:
+                    # counts run higher than `samtools mpileup` DEFAULTS at indel-adjacent sites, and
+                    # match mpileup EXACTLY with `-B` (BAQ off). Documented in ADVANCED_USAGE (finding N).
                     counts = fh.count_coverage(
                         chrom,
                         start1 - 1,
