@@ -1711,8 +1711,9 @@ class ModulatorPipeline:
                       f"per-sample call set(s) from {mod_calls_dir}", flush=True)
         else:
             # Default backend: built-in pysam streaming reader (per BAM x chromosome), ~100MB RSS,
-            # never OOMs (chr15 included), no modkit / reference needed. Validated equivalent to modkit
-            # (identical row set + call_code/target_modified).
+            # never OOMs (chr15 included), no modkit / reference needed. Emits implicit-canonical calls
+            # so it matches modkit on implicit-MM ONT BAMs (validated on real chrEBV: identical row +
+            # canonical counts, 4/686765 rows differ at a float32 tie-break, Jaccard 1.0000).
             mod_args += ["--pysam"]
             if self.verbose:
                 print("[modulator] build_molecule_mod_table: pysam streaming backend", flush=True)

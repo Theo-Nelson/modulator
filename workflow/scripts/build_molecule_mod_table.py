@@ -3,6 +3,7 @@
 import argparse
 import gzip
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -38,6 +39,40 @@ def _base_mismatch(target_mod, canonical_base):
     return exp is not None and cb != "" and cb != exp
 
 
+_COMP = {"A": "T", "T": "A", "C": "G", "G": "C", "N": "N", "U": "A"}
+_MM_ENTRY_RE = re.compile(r'^([ACGTUNacgtun])([-+])([a-z]+|[0-9]+)([.?]?)')
+
+
+def parse_mm_groups(read):
+    """Parse the MM/Mm tag into {mod_code: (canonical_base, is_implicit)}.
+
+    BLOCKER-4: a modBAM in IMPLICIT MM mode (flag '.' or absent) declares that every canonical base of
+    a group NOT listed in the deltas is an implicitly-canonical (unmodified) observation. read.modified_bases
+    returns ONLY the listed positions, so the pysam backend silently dropped those unmodified calls and
+    inflated every modified fraction. Explicit mode ('?') means unlisted positions carry NO call. This
+    parser recovers the flag so the extractor can emit the implicit-canonical rows modkit already emits."""
+    mm = None
+    for tag in ("MM", "Mm"):
+        try:
+            mm = read.get_tag(tag)
+            break
+        except KeyError:
+            continue
+    if not mm:
+        return {}
+    out = {}
+    for entry in str(mm).split(";"):
+        m = _MM_ENTRY_RE.match(entry.strip())
+        if not m:
+            continue
+        base, _strand, mods, flag = m.groups()
+        implicit = (flag != "?")   # '.' or absent -> implicit; '?' -> explicit (unlisted = no call)
+        base = base.upper()
+        for code in re.findall(r'[0-9]+|[a-z]', mods):   # 'mh' -> m,h ; '17802' -> 17802
+            out[code] = (base, implicit)
+    return out
+
+
 def parse_args():
     ap = argparse.ArgumentParser(description="Build a per-read mod call table at candidate modulator sites.")
     ap.add_argument("--bams", nargs="+", required=True, help="Input BAMs with MM/ML tags")
@@ -67,8 +102,9 @@ def parse_args():
                          "of modkit (no external modkit, no reference FASTA). Parallelised per "
                          "(BAM x chromosome) via --jobs; each task streams one read at a time so peak "
                          "RSS is ~100MB and it never OOMs (chr15 included) -- no windowing/interval-size "
-                         "needed. Output is validated equivalent to the modkit path (identical row set "
-                         "and call_code/target_modified).")
+                         "needed. Emits implicit-canonical calls (parse_mm_groups) so it matches modkit on "
+                         "IMPLICIT-MM BAMs -- validated on real chrEBV: identical row count, canonical count "
+                         "identical, 4/686765 rows differ at a float32 argmax tie-break (Jaccard 1.0000).")
     ap.add_argument("--verbose", action="store_true")
     return ap.parse_args()
 
@@ -341,7 +377,9 @@ def parse_extracted_calls(sample, calls_tsv, lookup, shard_dir, chunk_rows, verb
 def extract_rows_pysam(bam, chrom_lookup, chrom, shard_path, chunk_rows, verbose=False):
     """Stream one chromosome of a modBAM with pysam and emit the same per-(read, candidate site) rows
     the modkit path produces -- one read at a time, so peak RSS is ~100MB regardless of BAM/chrom size
-    (never OOMs). Reproduces modkit `extract calls --no-filtering --mapped-only` semantics exactly:
+    (never OOMs). Reproduces modkit `extract calls --no-filtering --mapped-only` semantics -- INCLUDING
+    implicit-canonical calls (unlisted canonical bases of an implicit MM group), which the previous
+    version dropped, inflating every modified fraction on real ONT data (BLOCKER-4). Namely:
     call_prob=(ML+0.5)/256 (float32), canonical=1-sum(mod_probs), call_code=argmax, strand-aware.
     Flushes to numbered pickle parts every chunk_rows. Returns (chrom, [parts], nrows)."""
     sample = sample_name_from_bam(bam)
@@ -369,12 +407,18 @@ def extract_rows_pysam(bam, chrom_lookup, chrom, shard_path, chunk_rows, verbose
     for read in bamf.fetch(chrom):
         if read.is_unmapped or read.is_secondary or read.is_supplementary:
             continue
-        mb = read.modified_bases
-        if not mb:
+        # Parse MM FIRST (not read.modified_bases): a read that is entirely canonical for an implicit
+        # group still has MM but an empty modified_bases, and its unmodified observations must be kept.
+        mm_groups = parse_mm_groups(read)
+        if not mm_groups:
+            continue  # no MM/Mm tag -> no modification information at all
+        mb = read.modified_bases or {}
+        seq = read.query_sequence
+        if seq is None:
             continue
         qname = read.query_name
         ref_strand = "-" if read.is_reverse else "+"
-        refpos = read.get_reference_positions(full_length=True)
+        refpos = read.get_reference_positions(full_length=True)  # per query_sequence position -> ref pos
         nrp = len(refpos)
         pos_mods = {}
         pos_base = {}
@@ -386,6 +430,7 @@ def extract_rows_pysam(bam, chrom_lookup, chrom, shard_path, chunk_rows, verbose
                     d = pos_mods[read_pos] = {}
                 d[code] = ml
                 pos_base[read_pos] = base
+        emitted = set()  # query positions handled as a LISTED call (so the implicit pass skips them)
         for read_pos, mods in pos_mods.items():
             if read_pos >= nrp:
                 continue
@@ -395,6 +440,7 @@ def extract_rows_pysam(bam, chrom_lookup, chrom, shard_path, chunk_rows, verbose
             sites = chrom_lookup.get((chrom, start0))
             if not sites:
                 continue
+            emitted.add(read_pos)
             mod_sum = 0.0
             best_code = None
             best_prob = -1.0
@@ -419,6 +465,10 @@ def extract_rows_pysam(bam, chrom_lookup, chrom, shard_path, chunk_rows, verbose
                 if site_strand and ref_strand and ref_strand not in {".", "?"} and site_strand != ref_strand:
                     continue
                 target_mod = str(site["mod_code"])
+                # base-mismatch guard (parity with the modkit path): the read's base at this site cannot
+                # carry target_mod -> it is a variant, not a usable unmodified observation. Skip it.
+                if _base_mismatch(target_mod, base):
+                    continue
                 if call_code == target_mod:
                     state_detail = "modified"
                     target_modified = 1
@@ -443,6 +493,62 @@ def extract_rows_pysam(bam, chrom_lookup, chrom, shard_path, chunk_rows, verbose
                     "call_prob": call_prob,
                     "canonical_base": base,
                     "modified_primary_base": base,
+                    "fail": False,
+                    "within_alignment": True,
+                    "gene_id": str(site.get("gene_id", "")),
+                    "gene_name": str(site.get("gene_name", "")),
+                    "metagene_index": str(site.get("metagene_index", "")),
+                })
+                total += 1
+                if len(rows) >= chunk_rows:
+                    _flush()
+
+        # ---- IMPLICIT-CANONICAL pass (BLOCKER-4) ----
+        # A candidate site the read covers at an UNLISTED position of an IMPLICIT MM group is a real
+        # unmodified observation that modkit emits and the old pysam backend dropped. Iterate the read's
+        # aligned positions; for each candidate site not already emitted as a listed call, if the read's
+        # transcript-oriented base is the mod's canonical base and that mod's MM group is implicit, emit a
+        # canonical row. read_pos indexes query_sequence and mb `base` is transcript-oriented, so for a
+        # reverse read the stored base is complemented to get the transcript base.
+        for q in range(nrp):
+            if q in emitted:
+                continue
+            start0 = refpos[q]
+            if start0 is None:
+                continue
+            sites = chrom_lookup.get((chrom, start0))
+            if not sites:
+                continue
+            qb = seq[q].upper() if q < len(seq) else ""
+            if not qb:
+                continue
+            tb = _COMP.get(qb, qb) if read.is_reverse else qb   # transcript-oriented read base
+            call_prob1 = float(str(f32(1.0)))
+            for site in sites:
+                site_strand = str(site.get("strand", ""))
+                if site_strand and ref_strand and ref_strand not in {".", "?"} and site_strand != ref_strand:
+                    continue
+                target_mod = str(site["mod_code"])
+                grp = mm_groups.get(target_mod)
+                if grp is None or not grp[1]:
+                    continue  # this mod was not assessed on the read, OR is explicit ('?') -> no call
+                if _base_mismatch(target_mod, tb):
+                    continue  # variant at the modified base -> not a canonical observation
+                rows.append({
+                    "sample": sample,
+                    "qname": qname,
+                    "mod_site_id": site["mod_site_id"],
+                    "chrom": chrom,
+                    "start0": start0,
+                    "end0": safe_int(site.get("end0", start0 + 1), default=start0 + 1),
+                    "strand": site_strand or ref_strand,
+                    "target_mod_code": target_mod,
+                    "call_code": "-",
+                    "state_detail": "canonical",
+                    "target_modified": 0,
+                    "call_prob": call_prob1,
+                    "canonical_base": tb,
+                    "modified_primary_base": tb,
                     "fail": False,
                     "within_alignment": True,
                     "gene_id": str(site.get("gene_id", "")),

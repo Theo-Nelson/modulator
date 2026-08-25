@@ -1,6 +1,13 @@
 #!/usr/bin/env python3
 """Streaming pysam replacement for `modkit extract calls`.
 
+WARNING (BLOCKER-4): this standalone utility is NOT used by the pipeline (build_molecule_mod_table has
+its own, fixed, pysam backend). It still has the implicit-MM bug: read.modified_bases returns only the
+positions LISTED in the MM tag, so for an implicit ('.') MM group every unlisted canonical base -- a
+real UNMODIFIED observation that modkit emits -- is dropped, inflating every modified fraction on real
+ONT data. Do not use it on implicit-MM BAMs without porting the parse_mm_groups / implicit-canonical
+logic from build_molecule_mod_table.extract_rows_pysam.
+
 modkit's `extract` is either memory-bounded-but-serial-slow (`--ignore-index`) or
 fast-but-OOM (parallel index scan accumulates unboundedly, esp. on acrocentric/rDNA
 chromosomes). This reproduces the per-(read, candidate-site) call table that
