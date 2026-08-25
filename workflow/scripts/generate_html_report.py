@@ -2474,7 +2474,9 @@ def main():
                                                       getattr(args, "molecule_snps", ""), args.max_snp_figs)
     sec_snp_mod = section(
         "cis SNP to Modification Stoichiometry Association",
-        (df_to_html(snp_mod_df_view, max_rows=args.top_genes) if not snp_mod_df_view.empty else "<p class='muted'>No cis SNP to modification-stoichiometry associations available.</p>") + snp_galleries.get("snp_mod", "") + snp_mod_ff_html,
+        (df_to_html(snp_mod_df_view, max_rows=args.top_genes) if not snp_mod_df_view.empty else "<p class='muted'>No cis SNP to modification-stoichiometry associations available.</p>")
+        + (("<h4 class='subsection-label'>Per-example allele-split stoichiometry figures</h4>" + snp_galleries.get("snp_mod", "")) if snp_galleries.get("snp_mod", "") else "")
+        + (("<h4 class='subsection-label'>Per-fragmentform breakdown at each hit</h4>" + snp_mod_ff_html) if snp_mod_ff_html else ""),
         intro="Associations between segregating SNP alleles and target modification states on the same molecules.",
         definitions=definitions_html(column_definitions(list(snp_mod_df_view.columns)), summary="Column definitions") if not snp_mod_df_view.empty else "",
     )
@@ -2499,6 +2501,14 @@ def main():
                            + " · ".join(f"<b>{int(dc.get(k,0)):,}</b> {k.lower().replace('_',' ')}"
                                         for k in ("CONCORDANT", "MUTUALLY_EXCLUSIVE", "INDEPENDENT"))
                            + "</p>")
+            # mod-code legend: the mod_code_a / mod_code_b columns are raw codes (a, 17802, ...); spell
+            # them out so the table + 2x2 panels are readable without memorizing the code set.
+            _mm_codes = sorted({str(c) for col in ("mod_code_a", "mod_code_b") if col in mm_view.columns
+                                for c in mm_view[col].dropna().astype(str)})
+            if _mm_codes:
+                header += ("<p class='muted' style='font-size:12.5px'>modification codes: "
+                           + " · ".join(f"<code>{html.escape(c)}</code> = {html.escape(mod_display(c))}"
+                                        for c in _mm_codes) + "</p>")
             conc_img = mod_mod_concordance_png(mm_view, top_n=args.max_snp_figs)
             fig_html = clickable_image_html(
                 conc_img, "Co-localized modification 2x2 concordance panels",
@@ -2644,11 +2654,16 @@ def main():
     .toc {{ position:fixed; top:0; left:0; width:236px; height:100vh; overflow-y:auto;
             background:var(--panel); border-right:1px solid var(--line); padding:18px 12px 40px;
             box-sizing:border-box; z-index:60; }}
-    .toc .toc-title {{ font-weight:700; color:var(--muted); margin:0 8px 10px; font-size:11px;
-            text-transform:uppercase; letter-spacing:.05em; }}
-    .toc a {{ display:block; padding:5px 8px; color:var(--ink-soft); text-decoration:none;
-            border-radius:6px; margin-bottom:1px; line-height:1.25; font-size:12.5px; }}
+    .toc .toc-title {{ font-weight:700; color:var(--muted); margin:0 8px 12px; font-size:11px;
+            text-transform:uppercase; letter-spacing:.06em;
+            padding-bottom:10px; border-bottom:1px solid var(--line); }}
+    .toc a {{ display:block; padding:6px 10px; color:var(--ink-soft); text-decoration:none;
+            border-radius:6px; margin-bottom:2px; line-height:1.3; font-size:12.5px;
+            border-left:2px solid transparent; transition:background .12s, color .12s, border-color .12s; }}
     .toc a:hover {{ background:var(--accent-soft); color:var(--accent-ink); }}
+    /* active section (scroll-spy): the entry for the section currently in view */
+    .toc a.active {{ background:var(--accent-soft); color:var(--accent-ink); font-weight:640;
+            border-left-color:#d4a017; }}
     @media (min-width:1001px) {{ body {{ padding-left:236px; }} }}
     @media (max-width:1000px) {{
       .toc {{ position:static; width:auto; height:auto; border-right:none;
@@ -2741,7 +2756,10 @@ def main():
       background:var(--panel); border:1px solid var(--line); border-radius:12px;
       padding:20px 22px; margin:0 0 18px; box-shadow:var(--shadow);
     }}
-    .section-intro {{ color:var(--muted); font-size:14px; max-width:74ch; margin:10px 0 16px; }}
+    .section-intro {{ color:var(--muted); font-size:14px; max-width:74ch; margin:10px 0 16px; line-height:1.6; }}
+    /* readable measure + comfortable leading for body prose (a full-width section is for tables/figures,
+       not paragraphs) */
+    .section-body p, section > p {{ max-width:78ch; line-height:1.62; margin:10px 0; }}
     .callout-warn {{
       border:1px solid #d8b24a; border-left:5px solid #d4a017; background:#fdf6e3;
       color:#5c4a12; border-radius:9px; padding:12px 15px; margin:0 0 16px; font-size:13.5px;
@@ -2793,6 +2811,12 @@ def main():
       display:grid; grid-template-columns:repeat(auto-fit,minmax(290px,1fr)); gap:14px; margin:12px 0;
     }}
     .gallery figure {{ margin:0; }}
+    /* cis-SNP figures: smaller thumbnails, more per row (click ↗ opens full-size in a new tab) */
+    .gallery.compact {{ grid-template-columns:repeat(auto-fit,minmax(220px,1fr)); gap:12px; }}
+    .gallery.compact figcaption {{ font-size:11px; }}
+    /* a labelled subsection heading inside a section body (groups the cis-SNP figure kinds) */
+    h4.subsection-label {{ font-size:13px; font-weight:640; color:var(--accent-ink);
+      margin:20px 0 8px; padding-bottom:5px; border-bottom:1px dashed var(--line); letter-spacing:.01em; }}
     /* ---- collapsible definitions ---- */
     details.definitions {{
       margin:14px 0; border:1px solid var(--line); border-radius:10px; background:var(--raised); overflow:hidden;
@@ -2830,6 +2854,28 @@ def main():
        full-size image file (written next to this report by externalize_data_uris) in a NEW TAB.
        No in-page lightbox/JS interception -- data: URIs cannot be opened as a top-level tab in
        modern browsers, so the previous JS overlay is intentionally gone. -->
+  <script>
+  /* sidebar scroll-spy: highlight the table-of-contents entry for the section currently in view */
+  (function(){{
+    var links = Array.prototype.slice.call(document.querySelectorAll('.toc a[href^="#"]'));
+    if(!links.length || !('IntersectionObserver' in window)) return;
+    var secs = links.map(function(a){{ return document.getElementById(a.getAttribute('href').slice(1)); }})
+                    .filter(Boolean);
+    var current = null;
+    function setActive(id){{
+      if(id===current) return; current=id;
+      links.forEach(function(a){{ a.classList.toggle('active', a.getAttribute('href')==='#'+id); }});
+    }}
+    var obs = new IntersectionObserver(function(entries){{
+      var vis = entries.filter(function(e){{ return e.isIntersecting; }});
+      if(vis.length){{
+        vis.sort(function(a,b){{ return a.boundingClientRect.top - b.boundingClientRect.top; }});
+        setActive(vis[0].target.id);
+      }}
+    }}, {{ rootMargin:'-8% 0px -80% 0px', threshold:0 }});
+    secs.forEach(function(s){{ obs.observe(s); }});
+  }})();
+  </script>
 </body>
 </html>
 """

@@ -248,9 +248,10 @@ def _gallery(df, kind, figs_dir, max_figs, min_reads):
     if not pieces:
         return ""
     label = _KINDS[kind][1]
+    # 'compact' -> smaller thumbnails, more per row; each still opens full-size in a new tab on click.
     return (
         f"<details class='definitions' open><summary>Top {len(pieces)} {label}</summary>"
-        f"<div class='gallery'>" + "".join(pieces) + "</div></details>"
+        f"<div class='gallery compact'>" + "".join(pieces) + "</div></details>"
     )
 
 

@@ -18,6 +18,27 @@ import re
 import numpy as np
 import pandas as pd
 
+# Dorado RNA004 modification codes -> human names (kept in sync with generate_html_report.MOD_DISPLAY).
+MOD_DISPLAY = {
+    "a": "m6A", "m": "5mC", "h": "5hmC", "C": "4mC",
+    "17596": "inosine (A-to-I)", "17802": "pseudouridine (Ψ)",
+    "69426": "2'-O-methyl A (Am)", "19228": "2'-O-methyl C (Cm)",
+    "19229": "2'-O-methyl G (Gm)", "19227": "2'-O-methyl U (Um)",
+}
+
+
+def _mod_defs_html(codes):
+    """Sidebar legend spelling out the modification codes present in this browser's data."""
+    items = [c for c in codes if c]
+    if not items:
+        return ""
+    rows = "".join(
+        f"<div><code>{html.escape(str(c))}</code> {html.escape(MOD_DISPLAY.get(str(c), 'modification ' + str(c)))}</div>"
+        for c in items
+    )
+    return (f"<details class='moddefs'><summary>Modification codes ({len(items)})</summary>"
+            f"<div class='moddefs-body'>{rows}</div></details>")
+
 
 def parse_args():
     ap = argparse.ArgumentParser(description="Build the interactive gene/fragmentform browser HTML.")
@@ -215,6 +236,9 @@ def main():
     data = {"genes": {r["gene"]: r for r in ranked},
             "index": [{"g": r["gene"], "n": len(r["forms"]), "r": r["reads"], "c": r["chrom"]} for r in ranked],
             "n_total_genes": len(ranked_all), "n_shown": len(ranked)}
+    # Modification-code legend for the sidebar: the codes actually present in this run's site data.
+    _codes = sorted({str(c) for c in sites["mod_code"].dropna().astype(str)}) if ("mod_code" in sites.columns and not sites.empty) else []
+    moddefs_html = _mod_defs_html(_codes)
     os.makedirs(os.path.dirname(args.out_html) or ".", exist_ok=True)
     # Embed the JSON so it cannot break out of <script> or terminate it early: a gene_name / contrast
     # containing '</script>' would otherwise close the block and the page would never initialise.
@@ -224,6 +248,7 @@ def main():
                  .replace("\u2028", "\\u2028").replace("\u2029", "\\u2029"))
     with open(args.out_html, "w") as fh:
         fh.write(_HTML.replace("__TITLE__", html.escape(disp_title))
+                      .replace("__MODDEFS__", moddefs_html)
                       .replace("__DATA__", data_json))
     if args.verbose:
         print(f"[browser] wrote {len(ranked):,} genes -> {args.out_html} "
@@ -245,6 +270,15 @@ aside{border-right:1px solid var(--line);background:var(--panel);display:flex;fl
 .brand{padding:14px 16px;border-bottom:1px solid var(--line)}
 .brand b{font-family:Georgia,serif;font-size:17px;letter-spacing:-.01em}
 .brand span{display:block;color:var(--muted);font-size:11.5px;margin-top:2px}
+.moddefs{border-bottom:1px solid var(--line);font-size:12px}
+.moddefs>summary{cursor:pointer;user-select:none;list-style:none;padding:9px 16px;color:var(--accent);font-weight:600}
+.moddefs>summary::-webkit-details-marker{display:none}
+.moddefs>summary::before{content:"\\25B8 ";color:var(--muted)}
+.moddefs[open]>summary::before{content:"\\25BE "}
+.moddefs-body{padding:2px 16px 12px}
+.moddefs-body div{margin:3px 0;color:var(--muted)}
+.moddefs-body code{font-family:ui-monospace,Menlo,monospace;background:var(--accent-soft);color:var(--accent);
+  padding:1px 6px;border-radius:4px;margin-right:6px;font-size:11.5px}
 #q{width:100%;padding:9px 11px;border:1px solid var(--line);border-radius:8px;background:var(--bg);
 color:var(--ink);font-size:14px;outline:none}#q:focus{border-color:var(--accent)}
 .search{padding:12px 14px;border-bottom:1px solid var(--line)}
@@ -276,6 +310,7 @@ button.clr:hover{border-color:var(--accent);color:var(--accent)}
 </style></head><body><div class="app">
 <aside>
  <div class="brand"><b>modulator</b><span>gene &amp; fragmentform browser</span></div>
+ __MODDEFS__
  <div class="search"><input id="q" placeholder="Search gene or fragmentform id…" autocomplete="off"></div>
  <div id="list"></div>
 </aside>
