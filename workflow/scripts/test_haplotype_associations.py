@@ -16,17 +16,19 @@ import numpy as np
 import pandas as pd
 from pyroaring import BitMap
 
-from genotype_utils import (benjamini_hochberg, context_key_from_row, drop_unassigned_reads,
-                            max_abs_distribution_shift, run_contingency_test, shard_tsv_by_chrom, tsv_header)
+from genotype_utils import (benjamini_hochberg, cmh_stratified_test, context_key_from_row,
+                            drop_unassigned_reads, max_abs_distribution_shift, mh_stratified_effect,
+                            run_contingency_test, shard_tsv_by_chrom, tsv_header)
 
 TX_COLS = [
     "block_id", "context_key", "chrom", "n_reads", "n_haplotypes_tested", "n_transcripts_tested",
-    "test_name", "stat_name", "stat_value", "p_value", "effect_max_abs_tx_frac_diff", "per_table_json", "p_adj_bh",
+    "test_name", "stat_name", "stat_value", "p_value", "n_strata_informative",
+    "effect_max_abs_tx_frac_diff", "test_name_pooled", "p_value_pooled", "per_table_json", "p_adj_bh",
 ]
 MOD_COLS = [
     "block_id", "mod_site_id", "context_key", "chrom", "target_mod_code", "n_reads",
-    "n_haplotypes_tested", "test_name", "stat_name", "stat_value", "p_value",
-    "effect_max_abs_mod_rate_diff", "per_table_json", "p_adj_bh",
+    "n_haplotypes_tested", "test_name", "stat_name", "stat_value", "p_value", "n_strata_informative",
+    "effect_max_abs_mod_rate_diff", "test_name_pooled", "p_value_pooled", "per_table_json", "p_adj_bh",
 ]
 _MOD_WANT = ["sample", "qname", "mod_site_id", "chrom", "state_detail", "target_mod_code",
              "gene_name", "metagene_index", "usable", "fail", "within_alignment"]
@@ -76,13 +78,30 @@ def _hap_for_one_chrom(hap_path, mod_path, args):
         tt = table.to_numpy(dtype=float)
         if int(tt.sum()) < int(args.min_total_reads):
             continue
-        test_name, stat_name, stat_value, p_value = run_contingency_test(tt, test=args.test, pseudocount=args.pseudocount)
+        # pooled test kept as *_pooled companion (the confounded statistic)
+        p_test_name, p_stat_name, p_stat_value, p_pooled = run_contingency_test(
+            tt, test=args.test, pseudocount=args.pseudocount)
+        # PRIMARY: stratify the haplotype x transcript table by SAMPLE, aligning to the same
+        # keep_haps x keep_tx grid in each stratum, then generalized CMH (BLOCKER: pooling reads across
+        # replicates lets per-sample composition imbalance fake a haplotype-transcript association).
+        if "sample" in sub.columns:
+            strata = []
+            for _samp, _sg in sub.groupby("sample", sort=False):
+                st = (_sg.groupby(["haplotype", "ZT"]).size()
+                          .unstack(fill_value=0).reindex(index=keep_haps, columns=keep_tx, fill_value=0))
+                strata.append(st.to_numpy(dtype=float))
+            test_name, stat_name, stat_value, p_value, n_strata = cmh_stratified_test(strata)
+        else:
+            test_name, stat_name, stat_value, p_value, n_strata = (
+                p_test_name, p_stat_name, p_stat_value, p_pooled, 0)
         tx_rows.append({
             "block_id": block_id, "context_key": sub.iloc[0].get("context_key", ""),
             "chrom": sub.iloc[0].get("chrom", ""), "n_reads": int(tt.sum()),
             "n_haplotypes_tested": int(tt.shape[0]), "n_transcripts_tested": int(tt.shape[1]),
             "test_name": test_name, "stat_name": stat_name, "stat_value": stat_value, "p_value": p_value,
+            "n_strata_informative": int(n_strata),
             "effect_max_abs_tx_frac_diff": max_abs_distribution_shift(tt),
+            "test_name_pooled": p_test_name, "p_value_pooled": p_pooled,
             "per_table_json": json.dumps({"haplotypes": list(table.index), "transcripts": list(table.columns),
                                           "counts": table.values.tolist()}, separators=(",", ":")),
         })
@@ -109,6 +128,13 @@ def _hap_for_one_chrom(hap_path, mod_path, args):
                 mk = _rk(mm)
                 ridx = {k: i for i, k in enumerate(pd.unique(mk))}
                 mm = mm.assign(_ri=mk.map(ridx).to_numpy())
+                # per-SAMPLE read-id bitmaps for stratifying the haplotype x mod table (BLOCKER: a
+                # sample-pooled table fakes a haplotype-mod association from per-sample composition/rate
+                # imbalance -- same confound fixed in stoichiometry/tail/snp-mod).
+                samp_bits = {}
+                if "sample" in mm.columns:
+                    for _samp, _sg in mm.groupby("sample", sort=False):
+                        samp_bits[str(_samp)] = BitMap(_sg["_ri"].to_numpy().astype(np.uint32))
                 site_bits = {}
                 for site, g in mm.groupby("mod_site_id", sort=False):
                     ri = g["_ri"].to_numpy(); ts = g["target_state"].to_numpy()
@@ -140,12 +166,28 @@ def _hap_for_one_chrom(hap_path, mod_path, args):
                             continue
                         if tt[:, 0].sum() == 0:
                             continue
-                        test_name, stat_name, stat_value, p_value = run_contingency_test(tt, test=args.test, pseudocount=args.pseudocount)
+                        # pooled (kept as *_pooled companion)
+                        p_test_name, p_stat_name, p_stat_value, p_pooled = run_contingency_test(
+                            tt, test=args.test, pseudocount=args.pseudocount)
+                        # PRIMARY: sample-stratified generalized CMH over per-sample haplotype x [mod,unmod] tables
+                        if samp_bits:
+                            strata = []
+                            for _sb in samp_bits.values():
+                                strata.append([[(hbm[h] & mod_bm & _sb).__len__(),
+                                                (hbm[h] & unmod_bm & _sb).__len__()] for h in keep])
+                            test_name, stat_name, stat_value, p_value, n_strata = cmh_stratified_test(strata)
+                            effect = mh_stratified_effect(strata)
+                        else:
+                            test_name, stat_name, stat_value, p_value, n_strata = (
+                                p_test_name, p_stat_name, p_stat_value, p_pooled, 0)
+                            effect = max_abs_distribution_shift(tt)
                         mod_rows.append({
                             "block_id": block, "mod_site_id": site, "context_key": ck_hap, "chrom": chrom_hap,
                             "target_mod_code": code, "n_reads": int(tt.sum()), "n_haplotypes_tested": int(tt.shape[0]),
                             "test_name": test_name, "stat_name": stat_name, "stat_value": stat_value, "p_value": p_value,
-                            "effect_max_abs_mod_rate_diff": max_abs_distribution_shift(tt),
+                            "n_strata_informative": int(n_strata),
+                            "effect_max_abs_mod_rate_diff": effect,
+                            "test_name_pooled": p_test_name, "p_value_pooled": p_pooled,
                             "per_table_json": json.dumps({"haplotypes": keep, "states": ["modified", "not_target"],
                                                           "counts": tt.astype(int).tolist()}, separators=(",", ":")),
                         })

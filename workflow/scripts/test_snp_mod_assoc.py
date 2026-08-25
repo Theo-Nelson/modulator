@@ -22,9 +22,9 @@ import numpy as np
 from pyroaring import BitMap
 import pandas as pd
 
-from genotype_utils import (benjamini_hochberg, binary_rate_delta, context_key_from_row,
-                            context_key_from_snp_row, context_keys_from_snp_row,
-                            load_molecule_mods_for_pairing,
+from genotype_utils import (benjamini_hochberg, binary_rate_delta, cmh_stratified_test,
+                            context_key_from_row, context_key_from_snp_row, context_keys_from_snp_row,
+                            load_molecule_mods_for_pairing, mh_stratified_effect,
                             run_contingency_test, shard_tsv_by_chrom, tsv_header)
 
 SNP_USECOLS = ["sample", "qname", "snp_id", "chrom", "pos1", "start0", "end0",
@@ -32,8 +32,9 @@ SNP_USECOLS = ["sample", "qname", "snp_id", "chrom", "pos1", "start0", "end0",
 OUT_COLS = [
     "snp_id", "mod_site_id", "chrom", "pos1", "mod_start0", "mod_end0", "target_mod_code",
     "gene_names", "metagene_indices", "n_reads", "n_ref_reads", "n_alt_reads", "n_modified",
-    "n_not_target", "test_name", "stat_name", "stat_value", "p_value",
-    "effect_abs_delta_mod_frac", "per_state_json", "p_adj_bh",
+    "n_not_target", "test_name", "stat_name", "stat_value", "p_value", "n_strata_informative",
+    "effect_abs_delta_mod_frac", "test_name_pooled", "p_value_pooled", "effect_pooled",
+    "per_state_json", "p_adj_bh",
 ]
 
 
@@ -84,6 +85,14 @@ def _pairs_for_one_chrom(mod_path, snp_path, args):
         R = len(ridx)
 
         mm = mod_meta.assign(_ri=mk.map(ridx).to_numpy())
+        # per-SAMPLE read-id bitmaps, so the SNP x mod contingency table can be stratified by sample
+        # (BLOCKER: a sample-pooled Fisher/chi2 manufactures a Simpson's-paradox association from
+        # per-sample allele-composition + baseline-rate imbalance -- the same confound the stoichiometry
+        # and tail tests were fixed for). read-id universe = the mod reads (ridx is built from them).
+        samp_bits = {}
+        if "sample" in mm.columns:
+            for _samp, _sg in mm.groupby("sample", sort=False):
+                samp_bits[str(_samp)] = BitMap(_sg["_ri"].to_numpy().astype(np.uint32))
         site_bits = {}
         for site, g in mm.groupby("mod_site_id", sort=False):
             ri = g["_ri"].to_numpy(); ts = g["target_state"].to_numpy()
@@ -121,8 +130,23 @@ def _pairs_for_one_chrom(mod_path, snp_path, args):
                 if (n_ref + n_alt) < int(args.min_total_reads):
                     continue
                 tt = np.array([[ref_mod, ref_unmod], [alt_mod, alt_unmod]], dtype=float)
-                test_name, stat_name, stat_value, p_value = run_contingency_test(
+                # pooled test (kept as *_pooled companion -- the confounded statistic)
+                p_test_name, p_stat_name, p_stat_value, p_pooled = run_contingency_test(
                     tt, test=args.test, pseudocount=args.pseudocount)
+                # PRIMARY: sample-stratified CMH. Build one 2x2 [[ref_mod,ref_unmod],[alt_mod,alt_unmod]]
+                # per sample and combine; falls back to the pooled table when there is no sample column.
+                if samp_bits:
+                    strata = []
+                    for _sb in samp_bits.values():
+                        rm = len(ra & ma & _sb); ru = len(ra & ua & _sb)
+                        am = len(aa & ma & _sb); au = len(aa & ua & _sb)
+                        strata.append([[rm, ru], [am, au]])
+                    test_name, stat_name, stat_value, p_value, n_strata = cmh_stratified_test(strata)
+                    effect = mh_stratified_effect(strata)
+                else:
+                    test_name, stat_name, stat_value, p_value, n_strata = (
+                        p_test_name, p_stat_name, p_stat_value, p_pooled, 0)
+                    effect = binary_rate_delta(tt)
                 rows.append({
                     "snp_id": s, "mod_site_id": m, "chrom": chrom, "pos1": pos1,
                     "mod_start0": s0, "mod_end0": e0, "target_mod_code": code,
@@ -130,7 +154,10 @@ def _pairs_for_one_chrom(mod_path, snp_path, args):
                     "n_reads": int(tt.sum()), "n_ref_reads": n_ref, "n_alt_reads": n_alt,
                     "n_modified": ref_mod + alt_mod, "n_not_target": ref_unmod + alt_unmod,
                     "test_name": test_name, "stat_name": stat_name, "stat_value": stat_value,
-                    "p_value": p_value, "effect_abs_delta_mod_frac": binary_rate_delta(tt),
+                    "p_value": p_value, "n_strata_informative": int(n_strata),
+                    "effect_abs_delta_mod_frac": effect,
+                    "test_name_pooled": p_test_name, "p_value_pooled": p_pooled,
+                    "effect_pooled": binary_rate_delta(tt),
                     "per_state_json": json.dumps({
                         "ref_modified": ref_mod, "ref_not_target": ref_unmod,
                         "alt_modified": alt_mod, "alt_not_target": alt_unmod,

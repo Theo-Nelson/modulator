@@ -123,6 +123,77 @@ def run_contingency_test(
     return do_chi2(tab)
 
 
+def cmh_stratified_test(strata):
+    """Generalized Cochran-Mantel-Haenszel GENERAL-ASSOCIATION test over a list of r x 2 tables, one
+    per SAMPLE (rows in a FIXED order; cols = [positive, negative]). Reduces to the standard 2x2 CMH.
+
+    This is the sample-stratified replacement for a sample-POOLED Fisher/chi2 on read-level molecule
+    data: pooling reads across technical/biological replicates lets per-sample rate + composition
+    imbalance manufacture a Simpson's-paradox association where the within-sample effect is zero. A
+    stratum with no positive OR no negative outcome, or <2 covered rows, carries no information and is
+    dropped (the intended power cost -- a sample loading only one row can't separate row from sample).
+
+    Returns (test_name, stat_name, stat, p_value, n_informative_strata); NaN p when no stratum is
+    informative (so it is excluded from the BH family, like run_contingency_test)."""
+    strata = [np.asarray(T, dtype=float) for T in strata if np.asarray(T).size]
+    if not strata:
+        return "cmh_untestable", "cmh_chi2", float("nan"), float("nan"), 0
+    r, c = strata[0].shape
+    if r < 2 or c < 2:
+        return "cmh_untestable", "cmh_chi2", float("nan"), float("nan"), 0
+    # Landis-Koch general-association statistic: obs-expected over the first (r-1)x(c-1) cells, with
+    # covariance kron(A_r, A_c)/(N-1). For c==2 this reduces exactly to the standard 2x2/rx2 CMH.
+    d = (r - 1) * (c - 1)
+    A = np.zeros(d)
+    V = np.zeros((d, d))
+    used = 0
+    for T in strata:
+        R = T.sum(axis=1); C = T.sum(axis=0); N = T.sum()
+        if N < 2 or (R > 0).sum() < 2 or (C > 0).sum() < 2:
+            continue
+        Rr, Cc = R[:r - 1], C[:c - 1]
+        obs = T[:r - 1, :c - 1].reshape(-1)
+        m = np.outer(Rr, Cc).reshape(-1) / N
+        Ar = np.diag(Rr) - np.outer(Rr, Rr) / N
+        Ac = np.diag(Cc) - np.outer(Cc, Cc) / N
+        A += obs - m
+        V += np.kron(Ar, Ac) / (N - 1)
+        used += 1
+    if used == 0:
+        return "cmh_untestable", "cmh_chi2", float("nan"), float("nan"), 0
+    try:
+        Q = float(A @ np.linalg.solve(V, A))
+    except np.linalg.LinAlgError:
+        Q = float(A @ np.linalg.pinv(V) @ A)
+    if not np.isfinite(Q) or Q < 0:
+        return "cmh_untestable", "cmh_chi2", float("nan"), float("nan"), used
+    name = "cmh_2x2" if (r == 2 and c == 2) else f"cmh_general_{r}x{c}"
+    return name, "cmh_chi2", Q, float(chi2.sf(Q, d)), used
+
+
+def mh_stratified_effect(strata):
+    """Mantel-Haenszel coverage-weighted rate difference (positive-fraction), max over row pairs -- the
+    effect size consistent with cmh_stratified_test. Weights w_k = R_i R_j / N_k over strata covering
+    both rows."""
+    strata = [np.asarray(T, dtype=float) for T in strata if np.asarray(T).size]
+    if not strata:
+        return 0.0
+    r = strata[0].shape[0]
+    best = 0.0
+    for i in range(r):
+        for j in range(i + 1, r):
+            num = den = 0.0
+            for T in strata:
+                Ri, Rj, N = T[i].sum(), T[j].sum(), T.sum()
+                if N <= 0 or Ri <= 0 or Rj <= 0:
+                    continue
+                w = Ri * Rj / N
+                num += w * (T[i, 0] / Ri - T[j, 0] / Rj); den += w
+            if den > 0:
+                best = max(best, abs(num / den))
+    return best
+
+
 def robust_load_summary(path: str) -> pd.DataFrame:
     if not path or not os.path.exists(path) or os.path.getsize(path) == 0:
         return pd.DataFrame()
