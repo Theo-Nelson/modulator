@@ -20,7 +20,57 @@ import tempfile
 
 import numpy as np
 import pandas as pd
-from scipy.stats import mannwhitneyu
+from scipy.stats import mannwhitneyu, norm as _norm, rankdata as _rankdata
+
+
+def van_elteren_stratified(strata):
+    """Van Elteren stratified Wilcoxon rank-sum test over a list of (mod_tails, unmod_tails) strata,
+    one per (sample, fragmentform). Design-free weight w_k = 1/(N_k + 1).
+
+    BLOCKER-2: the pooled Mann-Whitney compares modified vs unmodified reads across ALL fragmentforms,
+    samples and conditions at once. When isoform usage and modification are both condition-linked and
+    the isoforms have different tails, modification status proxies for isoform and the isoform's tail
+    difference is attributed to the modification -- a +33 nt "effect" at FDR 1.3e-7 on the fixture where
+    every within-stratum difference is ~0. Stratifying by (sample, fragmentform) removes the confound;
+    a stratum with only one modification state carries no within-stratum information and is dropped.
+
+    Returns (z, p, n_informative_strata); NaN when no stratum has both states."""
+    num = 0.0
+    var = 0.0
+    used = 0
+    for mt, ut in strata:
+        n1, n2 = len(mt), len(ut)
+        N = n1 + n2
+        if n1 < 1 or n2 < 1 or N < 2:
+            continue
+        allv = np.concatenate([np.asarray(mt, float), np.asarray(ut, float)])
+        ranks = _rankdata(allv)
+        W = float(ranks[:n1].sum())            # rank sum of the MODIFIED group
+        EW = n1 * (N + 1) / 2.0
+        _, cnt = np.unique(allv, return_counts=True)
+        tie = float((cnt ** 3 - cnt).sum())
+        VW = n1 * n2 / 12.0 * ((N + 1) - tie / (N * (N - 1)))
+        w = 1.0 / (N + 1)
+        num += w * (W - EW)
+        var += w * w * VW
+        used += 1
+    if used == 0 or var <= 0:
+        return float("nan"), float("nan"), used
+    z = num / np.sqrt(var)
+    return float(z), float(2.0 * _norm.sf(abs(z))), used
+
+
+def weighted_within_stratum_median_diff(strata):
+    """Effect size consistent with the stratified test: within each (sample, fragmentform) stratum,
+    median(mod) - median(unmod), averaged over strata weighted by stratum size."""
+    num = den = 0.0
+    for mt, ut in strata:
+        if len(mt) < 1 or len(ut) < 1:
+            continue
+        w = len(mt) + len(ut)
+        num += w * (float(np.median(mt)) - float(np.median(ut)))
+        den += w
+    return num / den if den > 0 else 0.0
 
 from genotype_utils import benjamini_hochberg, shard_tsv_by_chrom, tsv_header
 from plot_utils import save_figure
@@ -30,7 +80,8 @@ _MOD_WANT = ["sample", "qname", "mod_site_id", "chrom", "target_mod_code", "targ
 OUT_COLS = ["mod_site_id", "chrom", "gene_name", "target_mod_code",
             "n_reads", "n_modified", "n_unmodified", "median_tail_modified", "median_tail_unmodified",
             "effect_median_diff_nt", "test_name", "stat_name", "stat_value", "p_value", "p_adj_bh",
-            "n_forms_comparable", "n_forms_concordant", "per_fragmentform_json"]
+            "n_strata_informative", "n_forms_comparable", "n_forms_concordant", "tailmod_confounded",
+            "test_name_pooled", "p_value_pooled", "effect_median_diff_nt_pooled", "per_fragmentform_json"]
 
 
 def parse_args():
@@ -165,12 +216,28 @@ def _site_rows_for_chrom(mod_path, tail_map, args):
         unmod_t = g.loc[g["target_modified"] == 0, "tail_len"].values
         if mod_t.size < int(args.min_state_reads) or unmod_t.size < int(args.min_state_reads):
             continue
+        # pooled Mann-Whitney (kept as *_pooled -- it is the confounded statistic, see BLOCKER-2)
         try:
-            stat, p = mannwhitneyu(mod_t, unmod_t, alternative="two-sided")
+            stat, p_pooled = mannwhitneyu(mod_t, unmod_t, alternative="two-sided")
         except ValueError:
-            stat, p = float("nan"), float("nan")
+            stat, p_pooled = float("nan"), float("nan")
+        # PRIMARY: van Elteren stratified Wilcoxon over (sample, fragmentform). Strata remove the
+        # isoform/condition confound; a site with no stratum carrying BOTH states is untestable (its
+        # entire mod-vs-unmod gap is between fragmentforms/samples) and is dropped.
+        _scol = "sample" if "sample" in g.columns else None
+        _ffc = "ZT" if "ZT" in g.columns else ("ZN" if "ZN" in g.columns else None)
+        strata = []
+        if _scol and _ffc:
+            for _sk, sg in g.groupby([_scol, _ffc]):
+                if str(_sk[1]).strip() in ("", "nan"):
+                    continue  # unassigned fragmentform
+                smt = sg.loc[sg["target_modified"] == 1, "tail_len"].values
+                sut = sg.loc[sg["target_modified"] == 0, "tail_len"].values
+                if smt.size and sut.size:
+                    strata.append((smt, sut))
+        z_strat, p, n_strata = van_elteren_stratified(strata)
         if not np.isfinite(p):
-            continue  # all-identical tails -> untestable (scipy may return nan rather than raise)
+            continue  # no (sample, fragmentform) stratum has both states -> confounded, untestable
         f = g.iloc[0]
         # per-FRAGMENTFORM (ZN) breakdown: does the modified-vs-unmodified tail gap hold WITHIN a
         # fragmentform, or is it just the modification tracking a differently-tailed fragmentform?
@@ -210,20 +277,33 @@ def _site_rows_for_chrom(mod_path, tail_map, args):
             "n_reads": int(mod_t.size + unmod_t.size), "n_modified": int(mod_t.size), "n_unmodified": int(unmod_t.size),
             "median_tail_modified": round(float(np.median(mod_t)), 2),
             "median_tail_unmodified": round(float(np.median(unmod_t)), 2),
-            "effect_median_diff_nt": round(float(np.median(mod_t) - np.median(unmod_t)), 2),
-            "test_name": "mannwhitneyu", "stat_name": "U", "stat_value": round(float(stat), 4), "p_value": float(p),
+            # primary effect = within-(sample, fragmentform) median difference, weighted by stratum size
+            "effect_median_diff_nt": round(weighted_within_stratum_median_diff(strata), 2),
+            "test_name": "van_elteren_stratified_wilcoxon", "stat_name": "z",
+            "stat_value": round(float(z_strat), 4), "p_value": float(p),
+            "n_strata_informative": int(n_strata),
+            # pooled companions (the OLD confounded statistic -- do not rank on these)
+            "test_name_pooled": "mannwhitneyu",
+            "p_value_pooled": float(p_pooled),
+            "effect_median_diff_nt_pooled": round(float(np.median(mod_t) - np.median(unmod_t)), 2),
             "per_fragmentform_json": json.dumps(per_ff),
         }
-        # Is the pooled shift reproduced WITHIN fragmentforms, or driven by a single form (which would
-        # make it inseparable from fragmentform identity)? Count comparable (>=3 reads/state) forms and
-        # how many shift in the SAME direction as the pooled effect.
-        _pooled = float(np.median(mod_t) - np.median(unmod_t))
+        # Secondary confounder flag (the stratified p is the primary guard now). Is the effect reproduced
+        # WITHIN fragmentforms, or driven by a single form? Count comparable (>=3 reads/state) forms and
+        # how many shift in the SAME direction as the STRATIFIED effect. A form is discordant if it moves
+        # the other way OR its magnitude is <1/3 of the effect (near-flat). tailmod_confounded flags any
+        # site where a strict majority of comparable forms are NOT concordant -- excluded from the report
+        # headline count.
+        _eff = row["effect_median_diff_nt"]
         _comp = [d for d in per_ff.values()
                  if d["n_mod"] >= 3 and d["n_unmod"] >= 3 and d["delta_nt"] is not None]
         row["n_forms_comparable"] = len(_comp)
         row["n_forms_concordant"] = (sum(1 for d in _comp
-                                         if d["delta_nt"] != 0 and (d["delta_nt"] > 0) == (_pooled > 0))
-                                     if _pooled != 0 else 0)
+                                         if d["delta_nt"] != 0 and (d["delta_nt"] > 0) == (_eff > 0)
+                                         and abs(d["delta_nt"]) >= abs(_eff) / 3.0)
+                                     if _eff != 0 else 0)
+        # confounded when there ARE comparable forms but fewer than half of them are concordant
+        row["tailmod_confounded"] = bool(_comp and row["n_forms_concordant"] < len(_comp))
         rows.append(row)
         if collect:
             cands.append((float(p), row, mod_t, unmod_t, per_ff))

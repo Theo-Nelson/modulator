@@ -159,7 +159,11 @@ COLUMN_DEFINITIONS = {
     "median_tail_unmodified": "Median tail length (nt) of reads unmodified at the target site.",
     "per_fragmentform_json": "Per-fragmentform (ZN) breakdown {ZN: {n_mod, n_unmod, median_tail_mod, median_tail_unmod, delta_nt}} — the modified-vs-unmodified tail comparison WITHIN each fragmentform, so a pooled shift can be told apart from the modification tracking a differently-tailed fragmentform. Visualized as the right panel of each per-site figure.",
     "n_forms_comparable": "Number of fragmentforms with >=3 reads in BOTH the modified and unmodified state (the forms in which a within-fragmentform tail comparison is possible).",
-    "n_forms_concordant": "Of the comparable fragmentforms, how many shift in the SAME direction as the pooled effect. If this is <=1 (or a minority of comparable forms), the pooled tail difference may be driven by a single fragmentform rather than a within-fragmentform effect — the per-site figure carries a warning in that case.",
+    "n_forms_concordant": "Of the comparable fragmentforms, how many shift in the SAME direction as (and with at least a third of) the reported within-stratum effect. When this is a minority, the site is flagged tailmod_confounded and excluded from the headline count.",
+    "tailmod_confounded": "True when fewer than half of the comparable fragmentforms reproduce the effect within-form — i.e. the modified-vs-unmodified tail gap is likely the modification proxying for a differently-tailed isoform rather than a within-isoform effect. Confounded sites are excluded from the headline significant count.",
+    "n_strata_informative": "Number of (sample, fragmentform) strata that carried BOTH modification states and so contributed to the sample-stratified van Elteren test (the primary p-value).",
+    "effect_median_diff_nt_pooled": "The OLD pooled median(mod)-median(unmod) over all reads at the site, ignoring sample/fragmentform structure. Retained for transparency; can be badly inflated by the isoform confound — do not rank on it.",
+    "p_value_pooled": "The OLD pooled Mann-Whitney p-value (mod vs unmod reads pooled across all fragmentforms and samples). Retained for transparency; the primary p_value is the sample-stratified van Elteren test.",
     "n_unmodified": "Number of reads unmodified at the target site.",
     "sample": "Sample identifier derived from the BAM filename.",
     "chrom": "Reference chromosome or contig containing the reported feature.",
@@ -1663,7 +1667,16 @@ def build_polya_section(frag_df, diffs_df, mod_df, top_n, diff_figs_dir="", mod_
         _n_sig = lambda d: (int((pd.to_numeric(d["p_adj_bh"], errors="coerce") < 0.05).sum())
                             if d is not None and not d.empty and "p_adj_bh" in d.columns else 0)
         n_sig_diff = _n_sig(diffs_df)
-        n_sig_mod = _n_sig(mod_df)
+        # the tail x mod headline excludes CONFOUNDED sites (fewer than half the comparable fragmentforms
+        # reproduce the effect within-form) -- those are the isoform-tracks-modification artifacts.
+        def _n_sig_mod(d):
+            if d is None or d.empty or "p_adj_bh" not in d.columns:
+                return 0
+            sig = pd.to_numeric(d["p_adj_bh"], errors="coerce") < 0.05
+            if "tailmod_confounded" in d.columns:
+                sig = sig & ~d["tailmod_confounded"].astype(str).str.lower().isin(("true", "1"))
+            return int(sig.sum())
+        n_sig_mod = _n_sig_mod(mod_df)
         parts.append("<h3>Summary Across All Poly(A) Tail Measurements</h3>")
         _med = med_all.median()
         _med_s = f"{_med:.0f} nt" if pd.notna(_med) else "n/a"
@@ -1672,7 +1685,9 @@ def build_polya_section(frag_df, diffs_df, mod_df, top_n, diff_figs_dir="", mod_
             f"<li><b>{len(frag_df):,}</b> fragmentforms with a tail-length distribution; "
             f"overall median <b>{_med_s}</b></li>"
             f"<li><b>{n_sig_diff:,}</b> genes with differential tail length between their fragmentforms (FDR&lt;0.05)</li>"
-            f"<li><b>{n_sig_mod:,}</b> modification sites where tail length differs by modification state (FDR&lt;0.05)</li>"
+            f"<li><b>{n_sig_mod:,}</b> modification sites where tail length differs by modification state "
+            f"WITHIN (sample, fragmentform) strata (sample-stratified van Elteren test, FDR&lt;0.05; "
+            f"confounded sites excluded)</li>"
             "</ul>"
         )
     if diffs_df is not None and not diffs_df.empty:
@@ -1685,7 +1700,9 @@ def build_polya_section(frag_df, diffs_df, mod_df, top_n, diff_figs_dir="", mod_
     if mod_df is not None and not mod_df.empty:
         cols = [c for c in ["gene_name", "mod_site_id", "target_mod_code", "n_modified", "n_unmodified",
                             "median_tail_modified", "median_tail_unmodified", "effect_median_diff_nt",
-                            "p_value", "p_adj_bh"] if c in mod_df.columns]
+                            "test_name", "p_value", "p_adj_bh", "n_strata_informative",
+                            "n_forms_comparable", "n_forms_concordant", "tailmod_confounded",
+                            "effect_median_diff_nt_pooled", "p_value_pooled"] if c in mod_df.columns]
         gallery = _flat_figure_gallery(mod_figs_dir, max_figs, "per-site figure(s) — modified vs unmodified tail length")
         parts.append(subsection("Poly(A) tail length vs modification state",
                                 df_to_html(mod_df[cols], max_rows=top_n) + gallery,
