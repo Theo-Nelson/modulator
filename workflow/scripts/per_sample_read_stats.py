@@ -180,6 +180,12 @@ def _stats_for_one_sample(task):
     # Scan original BAM
     with pysam.AlignmentFile(bam, "rb") as fh:
         for aln in safe_fetch_all(fh):
+            # G2: count READS, not records. A secondary/supplementary alignment is an extra record of a
+            # read already represented by its primary; including them made total_n a RECORD count while
+            # every numerator (total_mapped, considered_n, assigned_n) is read-level, so every "fraction
+            # of reads" was wrong on real minimap2 dRNA BAMs (invisible on test data with 0 supplementary).
+            if aln.is_secondary or aln.is_supplementary:
+                continue
             total_n += 1
             L = get_len(aln)
             if L > 0:
@@ -187,9 +193,8 @@ def _stats_for_one_sample(task):
 
             if aln.is_unmapped:
                 total_unmapped += 1
-            elif not (aln.is_secondary or aln.is_supplementary):
-                total_mapped += 1   # count READS with a primary mapped alignment, not every record
-                                    # (secondary/supplementary would inflate this ~60% over the read count)
+            else:
+                total_mapped += 1   # primary mapped read (secondary/supplementary already skipped above)
 
             reason = considered_fail_reason(
                 aln,

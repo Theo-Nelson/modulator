@@ -436,18 +436,30 @@ def significance_note_box(concordance):
     """A prominent, data-driven callout placed above the differential sections: reports THIS run's
     per-condition replicate reproducibility and warns that tight replicates make significance cheap,
     so hits should be ranked by effect size, not p-value."""
-    parts = [f"within <b>{html.escape(str(c))}</b> ({d['n_reps']} replicates) the typical site "
-             f"differs by only <b>~{d['median_pp']:.1f} pp</b> between replicates"
-             for c, d in sorted(concordance.items()) if d.get("median_pp") is not None]
-    if not parts:
+    vals = [d["median_pp"] for d in concordance.values() if d.get("median_pp") is not None]
+    if not vals:
         return ""
+    # "highly reproducible" / "only" are claims about the DATA -- make them fire only when the data
+    # support them (R6: the old text called 47 pp "highly reproducible ... only"). Threshold at 5 pp.
+    worst = max(vals)
+    parts = [f"within <b>{html.escape(str(c))}</b> ({d['n_reps']} replicates) the typical site "
+             f"differs by {'only ' if d['median_pp'] <= 5.0 else ''}<b>~{d['median_pp']:.1f} pp</b> "
+             f"between replicates"
+             for c, d in sorted(concordance.items()) if d.get("median_pp") is not None]
+    if worst <= 5.0:
+        lead = "Your replicates are highly reproducible: "
+        tail = ("When replicates agree this tightly the replicate-aware tests have very high power, so a "
+                "shift of only a couple of percentage points can clear FDR even though it may be "
+                "biologically less meaningful.")
+    else:
+        lead = "Replicate reproducibility (rank hits by effect size, not p-value): "
+        tail = ("Some conditions show sizeable replicate-to-replicate variability, so a small nominal "
+                "shift can be within the replicate noise -- read the effect size and the per-replicate "
+                "values, not just the FDR.")
     return (
         "<div class='callout-warn'>"
         "<b>Read this first — please consider both effect size and p-value.</b> "
-        "Your replicates are highly reproducible: " + "; ".join(parts) + ". "
-        "When replicates agree this tightly the replicate-aware tests have very high power, so a shift "
-        "of only a couple of percentage points can clear FDR even though it may be biologically less "
-        "meaningful."
+        + lead + "; ".join(parts) + ". " + tail +
         "</div>"
     )
 
@@ -742,10 +754,13 @@ def _save_report_chart(fig, name):
             pass
 
 
-def category_distribution_png(counts, mod_label=None):
+def category_distribution_png(counts, mod_label=None, chart_name="site_classification_distribution"):
     """Horizontal bar chart of classified-site counts per category. Returns a
     base64 data URI (or "" if matplotlib/data unavailable). ``mod_label`` names the
-    modification in the title/axis (e.g. "m6A"); None -> generic wording."""
+    modification in the title/axis (e.g. "m6A"); None -> generic wording. ``chart_name`` is the
+    on-disk export stem -- distinct per caller so the three distributions that reuse this helper
+    (structural buckets, per-category classes, SNP positional classes) don't overwrite one file
+    (R1/R2: the exported PNG/PDF/SVG collided even though each inline HTML copy was correct)."""
     if not counts:
         return ""
     try:
@@ -782,7 +797,7 @@ def category_distribution_png(counts, mod_label=None):
     for spine in ("top", "right"):
         ax.spines[spine].set_visible(False)
     fig.tight_layout()
-    _save_report_chart(fig, "site_classification_distribution")
+    _save_report_chart(fig, chart_name)
     buf = BytesIO()
     fig.savefig(buf, format="png", dpi=200, bbox_inches="tight")
     plt.close(fig)
@@ -1413,7 +1428,7 @@ def build_apa_motif_section(apa_df, top_n):
     counts = apa_df["apa_motif_class"].value_counts().to_dict()
     total = int(sum(counts.values())) or 1
     parts = []
-    fig = category_distribution_png(counts)
+    fig = category_distribution_png(counts, chart_name="apa_motif_class_distribution")
     if fig:
         parts.append(clickable_image_html(fig, "APA PAS class distribution",
                                           caption="Polyadenylation-signal class per APA site."))
@@ -1561,7 +1576,7 @@ def build_snp_mechanism_section(mech_df, top_n):
                        intro="Positional and motif-level explanation of each SNP x modification association.")
     parts = []
     counts = mech_df["positional_class"].value_counts().to_dict()
-    fig = category_distribution_png(counts)
+    fig = category_distribution_png(counts, chart_name="snp_positional_class_distribution")
     if fig:
         parts.append(clickable_image_html(fig, "SNP positional class distribution",
                                           caption="Where each SNP sits relative to the modified base."))
@@ -1583,8 +1598,14 @@ def build_snp_mechanism_section(mech_df, top_n):
         f"<li><b>{len(mech_df):,}</b> SNP x modification pairs classified</li>"
         f"<li><b>{n_art_sig:,}</b> of the <b>{len(sig):,}</b> significant (FDR&lt;0.05) pairs are "
         f"<b>self-reporting artifacts</b> — the variant and the modification are potentially the same physical event</li>"
+        # R5: only assert "internally consistent" when the concordance rate actually supports it
+        # (the claim used to print unconditionally, even at 10%).
         + (f"<li>Motif prediction matches the observed allelic direction in <b>{rate:.1f}%</b> of "
-           f"testable motif-bearing pairs (n={len(conc)}) — the mechanism is internally consistent</li>" if len(conc) else "")
+           f"testable motif-bearing pairs (n={len(conc)})"
+           + (" — the mechanism is predominantly internally consistent" if rate >= 60.0
+              else (" — the mechanism is largely inconsistent (motif prediction rarely matches)" if rate < 40.0
+                    else " — mixed concordance"))
+           + "</li>" if len(conc) else "")
         + "</ul>"
     )
     if "artifact_flag" in mech_df.columns:
@@ -1599,12 +1620,16 @@ def build_snp_mechanism_section(mech_df, top_n):
         parts.append(subsection("Motif effect (SNPs inside the 5-mer)", df_to_html(mt, max_rows=8)))
     causal = (clean[clean["motif_effect"].eq("MOTIF_DISRUPTED") & clean["direction_concordance"].eq("CONCORDANT")]
               if {"motif_effect", "direction_concordance"}.issubset(clean.columns) else pd.DataFrame())
+    # R4: "causal" requires the SNP-mod association to be SIGNIFICANT -- the old table listed
+    # motif-disrupted/concordant pairs at any FDR (incl. 0.99) under a "causal" heading.
+    if not causal.empty and "p_adj_bh" in causal.columns:
+        causal = causal[pd.to_numeric(causal["p_adj_bh"], errors="coerce") < 0.05]
     if not causal.empty:
         cols = [c for c in ["snp_id", "gene_names", "mod_site_id", "distance_bp", "ref_5mer", "alt_5mer",
                             "ref_mod_rate", "alt_mod_rate", "p_adj_bh"] if c in causal.columns]
         if "p_adj_bh" in causal.columns:   # sort by FDR only when present (else the KeyError just moved here)
             causal = causal.assign(_p=pd.to_numeric(causal["p_adj_bh"], errors="coerce")).sort_values("_p")
-        parts.append(subsection("Top causal cis variants (motif disrupted, direction concordant)",
+        parts.append(subsection("Top candidate causal cis variants (significant, motif disrupted, direction concordant)",
                                 df_to_html(causal[cols], max_rows=top_n)))
     return section(
         "Distance of cis SNP to Affected Modifications",
@@ -1935,7 +1960,7 @@ def build_classification_section(class_df, private_df, class_figs_dir, arch_figs
                                   "n_sites": n, "pct": f"{100.0 * n / total:.1f}%"})
     grid = pd.DataFrame(grid_rows)
     bucket_counts = {b: count(b) for b in CLASS_BUCKET_ORDER}
-    hero = category_distribution_png(bucket_counts, mod_label=None)
+    hero = category_distribution_png(bucket_counts, mod_label=None, chart_name="structural_bucket_distribution")
     hero_html = clickable_image_html(hero, "Classification by top-level bucket", figure_class="hero-figure",
                                      caption="Sites per top-level bucket.") if hero else ""
     overview = (
@@ -2177,6 +2202,11 @@ def main():
 
     diff_html = "<p class='muted'>No differential-site results available.</p>"
     diff_cols = []
+    # R3: the section claims "keeping sites that clear the FDR + minimum effect", but the raw
+    # diff_results table (every tested site, incl. non-significant / tiny-effect rows) was shown.
+    # Apply the stated filter to the displayed table so it matches the heading.
+    _DIFF_FDR, _DIFF_EFF = 0.05, 0.10
+    diff_kept = 0
     if not diff_df.empty:
         diff_cols = [
             c for c in [
@@ -2184,10 +2214,16 @@ def main():
                 "p_value", "p_adj_bh", "effect_max_abs_frac_diff"
             ] if c in diff_df.columns
         ]
-        diff_html = df_to_html(
-            diff_df[diff_cols].sort_values(["p_adj_bh", "effect_max_abs_frac_diff"], ascending=[True, False]),
+        _dv = diff_df
+        if "p_adj_bh" in diff_df.columns:
+            _dv = _dv[pd.to_numeric(_dv["p_adj_bh"], errors="coerce") < _DIFF_FDR]
+        if "effect_max_abs_frac_diff" in diff_df.columns:
+            _dv = _dv[pd.to_numeric(_dv["effect_max_abs_frac_diff"], errors="coerce").abs() >= _DIFF_EFF]
+        diff_kept = len(_dv)
+        diff_html = (df_to_html(
+            _dv[diff_cols].sort_values(["p_adj_bh", "effect_max_abs_frac_diff"], ascending=[True, False]),
             max_rows=20,
-        )
+        ) if diff_kept else "<p class='muted'>No sites cleared FDR&lt;0.05 with |Δ|≥10%.</p>")
 
     diff_fig_html = ""
     if args.diff_figs_dir and os.path.isdir(args.diff_figs_dir):
@@ -2381,10 +2417,10 @@ def main():
         "Sites with Differential Epitranscriptomic Modification Between Fragmentforms",
         diff_html + diff_fig_html,
         intro="Positions where the modification stoichiometry differs between the fragmentforms of a gene "
-              "(across all detected mod codes; Fisher exact / chi-square with Benjamini-Hochberg FDR, keeping "
-              "sites whose absolute stoichiometry difference clears the minimum effect). The effect threshold "
-              "(default 10%) and the FDR are tunable — see input parameters classify_diffs.min_effect and "
-              "classify_diffs.fdr.",
+              "(across all detected mod codes; sample-stratified Cochran-Mantel-Haenszel with "
+              "Benjamini-Hochberg FDR). The table shows sites at <b>FDR&lt;0.05 and |Δ|≥10%</b> only. The "
+              "effect threshold (default 10%) and the FDR are tunable — see input parameters "
+              "classify_diffs.min_effect and classify_diffs.fdr.",
         definitions=definitions_html(column_definitions(diff_cols), summary="Result-column definitions") if diff_cols else "",
     )
 

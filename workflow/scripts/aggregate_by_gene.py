@@ -548,45 +548,57 @@ def assign_gene(
     """
     site_exon = site_interval_1based(pos_start, pos_end)
 
+    # G1: with combine_strands the site strand is "." (no strand) -- search BOTH strands, or a "+"-strand
+    # gene is never found (the old fallback only tried "-"). For a real +/- site, keep same-strand-first
+    # then opposite-strand fallback. Iterate strands separately so each index's sorted early-`break` holds.
+    if strand in ("+", "-"):
+        primary_strands = [strand]
+        fallback_strands = ["+" if strand == "-" else "-"]
+    else:
+        primary_strands = ["+", "-"]
+        fallback_strands = []
+
     best = None
     best_ov = -1
-    for iv in tx_index.get((chrom, strand), []):
-        if iv.start > pos_end:
-            break
-        if iv.end < (pos_start + 1):
-            continue
-        if int(iv.zn) != int(zn):
-            continue
-        ov = exon_overlap_len(site_exon, iv.exons)
-        if ov > best_ov:
-            best_ov = ov
-            best = iv
+    for st in primary_strands:
+        for iv in tx_index.get((chrom, st), []):
+            if iv.start > pos_end:
+                break
+            if iv.end < (pos_start + 1):
+                continue
+            if int(iv.zn) != int(zn):
+                continue
+            ov = exon_overlap_len(site_exon, iv.exons)
+            if ov > best_ov:
+                best_ov = ov
+                best = iv
     if best and best_ov > 0:
         return best.gene_id, best.gene_name
 
     best = None
     best_ov = -1
-    for iv in gene_index.get((chrom, strand), []):
-        if iv.start > pos_end:
-            break
-        if iv.end < (pos_start + 1):
-            continue
-        ov = exon_overlap_len(site_exon, iv.exons)
-        if ov > best_ov:
-            best_ov = ov
-            best = iv
+    for st in primary_strands:
+        for iv in gene_index.get((chrom, st), []):
+            if iv.start > pos_end:
+                break
+            if iv.end < (pos_start + 1):
+                continue
+            ov = exon_overlap_len(site_exon, iv.exons)
+            if ov > best_ov:
+                best_ov = ov
+                best = iv
     if best and best_ov > 0:
         return best.gene_id, best.gene_name
 
-    other = "+" if strand == "-" else "-"
-    for iv in gene_index.get((chrom, other), []):
-        if iv.start > pos_end:
-            break
-        if iv.end < (pos_start + 1):
-            continue
-        ov = exon_overlap_len(site_exon, iv.exons)
-        if ov > 0:
-            return iv.gene_id, iv.gene_name
+    for st in fallback_strands:
+        for iv in gene_index.get((chrom, st), []):
+            if iv.start > pos_end:
+                break
+            if iv.end < (pos_start + 1):
+                continue
+            ov = exon_overlap_len(site_exon, iv.exons)
+            if ov > 0:
+                return iv.gene_id, iv.gene_name
 
     return "", ""
 
