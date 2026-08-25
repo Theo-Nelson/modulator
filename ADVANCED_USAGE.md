@@ -306,7 +306,7 @@ association layers. Enable with `--set genotype.enable=true`.
 | `min_total_cov` | int | `8` | Minimum total depth at a candidate SNP. |
 | `min_alt_frac` / `max_alt_frac` | float | `0.10` / `0.90` | Alt-allele fraction window for segregating SNPs. |
 | `min_baseq` / `min_mapq` | int | `20` / `10` | Quality floors for discovery / molecule extraction. |
-| `mod_sites_require_snp_link` | bool | `true` | Keep only mod sites whose context_key matches a candidate SNP (lossless for SNP-mod / dependency / haplotype-mod; bounds memory on deep genome-wide data). |
+| `mod_sites_require_snp_link` | bool | `true` | Keep only mod sites whose context_key matches a candidate SNP. Lossless for the SNP-linked analyses (SNP-mod, haplotype-mod) and bounds memory on deep genome-wide data, but it **also restricts the non-SNP molecule analyses** — tail×mod, mod×mod and hierarchical_stoich only see SNP-linked mod sites (measured: 2078→763 sites on the reference run). Set `false` for genome-wide coverage of those analyses, at higher memory. |
 | `mod_jobs` | int | `8` | Concurrent `modkit extract calls` in the mod-table step (each streams a chromosome — bounds memory). |
 | `min_mod_site_cov` | int | `1` | Minimum aggregated mod-site coverage for SNP-mod testing. |
 | `min_group_reads` | int | `4` | Minimum group support for association/dependency tests. |

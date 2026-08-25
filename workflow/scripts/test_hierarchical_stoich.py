@@ -103,9 +103,14 @@ def _covered(intervals, lo, hi):
 
 
 def divergence_point(ex_a, ex_b, strand):
-    """Position closest to the 3' end where the two exon structures differ, or None if identical.
+    """DEEPEST (most 5') position where the two exon structures differ, or None if identical.
 
-    A read must span this position to distinguish A from B by evidence.
+    S5 FIX: a read must reach this position to distinguish A from B. ONT direct-RNA reads sequence
+    3'->5' and truncate on the 5' side, so their 3' end (poly(A)) is essentially always present. The old
+    code returned the 3'-MOST difference, which every read trivially spans -> the informative-read
+    filter was a no-op (measured: 380/467 rows counted reads that never reached the real divergence
+    while reporting reads_dropped_as_uninformative=0). The discriminating position a read must actually
+    reach is the 5'-MOST difference: the lowest coord on '+', the highest on '-'.
     """
     bounds = sorted({p for iv in (ex_a, ex_b) for se in iv for p in se})
     if len(bounds) < 2:
@@ -118,8 +123,8 @@ def divergence_point(ex_a, ex_b, strand):
             diffs.append((lo, hi))
     if not diffs:
         return None
-    # 3'-most differing position: highest coord on +, lowest on -
-    return max(h for _, h in diffs) if strand == "+" else min(l for l, _ in diffs)
+    # 5'-most (deepest) differing position: lowest coord on +, highest on -
+    return min(l for l, _ in diffs) if strand == "+" else max(h for _, h in diffs)
 
 
 def main():

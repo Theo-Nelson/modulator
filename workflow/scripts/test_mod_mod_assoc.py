@@ -13,6 +13,7 @@ import json
 import math
 import os
 import shutil
+import sys
 import tempfile
 import numpy as np
 import pandas as pd
@@ -185,8 +186,18 @@ def main():
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
     if n_skipped:
-        print(f"[warn] skipped pairing on {n_skipped} read(s) exceeding --max-sites-per-read="
-              f"{args.max_sites_per_read}", flush=True)
+        # Surface the cap's effect PERSISTENTLY, not just on stdout: dense reads are long reads that
+        # carry most of the co-occurrence information, so a large skip count means the mod-mod result
+        # under-represents them. Written to a sidecar next to the output so it survives the run.
+        msg = (f"skipped pairing on {n_skipped} read(s) that exceeded --max-sites-per-read="
+               f"{args.max_sites_per_read}; these are long, site-dense reads and carry disproportionate "
+               f"co-occurrence signal -- raise --max-sites-per-read to include them.")
+        print(f"[warn] {msg}", file=sys.stderr, flush=True)
+        try:
+            with open(args.out_tsv + ".skipped_dense_reads.txt", "w") as _fh:
+                _fh.write(f"n_reads_skipped\t{n_skipped}\nmax_sites_per_read\t{args.max_sites_per_read}\n{msg}\n")
+        except OSError:
+            pass
 
     out = pd.DataFrame(rows)
     if not out.empty:
