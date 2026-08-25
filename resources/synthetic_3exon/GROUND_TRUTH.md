@@ -66,8 +66,11 @@ modification (≈130 vs ≈85) for a tail×mod signal.
 > ZN partition has its minor-condition arm at only 18× — below `--min-cov 20`. The per-transcript mod
 > test therefore cannot compare COND within either isoform, and the condition effect surfaces instead
 > in the **isoform-usage** test (GENE_A A1↔A2, which this suite also asserts). This is a deliberate
-> trade of the isoform-resolved design, not a bug: a pooled (per-site) companion test would recover
-> COND at the cost of Simpson's-paradox exposure. The `delta −0.74` expectation was written for the
+> trade of the isoform-resolved design, not a bug. (Historically a pooled per-site companion test
+> would have recovered COND at the cost of Simpson's-paradox exposure; as of BLOCKER-3 the
+> between-fragmentform stoichiometry test is stratified by sample via a generalized
+> Cochran-Mantel-Haenszel test, so that exposure is removed -- the pooled statistic is still emitted as
+> `*_pooled` companion columns for transparency.) The `delta −0.74` expectation was written for the
 > pre-`--by-transcript` pooled behaviour and is retained here only as the documented tension.
 | **between-cond isoform / tail** | GENE_A A1↔A2 usage sig; GENE_B tail sig | matches |
 | **sequence_elements** | PAS/ARE/CPE/GRE/M6AM detected on synthetic; unbiased mod-code join | produced (Kozak/stop/uORF + mod-join validated on the real 5-gene demo, which has CDS) |

@@ -34,7 +34,7 @@ from itertools import combinations
 
 import numpy as np
 import pandas as pd
-from scipy.stats import chi2_contingency, fisher_exact
+from scipy.stats import chi2 as _chi2_dist, chi2_contingency, fisher_exact
 import matplotlib.pyplot as plt
 from matplotlib.ticker import MaxNLocator
 from plot_utils import save_figure
@@ -141,6 +141,70 @@ def site_key_str_from_tuple(tup):
     return f"{g}|{m}|{chrom}:{int(s0)}-{int(e0)}({st})"
 
 
+def cmh_general_association(strata):
+    """Generalized Cochran-Mantel-Haenszel GENERAL-ASSOCIATION test across a list of r x 2 strata
+    (rows = transcripts in a FIXED order, cols = [Nmod, Nunmod]); one stratum per sample.
+
+    BLOCKER-3: the previous test summed every sample's counts into ONE 2x2 and tested that. With
+    per-sample rate heterogeneity AND per-sample transcript-composition imbalance, Simpson's paradox
+    manufactures a large "effect" at astronomical significance where the within-sample difference is
+    exactly zero (measured p=1.2e-23 on a constructed null). Stratifying by sample removes the confound.
+
+    Reduces to the standard 2x2 CMH for r == 2. Returns (statistic, p_value, df, n_informative_strata);
+    a stratum with no modified OR no unmodified calls, or <2 covered transcripts, carries no information
+    and is dropped (this is the intended power cost -- a sample contributing to only one partition cannot
+    separate transcript from sample). NaN p if no stratum is informative."""
+    r = strata[0].shape[0]
+    if r < 2:
+        return float("nan"), float("nan"), 0, 0
+    A = np.zeros(r - 1)
+    V = np.zeros((r - 1, r - 1))
+    used = 0
+    for T in strata:
+        T = np.asarray(T, dtype=float)
+        R = T.sum(axis=1)            # per-transcript coverage in this stratum
+        C = T.sum(axis=0)            # [total_mod, total_unmod]
+        N = T.sum()
+        if N < 2 or C[0] <= 0 or C[1] <= 0 or (R > 0).sum() < 2:
+            continue
+        a = T[:r - 1, 0]
+        Rr = R[:r - 1]
+        A += a - Rr * C[0] / N
+        f = C[0] * C[1] / (N * N * (N - 1))
+        V += f * (N * np.diag(Rr) - np.outer(Rr, Rr))
+        used += 1
+    if used == 0:
+        return float("nan"), float("nan"), r - 1, 0
+    try:
+        Q = float(A @ np.linalg.solve(V, A))
+    except np.linalg.LinAlgError:
+        Q = float(A @ np.linalg.pinv(V) @ A)   # transcript with no across-stratum variation -> singular
+    if not np.isfinite(Q) or Q < 0:
+        return float("nan"), float("nan"), r - 1, used
+    return Q, float(_chi2_dist.sf(Q, r - 1)), r - 1, used
+
+
+def mh_max_abs_rate_diff(strata):
+    """Mantel-Haenszel coverage-weighted rate difference, max over transcript pairs -- the effect size
+    consistent with the stratified test (weights w_k = R_i R_j / N_k, only strata covering both)."""
+    r = strata[0].shape[0]
+    best = 0.0
+    for i in range(r):
+        for j in range(i + 1, r):
+            num = den = 0.0
+            for T in strata:
+                T = np.asarray(T, dtype=float)
+                Ri, Rj, N = T[i].sum(), T[j].sum(), T.sum()
+                if N <= 0 or Ri <= 0 or Rj <= 0:
+                    continue
+                w = Ri * Rj / N
+                num += w * (T[i, 0] / Ri - T[j, 0] / Rj)
+                den += w
+            if den > 0:
+                best = max(best, abs(num / den))
+    return best
+
+
 def summarize_site(df_site, min_cov, which_test, pseudocount, alternative):
     """
     Collapse per-sample rows to per-transcript totals and run the appropriate test.
@@ -202,14 +266,37 @@ def summarize_site(df_site, min_cov, which_test, pseudocount, alternative):
     else:  # "chi2"
         used_test, stat_name, stat_value, pval = do_chi2_rx2(table, pseudocount)
 
-    # effect size: max absolute Δ among pooled stoichiometries
+    # pooled effect size: max absolute Δ among POOLED stoichiometries (kept for transparency)
     with np.errstate(divide="ignore", invalid="ignore"):
         frac = grp_f["Nmod"] / grp_f["Nvalid_cov"].replace(0, np.nan)
     frac = frac.fillna(0.0).to_numpy()
-    max_diff = 0.0
+    max_diff_pooled = 0.0
     for i in range(len(frac)):
         for j in range(i + 1, len(frac)):
-            max_diff = max(max_diff, float(abs(frac[i] - frac[j])))
+            max_diff_pooled = max(max_diff_pooled, float(abs(frac[i] - frac[j])))
+
+    # PRIMARY test (BLOCKER-3): stratify by SAMPLE. Build one r x 2 table per sample over the tested
+    # transcripts (fixed row order; a transcript uncovered in a sample is a zero row) and run the
+    # generalized CMH. This replaces the sample-pooled Fisher/chi2 as the reported statistic; the pooled
+    # values are retained as *_pooled so the confound is visible rather than hidden.
+    tested_zn = [int(z) for z in grp_f["ZN_transcript_index"].tolist()]
+    zn_pos = {z: i for i, z in enumerate(tested_zn)}
+    strata = []
+    if "sample" in df_site.columns:
+        sample_iter = df_site.groupby("sample")
+    else:
+        sample_iter = [("_all", df_site)]
+    for _s, sub in sample_iter:
+        by_zn = sub.groupby("ZN_transcript_index")[["Nvalid_cov", "Nmod"]].sum()
+        T = np.zeros((len(tested_zn), 2))
+        for z, row in by_zn.iterrows():
+            if int(z) in zn_pos:
+                cov = float(row["Nvalid_cov"]); mod = min(float(row["Nmod"]), cov)
+                T[zn_pos[int(z)]] = (mod, cov - mod)
+        strata.append(T)
+    cmh_stat, cmh_p, cmh_df, n_strata = cmh_general_association(strata)
+    mh_effect = mh_max_abs_rate_diff(strata)
+    primary_test = "cmh_2x2" if len(tested_zn) == 2 else f"cmh_general_{len(tested_zn)}x2"
 
     # serialize per-transcript for convenience
     per_tx = []
@@ -225,11 +312,18 @@ def summarize_site(df_site, min_cov, which_test, pseudocount, alternative):
 
     return {
         "n_tx_tested": int(len(grp_f)),
-        "test_name": used_test,
-        "stat_name": stat_name,
-        "stat_value": stat_value,
-        "p_value": pval,
-        "effect_max_abs_frac_diff": round(max_diff, 6),
+        # primary = sample-stratified CMH
+        "test_name": primary_test,
+        "stat_name": "cmh_chi2",
+        "stat_value": cmh_stat,
+        "p_value": cmh_p,
+        "n_strata_informative": int(n_strata),
+        "effect_max_abs_frac_diff": round(mh_effect, 6),
+        # pooled companions (the OLD sample-pooled statistic -- do not rank on these)
+        "test_name_pooled": used_test,
+        "stat_value_pooled": stat_value,
+        "p_value_pooled": pval,
+        "effect_max_abs_frac_diff_pooled": round(max_diff_pooled, 6),
         "per_transcript": per_tx,
     }
 
@@ -435,7 +529,11 @@ def main():
             "stat_name": res["stat_name"],
             "stat_value": res["stat_value"],
             "p_value": res["p_value"],
+            "n_strata_informative": res["n_strata_informative"],
             "effect_max_abs_frac_diff": res["effect_max_abs_frac_diff"],
+            "test_name_pooled": res["test_name_pooled"],
+            "p_value_pooled": res["p_value_pooled"],
+            "effect_max_abs_frac_diff_pooled": res["effect_max_abs_frac_diff_pooled"],
             "per_transcript_json": json.dumps(res["per_transcript"], separators=(",", ":")),
         })
 
