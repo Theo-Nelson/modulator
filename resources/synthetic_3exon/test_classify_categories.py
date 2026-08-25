@@ -77,6 +77,16 @@ CASES = [
       2: ([(1000, 1200), (2000, 2300), (2600, 3000)], 3000, 100)},
      2150, 1, 2, "SHARED_LOCAL", "RETAINED_INTRON"),
 
+    # BLOCKER-1 guard: both forms are TERMINAL at the base exon with a different acceptor AND donor and
+    # different poly(A) sites -- a mutually-exclusive ALTERNATIVE LAST EXON. There is NO intron and the
+    # short (lo) form does NOT splice on past the long form's poly(A) site, so this is NOT intronic
+    # polyadenylation. Pre-fix it leaked to IPA_EXTENSION (the classifier never checked "splices on");
+    # it must be ALT_EXON. This is the geometry test_classify_categories was structurally blind to.
+    ("SHARED_LOCAL_ALT_LAST_EXON_NOT_IPA",
+     {1: ([(1000, 1200), (1900, 2600)], 2600, 100),    # hi: terminal exon 1900-2600, poly(A) 2600
+      2: ([(1000, 1200), (2000, 2300)], 2300, 100)},   # lo: DIFFERENT acceptor 2000, terminal, poly(A) 2300
+     2100, 1, 2, "SHARED_LOCAL", "ALT_EXON"),
+
     ("SHARED_LOCAL_ALT_DONOR_INTERNAL", # base in an INTERNAL exon whose donor sits near (not at) the
      {1: ([(1000, 1200), (2000, 2480), (2490, 2500)], 2500, 100),   # tes; a real terminal exon follows,
       2: ([(1000, 1200), (2000, 2400), (2490, 2700)], 2700, 100)},  # so this is ALT_DONOR, not IPA

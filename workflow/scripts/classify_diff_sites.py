@@ -527,8 +527,18 @@ def classify_tree(gene, pos, hiZN, loZN, iso, *, tes_tol, ejc_nt):
             # merely happens to sit within tes_tol of a short downstream terminal exon from being
             # mislabeled IPA (that is really an ALT_DONOR).
             not_coterm = long_tes is not None and (short_tes is None or abs(long_tes - short_tes) > tes_tol)
+            # BLOCKER-1: intronic polyadenylation is only meaningful if the OTHER (shorter) form SPLICES
+            # ONWARD past the longer form's poly(A) site -- that is the whole content of the "intronic"
+            # claim (the longer form terminates inside an intron of the shorter form). Without this
+            # conjunct, an alternative/extended LAST EXON (both forms terminal, one simply shorter; no
+            # intron anywhere) was mislabeled IPA_EXTENSION -- 57.7% of the class on real chr21. The
+            # shorter form splices on iff it has exonic sequence 3' of the longer form's terminal donor.
+            if strand == '+':
+                short_splices_on = any(e[1] > long_don + tes_tol for e in short_exons)
+            else:
+                short_splices_on = any(e[0] < long_don - tes_tol for e in short_exons)
             if (don_diff and long_is_last and long_tes is not None
-                    and abs(long_don - long_tes) <= tes_tol and not_coterm):
+                    and abs(long_don - long_tes) <= tes_tol and not_coterm and short_splices_on):
                 info['delta_nt'] = abs(don_hi - don_lo)
                 d = 'EXTENDS_TO_PA_HIGHER' if hi_longer else 'EXTENDS_TO_PA_LOWER'
                 return 'SHARED_LOCAL', 'IPA_EXTENSION', d, info
