@@ -177,7 +177,17 @@ def beta_binomial_diff(sites, prior_weight=20.0, min_group_samples=2, ref_df=REF
         if (gidx == 0).sum() < min_group_samples or (gidx == 1).sum() < min_group_samples:
             continue
         theta_s, _ = _fit_theta(k, n, gidx, 2)
-        prepared.append((key, k, n, gidx, theta_s))
+        # Flag sites that carry NO usable dispersion information: a degenerate pooled mean (all reads
+        # modified or all unmodified -- e.g. the all-zero sites that flood the universe when the site
+        # filter is disabled) leaves theta unidentified, so the optimiser pins it at a bound. Such sites
+        # must NOT enter the across-site prior median, or they collapse the prior and destroy a genuine
+        # effect (prior-collapse finding).
+        _mu_hat = float(k.sum() / n.sum()) if n.sum() > 0 else 0.0
+        _lt = float(np.log(theta_s))
+        _at_bound = (abs(_lt - _LOG_THETA_LO) < 1e-2) or (abs(_lt - _LOG_THETA_HI) < 1e-2)
+        _degenerate = (_mu_hat <= 1e-9) or (_mu_hat >= 1.0 - 1e-9)
+        informative = not (_at_bound or _degenerate)
+        prepared.append((key, k, n, gidx, theta_s, informative))
     if not prepared:
         return []
 
@@ -192,15 +202,32 @@ def beta_binomial_diff(sites, prior_weight=20.0, min_group_samples=2, ref_df=REF
     # site_weight="auto" sets w = max(1, N_site - 2) (the residual df for dispersion at that site), so
     # shrinkage automatically fades as the cohort grows; a numeric value forces a fixed w (w=1
     # reproduces the legacy behaviour). Near-binomial null sites are unaffected either way.
-    log_thetas = np.array([np.log(p[4]) for p in prepared])
-    log_prior = float(np.median(log_thetas))
+    #
+    # KNOWN LIMITATION (finding S1): because the prior is the across-site median dispersion of the batch
+    # tested TOGETHER, a site's shrunk theta -- and therefore its p-value -- depends on its batch-mates.
+    # At the pipeline's design point (n=3 vs 3) w = max(1, N-2) = 4 against prior_weight=20, so a site
+    # keeps only ~17% of its own dispersion and "auto" is nearly inert -- fine for near-binomial
+    # replicates (the calibrated, validated case) but it means a genuinely overdispersed site in an
+    # otherwise near-binomial batch is under-shrunk-corrected and can inflate type-I error. This is the
+    # standard cost of empirical-Bayes dispersion shrinkage (edgeR/DSS share it); it is documented rather
+    # than re-engineered so the calibration in the REF_DF note stays valid. Lower prior_weight (or a
+    # larger site_weight) to trust each site's own dispersion more when your replicates are heterogeneous.
+    # Prior trend from INFORMATIVE sites only (degenerate/bound-pinned sites excluded above). If too few
+    # remain to estimate a trend, do not shrink at all -- fall back to each site's own theta, which is
+    # strictly safer than shrinking toward a prior built from junk.
+    _info_lt = np.array([np.log(p[4]) for p in prepared if p[5]])
+    _shrink = len(_info_lt) >= 10
+    log_prior = float(np.median(_info_lt)) if _shrink else 0.0
     auto_w = (site_weight == "auto")
     fixed_w = None if auto_w else max(0.0, float(site_weight))
     out = []
-    for key, k, n, gidx, theta_s in prepared:
-        w = max(1.0, float(len(k) - 2)) if auto_w else fixed_w
-        denom = w + prior_weight
-        log_shrunk = (w * np.log(theta_s) + prior_weight * log_prior) / denom if denom > 0 else np.log(theta_s)
+    for key, k, n, gidx, theta_s, _informative in prepared:
+        if not _shrink:
+            log_shrunk = np.log(theta_s)
+        else:
+            w = max(1.0, float(len(k) - 2)) if auto_w else fixed_w
+            denom = w + prior_weight
+            log_shrunk = (w * np.log(theta_s) + prior_weight * log_prior) / denom if denom > 0 else np.log(theta_s)
         theta = float(np.exp(log_shrunk))
         mu0, mu1, stat = _site_lrt(k, n, gidx, theta)
         out.append({

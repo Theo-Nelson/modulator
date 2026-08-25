@@ -709,8 +709,13 @@ class ModulatorPipeline:
         """Within the genotype stage, reuse an existing non-empty output on --resume so a
         re-run after a later-step failure doesn't redo the expensive per-(sample x chrom)
         BAM scans. Applied only to the deterministic SNP-side tables, so reuse is exact;
-        everything from candidate_mod_sites onward always re-runs."""
-        if self.resume and self._nonempty(out_path):
+        everything from candidate_mod_sites onward always re-runs.
+
+        Reuse is gated on _geno_reuse_ok (set at stage start): it is only safe when the resolved config
+        is UNCHANGED since the outputs were written -- otherwise a changed genotype parameter would
+        silently reuse stale SNP tables (finding B/C/E, the substep-level form of the resume config-
+        blindness fixed at stage level in finding P)."""
+        if getattr(self, "_geno_reuse_ok", False) and self._nonempty(out_path):
             if self.verbose:
                 print(f"[modulator]   genotype substep {label}: reusing existing output, skipping", flush=True)
             return True
@@ -1492,6 +1497,23 @@ class ModulatorPipeline:
         if not as_bool(geno.get("enable", False), False):
             return
         self._require_reference_fa()
+        # Gate substep reuse (_geno_reuse) on an unchanged config: record the genotype config signature
+        # at stage start and allow reuse only when --resume AND the recorded signature matches. A prior
+        # run that failed mid-genotype leaves this in-progress marker (unlike the stage .done marker,
+        # which is written only on success), so reuse still works after a late failure -- but a changed
+        # genotype parameter invalidates it, so stale SNP tables are never reused (finding B/C/E).
+        _gm = self._checkpoint_dir / "genotype.inprogress"
+        _cur_sig = self._config_sig()
+        try:
+            _prev_sig = _gm.read_text().strip() if _gm.exists() else ""
+        except OSError:
+            _prev_sig = ""
+        self._geno_reuse_ok = self.resume and (_prev_sig == _cur_sig)
+        try:
+            self._checkpoint_dir.mkdir(parents=True, exist_ok=True)
+            _gm.write_text(_cur_sig + "\n")
+        except Exception:
+            pass
         # The genotype scripts now shard BAM scans per (sample x chromosome), so
         # parallelism is no longer capped at the sample count -- size it to the CPU
         # budget instead.
