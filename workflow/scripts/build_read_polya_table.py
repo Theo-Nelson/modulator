@@ -13,6 +13,7 @@ build_read_assignment_table.py (per-BAM x chrom sharding, run_process_jobs, atom
 """
 import argparse
 import os
+import re
 import sys
 
 import pandas as pd
@@ -122,7 +123,10 @@ def main():
     # the BAM but absent from classification_summary merges to NaN). Without this, those reads carry a
     # NaN metagene_index and are silently dropped from the between-fragmentform tail test, since its
     # groupby("metagene_index") drops NaN keys -- a whole gene's fragmentforms can vanish with no note.
-    zt_gene = normalize_string_series(df.get("ZT", pd.Series(dtype=str))).str.split(".").str[0]
+    # Recover the gene name from the ZT id (<gene>.G<n>.T<n>) by stripping the trailing ".G<n>.T<n>",
+    # NOT split(".")[0] -- the latter truncates a dotted GENCODE gene name (CTC-338M12.4 -> CTC-338M12).
+    zt_gene = normalize_string_series(df.get("ZT", pd.Series(dtype=str))).str.replace(
+        r"\.G\d+\.T\d+$", "", regex=True)
     if "gene_name" not in df.columns:
         df["gene_name"] = zt_gene
     else:

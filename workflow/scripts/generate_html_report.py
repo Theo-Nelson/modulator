@@ -1710,10 +1710,15 @@ def build_polya_section(frag_df, diffs_df, mod_df, top_n, diff_figs_dir="", mod_
             f"<li><b>{len(frag_df):,}</b> fragmentforms with a tail-length distribution; "
             f"overall median <b>{_med_s}</b></li>"
             f"<li><b>{n_sig_diff:,}</b> genes with differential tail length between their fragmentforms (FDR&lt;0.05)</li>"
-            f"<li><b>{n_sig_mod:,}</b> modification sites where tail length differs by modification state "
-            f"WITHIN (sample, fragmentform) strata (sample-stratified van Elteren test, FDR&lt;0.05; "
-            f"confounded sites excluded)</li>"
-            "</ul>"
+            # describe the method ACTUALLY used: only claim the stratified/confound-excluded test when
+            # the current-schema columns are present (an old-schema TSV was tested pooled).
+            + (f"<li><b>{n_sig_mod:,}</b> modification sites where tail length differs by modification "
+               f"state WITHIN (sample, fragmentform) strata (sample-stratified van Elteren test, "
+               f"FDR&lt;0.05; confounded sites excluded)</li>"
+               if (mod_df is not None and "tailmod_confounded" in getattr(mod_df, "columns", []))
+               else f"<li><b>{n_sig_mod:,}</b> modification sites where tail length differs by "
+                    f"modification state (FDR&lt;0.05)</li>")
+            + "</ul>"
         )
     if diffs_df is not None and not diffs_df.empty:
         cols = [c for c in ["gene_name", "n_fragmentforms_tested", "n_reads", "effect_median_range_nt",
