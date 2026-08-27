@@ -229,6 +229,13 @@ def main():
                 _fh.write(f"n_reads_skipped\t{n_skipped}\nmax_sites_per_read\t{args.max_sites_per_read}\n{msg}\n")
         except OSError:
             pass
+    else:
+        # No reads skipped this run -> remove any STALE sidecar from a previous run, or a resumed run
+        # would keep reporting a skip count that no longer applies to the current output.
+        try:
+            os.remove(args.out_tsv + ".skipped_dense_reads.txt")
+        except OSError:
+            pass
 
     out = pd.DataFrame(rows)
     if not out.empty:

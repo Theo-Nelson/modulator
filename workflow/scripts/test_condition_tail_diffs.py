@@ -116,9 +116,12 @@ def main():
             "delta_nt": round(r["delta"], 2), "stat": round(r["stat"], 4), "p_value": r["p_value"],
             "per_sample_json": json.dumps({s: [round(float(m[s]), 1), int(n[s])] for s in sorted(m)},
                                           separators=(",", ":")),
+            # sort the (set-valued) ref_s/test_s so the JSON key order is deterministic across runs --
+            # otherwise string-hash randomization (PYTHONHASHSEED) reorders these dicts and the output
+            # TSV is not byte-reproducible.
             "per_replicate_json": json.dumps(
-                {"reference": {s: round(float(m[s]), 1) for s in ref_s if s in m},
-                 "test": {s: round(float(m[s]), 1) for s in test_s if s in m}},
+                {"reference": {s: round(float(m[s]), 1) for s in sorted(ref_s) if s in m},
+                 "test": {s: round(float(m[s]), 1) for s in sorted(test_s) if s in m}},
                 separators=(",", ":")),
         })
     out = pd.DataFrame(rows)

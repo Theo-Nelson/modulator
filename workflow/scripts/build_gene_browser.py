@@ -20,8 +20,9 @@ import pandas as pd
 
 # Dorado RNA004 modification codes -> human names (kept in sync with generate_html_report.MOD_DISPLAY).
 MOD_DISPLAY = {
-    "a": "m6A", "m": "5mC", "h": "5hmC", "C": "4mC",
-    "17596": "inosine (A-to-I)", "17802": "pseudouridine (Ψ)",
+    # SAM MM-tag codes. "C" is the AMBIGUOUS/unspecified C modification, NOT 4mC -- 4mC is ChEBI 21839.
+    "a": "m6A", "m": "5mC", "h": "5hmC", "f": "5fC", "c": "5caC", "C": "modC (unspecified)",
+    "21839": "4mC", "17596": "inosine (A-to-I)", "17802": "pseudouridine (Ψ)",
     "69426": "2'-O-methyl A (Am)", "19228": "2'-O-methyl C (Cm)",
     "19229": "2'-O-methyl G (Gm)", "19227": "2'-O-methyl U (Um)",
 }

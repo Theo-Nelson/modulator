@@ -41,8 +41,9 @@ def van_elteren_stratified(strata):
     for mt, ut in strata:
         n1, n2 = len(mt), len(ut)
         N = n1 + n2
-        if n1 < 1 or n2 < 1 or N < 2:
-            continue
+        if n1 < 2 or n2 < 2:
+            continue  # a 1-vs-1 (or 1-vs-n) stratum contributes a near-deterministic rank with tiny
+                      # variance -- statistical noise, not signal; require >=2 reads in EACH state
         allv = np.concatenate([np.asarray(mt, float), np.asarray(ut, float)])
         ranks = _rankdata(allv)
         W = float(ranks[:n1].sum())            # rank sum of the MODIFIED group
@@ -233,7 +234,7 @@ def _site_rows_for_chrom(mod_path, tail_map, args):
                     continue  # unassigned fragmentform
                 smt = sg.loc[sg["target_modified"] == 1, "tail_len"].values
                 sut = sg.loc[sg["target_modified"] == 0, "tail_len"].values
-                if smt.size and sut.size:
+                if smt.size >= 2 and sut.size >= 2:   # match van_elteren_stratified's >=2/state guard
                     strata.append((smt, sut))
         z_strat, p, n_strata = van_elteren_stratified(strata)
         if not np.isfinite(p):
@@ -302,8 +303,11 @@ def _site_rows_for_chrom(mod_path, tail_map, args):
                                          if d["delta_nt"] != 0 and (d["delta_nt"] > 0) == (_eff > 0)
                                          and abs(d["delta_nt"]) >= abs(_eff) / 3.0)
                                      if _eff != 0 else 0)
-        # confounded when there ARE comparable forms but fewer than half of them are concordant
-        row["tailmod_confounded"] = bool(_comp and row["n_forms_concordant"] < len(_comp))
+        # confounded when there ARE comparable forms but fewer than half of them are concordant (a
+        # STRICT MAJORITY discordant). Requiring unanimity (concordant < len) over-flagged: a single
+        # dissenting form among several concordant ones is normal biological heterogeneity, not a
+        # confound, yet it wrongly suppressed the site from the headline count.
+        row["tailmod_confounded"] = bool(_comp and row["n_forms_concordant"] < len(_comp) / 2.0)
         rows.append(row)
         if collect:
             cands.append((float(p), row, mod_t, unmod_t, per_ff))

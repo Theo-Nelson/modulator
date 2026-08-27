@@ -74,6 +74,37 @@ def max_abs_distribution_shift(table: np.ndarray) -> float:
     return round(max_diff, 6)
 
 
+def stratified_max_distribution_shift(strata) -> float:
+    """Sample-stratified analogue of max_abs_distribution_shift for r x c tables: for each row pair
+    (i, j) and each column, the coverage-weighted mean over strata of (row_i_frac - row_j_frac); the
+    reported effect is the max |.| over columns and row pairs. Weights w_k = R_i R_j / N_k (matching
+    mh_stratified_effect). This is the effect size consistent with cmh_stratified_test -- within-sample
+    fractions, not pooled -- so a stratified CMH p is never paired with a confounded pooled effect."""
+    strata = [np.asarray(T, dtype=float) for T in strata if np.asarray(T).size]
+    if not strata:
+        return 0.0
+    r, c = strata[0].shape
+    if r < 2 or c < 1:
+        return 0.0
+    best = 0.0
+    for i in range(r):
+        for j in range(i + 1, r):
+            num = np.zeros(c)
+            den = 0.0
+            for T in strata:
+                if T.shape != (r, c):
+                    continue
+                Ri, Rj, N = T[i].sum(), T[j].sum(), T.sum()
+                if Ri <= 0 or Rj <= 0 or N <= 0:
+                    continue
+                w = Ri * Rj / N
+                num += w * (T[i] / Ri - T[j] / Rj)
+                den += w
+            if den > 0:
+                best = max(best, float(np.max(np.abs(num / den))))
+    return round(best, 6)
+
+
 def binary_rate_delta(table_2x2: np.ndarray) -> float:
     table = np.asarray(table_2x2, dtype=float)
     if table.shape != (2, 2):

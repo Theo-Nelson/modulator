@@ -99,7 +99,6 @@ def get_len(aln: pysam.AlignedSegment) -> int:
 # ------------------------ considered filter breakdown ------------------------
 
 FAIL_UNMAPPED = "FAIL_unmapped"
-FAIL_SECONDARY_SUPP = "FAIL_secondary_or_supplementary"
 FAIL_LOW_MAPQ = "FAIL_low_mapq"
 FAIL_LOW_INTRONS = "FAIL_low_introns"
 FAIL_LOW_SOFTCLIP3P = "FAIL_low_softclip3p"
@@ -119,8 +118,9 @@ def considered_fail_reason(
     """
     if aln.is_unmapped:
         return FAIL_UNMAPPED
-    if primary_only and (aln.is_secondary or aln.is_supplementary):
-        return FAIL_SECONDARY_SUPP
+    # NB: secondary/supplementary records are dropped by the caller BEFORE this function (the read-level
+    # G2 fix), so they never reach here -- there is no FAIL_secondary_or_supplementary bucket. primary_only
+    # is retained for signature/back-compat but is effectively always satisfied.
     if aln.mapping_quality < min_mapq:
         return FAIL_LOW_MAPQ
     if intron_count(aln) < min_introns_read:
@@ -148,7 +148,6 @@ def safe_fetch_all(fh: pysam.AlignmentFile):
 
 FAIL_KEYS = [
     FAIL_UNMAPPED,
-    FAIL_SECONDARY_SUPP,
     FAIL_LOW_MAPQ,
     FAIL_LOW_INTRONS,
     FAIL_LOW_SOFTCLIP3P,
@@ -259,7 +258,6 @@ def _stats_for_one_sample(task):
 
         # Failure breakdown (original BAM)
         failed_unmapped=fail_counts[FAIL_UNMAPPED],
-        failed_secondary_or_supp=fail_counts[FAIL_SECONDARY_SUPP],
         failed_low_mapq=fail_counts[FAIL_LOW_MAPQ],
         failed_low_introns=fail_counts[FAIL_LOW_INTRONS],
         failed_low_softclip3p=fail_counts[FAIL_LOW_SOFTCLIP3P],

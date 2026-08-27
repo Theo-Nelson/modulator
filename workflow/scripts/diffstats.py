@@ -182,9 +182,17 @@ def beta_binomial_diff(sites, prior_weight=20.0, min_group_samples=2, ref_df=REF
         # filter is disabled) leaves theta unidentified, so the optimiser pins it at a bound. Such sites
         # must NOT enter the across-site prior median, or they collapse the prior and destroy a genuine
         # effect (prior-collapse finding).
+        #
+        # MAJOR-4: exclude only the LOWER bound (theta=1e-2, extreme overdispersion -- the pathological
+        # pin an unidentified/degenerate site runs to). A site at the UPPER bound (theta=1e6) is
+        # genuinely NEAR-BINOMIAL (under-dispersed): that is real, legitimate low-dispersion evidence and
+        # MUST stay in the prior median. Dropping it (the old both-bounds test) biased the prior toward
+        # overdispersion, so every other site was over-shrunk to a too-dispersed prior and real effects
+        # were washed out -- and on a near-binomial batch it emptied the informative set below the
+        # shrink threshold, disabling shrinkage entirely.
         _mu_hat = float(k.sum() / n.sum()) if n.sum() > 0 else 0.0
         _lt = float(np.log(theta_s))
-        _at_bound = (abs(_lt - _LOG_THETA_LO) < 1e-2) or (abs(_lt - _LOG_THETA_HI) < 1e-2)
+        _at_bound = abs(_lt - _LOG_THETA_LO) < 1e-2
         _degenerate = (_mu_hat <= 1e-9) or (_mu_hat >= 1.0 - 1e-9)
         informative = not (_at_bound or _degenerate)
         prepared.append((key, k, n, gidx, theta_s, informative))
@@ -216,18 +224,27 @@ def beta_binomial_diff(sites, prior_weight=20.0, min_group_samples=2, ref_df=REF
     # remain to estimate a trend, do not shrink at all -- fall back to each site's own theta, which is
     # strictly safer than shrinking toward a prior built from junk.
     _info_lt = np.array([np.log(p[4]) for p in prepared if p[5]])
-    _shrink = len(_info_lt) >= 10
+    _n_info = len(_info_lt)
+    # MAJOR-4: the old `>= 10` was a HARD CLIFF -- 9 informative sites shrank NOTHING, 10 shrank FULLY,
+    # so one borderline site flipped every p-value in the batch. Replace with a floor + smooth ramp: a
+    # median needs a few sites to mean anything (floor = 3), and the prior earns full weight only once it
+    # rests on enough sites. `prior_conf` ramps 0->1 linearly across [3, 10] informative sites and scales
+    # the prior's pseudo-count, so shrinkage fades in gradually instead of switching on.
+    _PRIOR_FLOOR, _PRIOR_FULL = 3, 10
+    _shrink = _n_info >= _PRIOR_FLOOR
     log_prior = float(np.median(_info_lt)) if _shrink else 0.0
+    prior_conf = min(1.0, (_n_info - _PRIOR_FLOOR) / float(_PRIOR_FULL - _PRIOR_FLOOR)) if _shrink else 0.0
+    eff_prior_weight = prior_weight * prior_conf
     auto_w = (site_weight == "auto")
     fixed_w = None if auto_w else max(0.0, float(site_weight))
     out = []
     for key, k, n, gidx, theta_s, _informative in prepared:
-        if not _shrink:
+        if not _shrink or eff_prior_weight <= 0:
             log_shrunk = np.log(theta_s)
         else:
             w = max(1.0, float(len(k) - 2)) if auto_w else fixed_w
-            denom = w + prior_weight
-            log_shrunk = (w * np.log(theta_s) + prior_weight * log_prior) / denom if denom > 0 else np.log(theta_s)
+            denom = w + eff_prior_weight
+            log_shrunk = (w * np.log(theta_s) + eff_prior_weight * log_prior) / denom if denom > 0 else np.log(theta_s)
         theta = float(np.exp(log_shrunk))
         mu0, mu1, stat = _site_lrt(k, n, gidx, theta)
         out.append({

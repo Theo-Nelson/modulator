@@ -19,8 +19,10 @@ import pandas as pd
 # Dorado RNA004 v5.2.0 set: m6A, inosine, pseudoU, 5mC, and the 2'-O-methyls (Nm).
 # Unknown codes are shown verbatim.
 MOD_DISPLAY = {
-    "a": "m6A", "m": "5mC", "h": "5hmC", "C": "4mC",
-    "17596": "inosine", "17802": "pseudoU",
+    # SAM MM-tag codes. "C" is the AMBIGUOUS/unspecified C modification, NOT 4mC -- 4mC is ChEBI 21839.
+    # (single-letter C codes: m=5mC, h=5hmC, f=5fC, c=5caC, C=any/unspecified C mod.)
+    "a": "m6A", "m": "5mC", "h": "5hmC", "f": "5fC", "c": "5caC", "C": "modC",
+    "21839": "4mC", "17596": "inosine", "17802": "pseudoU",
     "69426": "Am", "19227": "Um", "19228": "Cm", "19229": "Gm",
 }
 
@@ -101,7 +103,6 @@ COLUMN_DEFINITIONS = {
     "total_unmapped": "Reads with no mapped alignment.",
     "considered_reads": "Reads that passed every primary QC filter (mapped, primary, MAPQ, intron count, 3' soft-clip) and are eligible for fragmentform assignment.",
     "failed_unmapped": "Number of reads filtered because they were unmapped.",
-    "failed_secondary_or_supp": "Number of reads filtered because they were secondary or supplementary alignments.",
     "failed_low_mapq": "Number of reads filtered because their mapping quality was below the minimum (see input parameter min_mapq).",
     "failed_low_introns": "Number of reads filtered because they had too few introns (see input parameter assembler.min_introns_read).",
     "failed_low_softclip3p": "Number of reads filtered because their 3' soft-clip (candidate poly(A)) was too short (see input parameter assembler.require_softclip3p).",
@@ -343,6 +344,14 @@ def parse_args():
     ap.add_argument("--max-diff-figs", type=int, default=6)
     ap.add_argument("--top-transcripts", type=int, default=20)
     ap.add_argument("--top-genes", type=int, default=20)
+    # The differential-site section's displayed-table filter MUST match the thresholds classify_diffs
+    # actually ran with (MAJOR-6). Hardcoding 0.05/0.10 in the report showed a table filtered on a
+    # different rule than the run used whenever classify_diffs.fdr/min_effect were overridden, and the
+    # caption's "tunable via classify_diffs.*" claim was then false.
+    ap.add_argument("--classify-fdr", type=float, default=0.05,
+                    help="classify_diffs.fdr the run used -- the FDR the displayed diff table is filtered at.")
+    ap.add_argument("--classify-min-effect", type=float, default=0.10,
+                    help="classify_diffs.min_effect the run used -- the |effect| the displayed diff table is filtered at.")
     return ap.parse_args()
 
 
@@ -2210,7 +2219,8 @@ def main():
     # R3: the section claims "keeping sites that clear the FDR + minimum effect", but the raw
     # diff_results table (every tested site, incl. non-significant / tiny-effect rows) was shown.
     # Apply the stated filter to the displayed table so it matches the heading.
-    _DIFF_FDR, _DIFF_EFF = 0.05, 0.10
+    _DIFF_FDR, _DIFF_EFF = float(args.classify_fdr), float(args.classify_min_effect)
+    _eff_pct = f"{_DIFF_EFF * 100:g}%"
     diff_kept = 0
     if not diff_df.empty:
         diff_cols = [
@@ -2228,7 +2238,7 @@ def main():
         diff_html = (df_to_html(
             _dv[diff_cols].sort_values(["p_adj_bh", "effect_max_abs_frac_diff"], ascending=[True, False]),
             max_rows=20,
-        ) if diff_kept else "<p class='muted'>No sites cleared FDR&lt;0.05 with |Δ|≥10%.</p>")
+        ) if diff_kept else f"<p class='muted'>No sites cleared FDR&lt;{_DIFF_FDR:g} with |Δ|≥{_eff_pct}.</p>")
 
     diff_fig_html = ""
     if args.diff_figs_dir and os.path.isdir(args.diff_figs_dir):
@@ -2244,7 +2254,7 @@ def main():
     read_stats_counts_cols = [
         c for c in [
             "sample", "total_reads_bam", "total_mapped", "total_unmapped", "considered_reads",
-            "failed_unmapped", "failed_secondary_or_supp", "failed_low_mapq", "failed_low_introns",
+            "failed_unmapped", "failed_low_mapq", "failed_low_introns",
             "failed_low_softclip3p", "zt_tagged_exists", "zt_total_records", "zt_unmapped_records",
             "zt_mapped_records", "assigned_reads", "zt_mapped_unassigned_reads"
         ] if c in read_stats_df.columns
@@ -2423,8 +2433,8 @@ def main():
         diff_html + diff_fig_html,
         intro="Positions where the modification stoichiometry differs between the fragmentforms of a gene "
               "(across all detected mod codes; sample-stratified Cochran-Mantel-Haenszel with "
-              "Benjamini-Hochberg FDR). The table shows sites at <b>FDR&lt;0.05 and |Δ|≥10%</b> only. The "
-              "effect threshold (default 10%) and the FDR are tunable — see input parameters "
+              f"Benjamini-Hochberg FDR). The table shows sites at <b>FDR&lt;{_DIFF_FDR:g} and |Δ|≥{_eff_pct}</b> "
+              "only — the exact thresholds this run used. Both are tunable — see input parameters "
               "classify_diffs.min_effect and classify_diffs.fdr.",
         definitions=definitions_html(column_definitions(diff_cols), summary="Result-column definitions") if diff_cols else "",
     )

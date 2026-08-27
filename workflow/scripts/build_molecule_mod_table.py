@@ -76,13 +76,21 @@ def parse_mm_groups(read):
         m = _MM_ENTRY_RE.match(entry)
         if not m:
             continue
-        base, _strand, mods, flag = m.groups()
-        implicit = (flag != "?")   # '.' or absent -> implicit; '?' -> explicit (unlisted = no call)
+        base, strand, mods, flag = m.groups()
+        # The MM strand marker is NO LONGER discarded: '+' means the calls are relative to the read as
+        # basecalled (the dRNA norm), '-' means they refer to the complementary strand (rare, duplex).
+        # Implicit-canonical synthesis walks the read's OWN bases, so it is only valid for '+' groups;
+        # synthesizing for a '-' group would emit canonical calls at the wrong base. A '-' group's LISTED
+        # calls still arrive via pysam's read.modified_bases (which carries strand) and are unaffected.
+        implicit = (flag != "?") and (strand == "+")   # '.'/absent -> implicit; '?' -> explicit; '-' -> never implicit
         base = base.upper()
         if entry[m.end():].lstrip().startswith(","):   # a delta list follows the header -> listed positions
             has_listed = True
         for code in re.findall(r'[0-9]+|[a-z]', mods):   # 'mh' -> m,h ; '17802' -> 17802
-            groups[(base, code)] = implicit
+            key = (base, code)
+            # OR-merge so a later '-'/explicit group cannot clobber a '+' implicit True for the same
+            # (base, code) (and vice-versa the two-base case C+m./A+m? keeps its own per-key flag).
+            groups[key] = groups.get(key, False) or implicit
     return groups, has_listed
 
 

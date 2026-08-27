@@ -18,6 +18,7 @@ from pyroaring import BitMap
 
 from genotype_utils import (benjamini_hochberg, cmh_stratified_test, context_key_from_row,
                             drop_unassigned_reads, max_abs_distribution_shift, mh_stratified_effect,
+                            stratified_max_distribution_shift,
                             run_contingency_test, shard_tsv_by_chrom, tsv_header)
 
 TX_COLS = [
@@ -84,8 +85,8 @@ def _hap_for_one_chrom(hap_path, mod_path, args):
         # PRIMARY: stratify the haplotype x transcript table by SAMPLE, aligning to the same
         # keep_haps x keep_tx grid in each stratum, then generalized CMH (BLOCKER: pooling reads across
         # replicates lets per-sample composition imbalance fake a haplotype-transcript association).
+        strata = []
         if "sample" in sub.columns:
-            strata = []
             for _samp, _sg in sub.groupby("sample", sort=False):
                 st = (_sg.groupby(["haplotype", "ZT"]).size()
                           .unstack(fill_value=0).reindex(index=keep_haps, columns=keep_tx, fill_value=0))
@@ -94,13 +95,16 @@ def _hap_for_one_chrom(hap_path, mod_path, args):
         else:
             test_name, stat_name, stat_value, p_value, n_strata = (
                 p_test_name, p_stat_name, p_stat_value, p_pooled, 0)
+        # effect consistent with the PRIMARY test: stratified when the CMH ran, else pooled (MINOR --
+        # a stratified p was previously reported next to a pooled effect).
+        effect_tx = stratified_max_distribution_shift(strata) if strata else max_abs_distribution_shift(tt)
         tx_rows.append({
             "block_id": block_id, "context_key": sub.iloc[0].get("context_key", ""),
             "chrom": sub.iloc[0].get("chrom", ""), "n_reads": int(tt.sum()),
             "n_haplotypes_tested": int(tt.shape[0]), "n_transcripts_tested": int(tt.shape[1]),
             "test_name": test_name, "stat_name": stat_name, "stat_value": stat_value, "p_value": p_value,
             "n_strata_informative": int(n_strata),
-            "effect_max_abs_tx_frac_diff": max_abs_distribution_shift(tt),
+            "effect_max_abs_tx_frac_diff": effect_tx,
             "test_name_pooled": p_test_name, "p_value_pooled": p_pooled,
             "per_table_json": json.dumps({"haplotypes": list(table.index), "transcripts": list(table.columns),
                                           "counts": table.values.tolist()}, separators=(",", ":")),

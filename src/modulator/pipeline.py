@@ -1497,23 +1497,25 @@ class ModulatorPipeline:
         if not as_bool(geno.get("enable", False), False):
             return
         self._require_reference_fa()
-        # Gate substep reuse (_geno_reuse) on an unchanged config: record the genotype config signature
-        # at stage start and allow reuse only when --resume AND the recorded signature matches. A prior
-        # run that failed mid-genotype leaves this in-progress marker (unlike the stage .done marker,
-        # which is written only on success), so reuse still works after a late failure -- but a changed
-        # genotype parameter invalidates it, so stale SNP tables are never reused (finding B/C/E).
-        _gm = self._checkpoint_dir / "genotype.inprogress"
+        # Gate substep reuse (_geno_reuse) on an unchanged config: the marker records the config signature
+        # under which the on-disk genotype outputs were produced, and reuse is allowed only when --resume
+        # AND the recorded signature matches (finding B/C/E: a changed genotype parameter must never reuse
+        # stale SNP tables).
+        #
+        # MAJOR-3: the marker is written on SUCCESSFUL STAGE COMPLETION, NOT at stage start. Writing it at
+        # start broke its own invariant: after a config change A->B whose run crashed mid-genotype, the
+        # marker already said B while later substep outputs on disk were still A, so the next `--resume B`
+        # saw prev==cur, set reuse_ok=True, and reused the stale A tables -- exactly the bug the signature
+        # exists to prevent. Written only at the end, the marker == C implies every genotype output on
+        # disk was produced under C: a mid-run crash leaves it at the LAST COMPLETED config, so a changed
+        # config no longer matches and everything is safely recomputed.
+        _gm = self._checkpoint_dir / "genotype.config_sig"
         _cur_sig = self._config_sig()
         try:
             _prev_sig = _gm.read_text().strip() if _gm.exists() else ""
         except OSError:
             _prev_sig = ""
-        self._geno_reuse_ok = self.resume and (_prev_sig == _cur_sig)
-        try:
-            self._checkpoint_dir.mkdir(parents=True, exist_ok=True)
-            _gm.write_text(_cur_sig + "\n")
-        except Exception:
-            pass
+        self._geno_reuse_ok = self.resume and bool(_prev_sig) and (_prev_sig == _cur_sig)
         # The genotype scripts now shard BAM scans per (sample x chromosome), so
         # parallelism is no longer capped at the sample count -- size it to the CPU
         # budget instead.
@@ -1851,6 +1853,15 @@ class ModulatorPipeline:
                 args += ["--annotate", *[str(p) for p in annotate]]
             self.run_python_script("find_snp_at_mod_base.py", args, label="find_snp_at_mod_base")
 
+        # MAJOR-3: record the config signature only now that every genotype substep has completed under
+        # it. From here the marker == _cur_sig guarantees all on-disk genotype outputs are this config's,
+        # so a later `--resume` with the same config may safely reuse them and a changed config will not.
+        try:
+            self._checkpoint_dir.mkdir(parents=True, exist_ok=True)
+            _gm.write_text(_cur_sig + "\n")
+        except Exception:
+            pass
+
     def stage_apa_motifs(self) -> None:
         """Polyadenylation-signal check for every APA site (each fragmentform's TES): canonical
         AATAAA / variant hexamer and its distance, downstream U/GU-richness, and an internal-priming
@@ -2135,6 +2146,10 @@ class ModulatorPipeline:
             "--taillength-mod-figs", str(self.paths.polya_mod_figs) if self.paths.polya_mod_figs.is_dir() else "",
             "--snp-figs-dir", str(self.paths.genotype / f"{self.prefix}__snp_figs"),
             "--max-snp-figs", str(int(report_cfg.get("max_snp_figs", 12))),
+            # MAJOR-6: pass the classify_diffs thresholds this run used so the differential-site table's
+            # displayed filter (and its caption) match the run, instead of a hardcoded 0.05/0.10.
+            "--classify-fdr", str(float(self.config.get("classify_diffs", {}).get("fdr", 0.05))),
+            "--classify-min-effect", str(float(self.config.get("classify_diffs", {}).get("min_effect", 0.10))),
         ]
         self.run_python_script("generate_html_report.py", args, label="generate_html_report")
 

@@ -4,11 +4,10 @@ import argparse
 import json
 import os
 
-import numpy as np
 import pandas as pd
 
 from genotype_utils import (benjamini_hochberg, cmh_stratified_test, max_abs_distribution_shift,
-                            run_contingency_test, tsv_header)
+                            run_contingency_test, stratified_max_distribution_shift, tsv_header)
 
 # Only these columns are used (grouping: sample/snp_id/allele_class/ZT; per-SNP metadata: the rest).
 # The molecule_snps table is ~1.7 GB / 7.5M rows on Huh7 mock, and reading all 21 object-dtype columns
@@ -28,28 +27,6 @@ CATEGORICAL = {
     "snp_id": "category", "chrom": "category", "ref": "category", "alt": "category",
     "gene_names": "category", "gene_ids": "category", "metagene_indices": "category",
 }
-
-
-def _stratified_max_tx_frac_diff(strata, n_tx):
-    """Sample-stratified analogue of max_abs_distribution_shift: per transcript column, the
-    coverage-weighted mean over samples of (ref transcript-fraction - alt transcript-fraction), then
-    the maximum absolute value across transcripts. Rows are [ref, alt]; weight is a sample's total
-    reads. Consistent with cmh_stratified_test (within-sample fractions, not pooled)."""
-    if not strata:
-        return 0.0
-    num = np.zeros(n_tx)
-    den = 0.0
-    for T in strata:
-        ref, alt = T[0], T[1]
-        rt, at = ref.sum(), alt.sum()
-        if rt <= 0 or at <= 0:
-            continue
-        w = rt + at
-        num += w * (ref / rt - alt / at)
-        den += w
-    if den <= 0:
-        return 0.0
-    return round(float(np.max(np.abs(num / den))), 6)
 
 
 def parse_args():
@@ -112,7 +89,7 @@ def main():
             test_name, stat_name, stat_value, p_value, n_strata = pooled_name, pooled_stat_name, pooled_stat, pooled_p, 0
         # sample-stratified effect: per transcript, coverage-weighted mean over samples of
         # (ref_frac - alt_frac); report the max |.| . Falls back to the pooled shift if no strata.
-        eff_strat = _stratified_max_tx_frac_diff(strata, len(keep_tx)) if strata else max_abs_distribution_shift(tt)
+        eff_strat = stratified_max_distribution_shift(strata) if strata else max_abs_distribution_shift(tt)
         per_tx = []
         for tx in table.columns:
             per_tx.append({
