@@ -183,7 +183,9 @@ def _stats_for_one_sample(task):
             # read already represented by its primary; including them made total_n a RECORD count while
             # every numerator (total_mapped, considered_n, assigned_n) is read-level, so every "fraction
             # of reads" was wrong on real minimap2 dRNA BAMs (invisible on test data with 0 supplementary).
-            if aln.is_secondary or aln.is_supplementary:
+            # Gated on primary_only (which the pipeline passes True) so the flag stays LIVE for the funnel
+            # -- it mirrors the assembler: primary_only=False includes non-primary records in both.
+            if primary_only and (aln.is_secondary or aln.is_supplementary):
                 continue
             total_n += 1
             L = get_len(aln)

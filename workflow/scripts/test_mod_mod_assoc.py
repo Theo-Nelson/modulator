@@ -20,8 +20,8 @@ import pandas as pd
 from pyroaring import BitMap
 
 from genotype_utils import (benjamini_hochberg, binary_rate_delta, cmh_stratified_test,
-                            context_key_from_row, drop_unassigned_reads, mh_stratified_effect,
-                            run_contingency_test, shard_tsv_by_chrom, tsv_header)
+                            context_key_from_row, drop_unassigned_reads, mh_common_odds_ratio,
+                            mh_stratified_effect, run_contingency_test, shard_tsv_by_chrom, tsv_header)
 
 # Columns the current test_mod_mod_assoc uses (incl. strand, and gene_name/metagene_index for context_key).
 _MOD_WANT = ["sample", "qname", "mod_site_id", "chrom", "start0", "strand", "target_mod_code",
@@ -33,13 +33,14 @@ OUT_COLS = [
     "mod_code_a", "mod_code_b", "context_key", "gene_names",
     "n_reads", "n_a_modified", "n_a_unmodified", "n_b_modified",
     "n_both_modified", "n_a_only", "n_b_only", "n_neither",
-    "exp_both_modified", "exp_neither",
-    "odds_ratio", "log2_odds_ratio",
-    "concordant_frac_obs", "concordant_frac_exp", "concordance_log2_ratio", "direction",
+    "odds_ratio", "log2_odds_ratio", "direction",
     "n_strata_informative", "test_name", "stat_name", "stat_value", "p_value",
     "effect_abs_delta_mod_frac",
     "test_name_pooled", "stat_value_pooled", "p_value_pooled", "effect_abs_delta_mod_frac_pooled",
-    "jaccard_both", "per_state_json", "p_adj_bh",
+    "odds_ratio_pooled", "log2_odds_ratio_pooled", "direction_pooled",
+    "exp_both_modified_pooled", "exp_neither_pooled",
+    "concordant_frac_obs_pooled", "concordant_frac_exp_pooled", "concordance_log2_ratio_pooled",
+    "jaccard_both_pooled", "per_state_json", "p_adj_bh",
 ]
 
 
@@ -70,39 +71,54 @@ def _pair_row(sid_a, sid_b, counts, site_meta, args, strata_counts=None):
     if n_a_mod < int(args.min_state_reads) or n_a_unmod < int(args.min_state_reads):
         return None
     tt = [[float(n_both), float(n_a_only)], [float(n_b_only), float(n_neither)]]
-    # POOLED test (kept as *_pooled): pools reads across samples in the 2x2, so a co-occurrence driven
-    # by two sites' modification rates BOTH tracking sample is attributed to a site-site dependency.
-    pooled_name, pooled_sn, pooled_stat, pooled_p = run_contingency_test(
-        tt, test=args.test, pseudocount=args.pseudocount)
-    pooled_eff = binary_rate_delta(tt)
-    # SAMPLE-STRATIFIED CMH (primary): one 2x2 [[both,a_only],[b_only,neither]] per sample, combined by
-    # Cochran-Mantel-Haenszel. Strata with no within-sample variation are dropped by cmh_stratified_test.
-    if strata_counts:
-        strata = [[[float(cb), float(ca)], [float(cbb), float(cn)]] for (cb, ca, cbb, cn) in strata_counts]
-        test_name, stat_name, stat_value, p_value, n_strata = cmh_stratified_test(strata)
-        eff = mh_stratified_effect(strata)
-    else:
-        test_name, stat_name, stat_value, p_value, n_strata = pooled_name, pooled_sn, pooled_stat, pooled_p, 0
-        eff = pooled_eff
     chrom_a, s0_a, strand_a, code_a, ctx, genes = site_meta[sid_a]
     chrom_b, s0_b, _sb, code_b, _cb, _g = site_meta[sid_b]
     n_b_mod = n_both + n_b_only
     n_b_unmod = n_a_only + n_neither
     union_mod = n_both + n_a_only + n_b_only
+
+    # ---- POOLED descriptive statistics (single 2x2 over all reads) -- kept ONLY as *_pooled ----
+    # These are confounded by sample when reads are pooled (both sites' rates tracking sample fakes a
+    # dependency), so every reader-facing statistic below has a stratified primary computed further down.
+    pooled_name, pooled_sn, pooled_stat, pooled_p = run_contingency_test(
+        tt, test=args.test, pseudocount=args.pseudocount)
+    pooled_eff = binary_rate_delta(tt)
     exp_both = n_a_mod * n_b_mod / n_reads
     exp_neither = n_a_unmod * n_b_unmod / n_reads
-    odds_ratio = ((n_both + 0.5) * (n_neither + 0.5)) / ((n_a_only + 0.5) * (n_b_only + 0.5))
-    log2_or = math.log2(odds_ratio)
+    or_pooled = ((n_both + 0.5) * (n_neither + 0.5)) / ((n_a_only + 0.5) * (n_b_only + 0.5))
+    log2_or_pooled = math.log2(or_pooled)
     conc_obs = (n_both + n_neither) / n_reads
     conc_exp = (n_a_mod * n_b_mod + n_a_unmod * n_b_unmod) / (n_reads * n_reads)
     conc_log2 = math.log2(conc_obs / conc_exp) if conc_obs > 0 and conc_exp > 0 else 0.0
-    direction = ("CONCORDANT" if log2_or > 0.32 else
-                 "MUTUALLY_EXCLUSIVE" if log2_or < -0.32 else "INDEPENDENT")
+    _dir = lambda l2: ("CONCORDANT" if l2 > 0.32 else "MUTUALLY_EXCLUSIVE" if l2 < -0.32 else "INDEPENDENT")
+    direction_pooled = _dir(log2_or_pooled)
+
+    # ---- PRIMARY statistics ----
+    # strata_counts is passed ONLY when there is >1 sample (see _modmod_for_chrom): with a single sample
+    # the CMH general-association statistic is an UNCORRECTED asymptotic chi2 that is anti-conservative at
+    # these cell counts (e.g. [[6,1],[1,6]] -> 0.010 vs Fisher's exact 0.029), so a lone sample must use
+    # the exact pooled test -- there is no confound to correct when every read is from one sample.
+    if strata_counts:
+        strata = [[[float(cb), float(ca)], [float(cbb), float(cn)]] for (cb, ca, cbb, cn) in strata_counts]
+        test_name, stat_name, stat_value, p_value, n_strata = cmh_stratified_test(strata)
+        eff = mh_stratified_effect(strata)                      # sample-adjusted rate difference
+        or_mh = mh_common_odds_ratio(strata)                    # sample-adjusted (Mantel-Haenszel) OR
+        if math.isfinite(or_mh) and or_mh > 0:
+            odds_ratio, log2_or = or_mh, math.log2(or_mh)
+        else:                                                   # no discordant mass -> fall back to pooled OR
+            odds_ratio, log2_or = or_pooled, log2_or_pooled
+        direction = _dir(log2_or)
+    else:
+        test_name, stat_name, stat_value, p_value, n_strata = pooled_name, pooled_sn, pooled_stat, pooled_p, 0
+        eff = pooled_eff
+        odds_ratio, log2_or, direction = or_pooled, log2_or_pooled, direction_pooled
     return {
-        "exp_both_modified": round(exp_both, 2), "exp_neither": round(exp_neither, 2),
-        "odds_ratio": round(odds_ratio, 4), "log2_odds_ratio": round(log2_or, 4),
-        "concordant_frac_obs": round(conc_obs, 4), "concordant_frac_exp": round(conc_exp, 4),
-        "concordance_log2_ratio": round(conc_log2, 4), "direction": direction,
+        "odds_ratio": round(odds_ratio, 4), "log2_odds_ratio": round(log2_or, 4), "direction": direction,
+        "exp_both_modified_pooled": round(exp_both, 2), "exp_neither_pooled": round(exp_neither, 2),
+        "odds_ratio_pooled": round(or_pooled, 4), "log2_odds_ratio_pooled": round(log2_or_pooled, 4),
+        "direction_pooled": direction_pooled,
+        "concordant_frac_obs_pooled": round(conc_obs, 4), "concordant_frac_exp_pooled": round(conc_exp, 4),
+        "concordance_log2_ratio_pooled": round(conc_log2, 4),
         "mod_site_id_a": sid_a, "mod_site_id_b": sid_b,
         "chrom": chrom_a, "start0_a": s0_a, "start0_b": s0_b,
         "distance_bp": abs(s0_b - s0_a), "strand": strand_a,
@@ -116,7 +132,7 @@ def _pair_row(sid_a, sid_b, counts, site_meta, args, strata_counts=None):
         "effect_abs_delta_mod_frac": eff,
         "test_name_pooled": pooled_name, "stat_value_pooled": pooled_stat, "p_value_pooled": pooled_p,
         "effect_abs_delta_mod_frac_pooled": pooled_eff,
-        "jaccard_both": round(n_both / union_mod, 6) if union_mod else 0.0,
+        "jaccard_both_pooled": round(n_both / union_mod, 6) if union_mod else 0.0,
         "per_state_json": json.dumps({
             "both_modified": n_both, "a_only": n_a_only,
             "b_only": n_b_only, "neither": n_neither,
@@ -190,7 +206,7 @@ def _modmod_for_chrom(mod_path, args):
                 b_both = ma & mb; b_ao = ma & ub; b_bo = ua & mb; b_ne = ua & ub
                 counts = (len(b_both), len(b_ao), len(b_bo), len(b_ne))
                 strata_counts = None
-                if sample_bits:
+                if len(sample_bits) > 1:   # single sample -> pooled EXACT test (asymptotic CMH is anti-conservative)
                     strata_counts = [
                         (b_both.intersection_cardinality(sbm), b_ao.intersection_cardinality(sbm),
                          b_bo.intersection_cardinality(sbm), b_ne.intersection_cardinality(sbm))

@@ -202,6 +202,28 @@ def cmh_stratified_test(strata):
     return name, "cmh_chi2", Q, float(chi2.sf(Q, d)), used
 
 
+def mh_common_odds_ratio(strata):
+    """Mantel-Haenszel common odds ratio across 2x2 strata [[a,b],[c,d]] (one per sample):
+    OR_MH = sum(a*d/N_k) / sum(b*c/N_k). This is the stratum-ADJUSTED odds ratio consistent with
+    cmh_stratified_test -- unlike a pooled OR it is not inflated by between-sample rate/composition
+    imbalance, so it is the odds ratio (and hence the CONCORDANT/MUTUALLY_EXCLUSIVE direction) a reader
+    should see next to a stratified CMH p. Returns NaN when no stratum is informative or the denominator
+    is 0 (no discordant mass)."""
+    num = den = 0.0
+    for T in strata:
+        T = np.asarray(T, dtype=float)
+        if T.shape != (2, 2):
+            continue
+        N = T.sum()
+        if N <= 0:
+            continue
+        num += T[0, 0] * T[1, 1] / N
+        den += T[0, 1] * T[1, 0] / N
+    if den <= 0:
+        return float("nan")
+    return num / den
+
+
 def mh_stratified_effect(strata):
     """Mantel-Haenszel coverage-weighted rate difference (positive-fraction), max over row pairs -- the
     effect size consistent with cmh_stratified_test. Weights w_k = R_i R_j / N_k over strata covering

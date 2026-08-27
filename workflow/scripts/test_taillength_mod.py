@@ -303,11 +303,12 @@ def _site_rows_for_chrom(mod_path, tail_map, args):
                                          if d["delta_nt"] != 0 and (d["delta_nt"] > 0) == (_eff > 0)
                                          and abs(d["delta_nt"]) >= abs(_eff) / 3.0)
                                      if _eff != 0 else 0)
-        # confounded when there ARE comparable forms but fewer than half of them are concordant (a
-        # STRICT MAJORITY discordant). Requiring unanimity (concordant < len) over-flagged: a single
-        # dissenting form among several concordant ones is normal biological heterogeneity, not a
-        # confound, yet it wrongly suppressed the site from the headline count.
-        row["tailmod_confounded"] = bool(_comp and row["n_forms_concordant"] < len(_comp) / 2.0)
+        # confounded unless a STRICT MAJORITY of comparable forms are concordant. `2*n_conc <= len`
+        # (concordant <= half) is the correct predicate: `n_conc < len/2` swung too far -- for a 2-form
+        # site it needs n_conc < 1, i.e. 0 concordant, so the 1-of-2-discordant case the original finding
+        # called out could never flag. `2*n_conc <= len` flags 1-of-2 (2*1<=2) while still passing a
+        # genuine 2-of-3 or 3-of-4 concordant majority.
+        row["tailmod_confounded"] = bool(_comp and 2 * row["n_forms_concordant"] <= len(_comp))
         rows.append(row)
         if collect:
             cands.append((float(p), row, mod_t, unmod_t, per_ff))

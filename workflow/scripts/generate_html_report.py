@@ -1014,14 +1014,18 @@ def mod_mod_concordance_png(df, top_n=12):
         gene = str(r.get("gene_names", "")).split(";")[0]
         gene = "" if gene.strip().lower() in ("", "nan", "none") else gene[:12]
         ca, cb = str(r.get("mod_code_a", "")), str(r.get("mod_code_b", ""))
-        orr = pd.to_numeric(r.get("odds_ratio", None), errors="coerce")
+        # This panel is the POOLED 2x2 (counts summed over samples), so it must show the POOLED odds
+        # ratio to stay internally consistent -- the sample-adjusted OR + p that decide significance and
+        # ranking live in the table. (fall back to the old odds_ratio column for pre-rename inputs.)
+        orr = pd.to_numeric(r.get("odds_ratio_pooled", r.get("odds_ratio", None)), errors="coerce")
         orr_s = f"{orr:.1f}" if pd.notna(orr) else "n/a"
         dist = r.get("distance_bp", "")
         ttl = f"{gene} {ca}x{cb}\nd={dist}bp OR={orr_s}" if gene else f"{ca}x{cb}  d={dist}bp OR={orr_s}"
         ax.set_title(ttl, fontsize=8)
     for k in range(n, nrow * ncol):
         axes[k // ncol][k % ncol].axis("off")
-    fig.suptitle("Co-localized modifications: observed vs expected 2x2 (red = enriched over independence)",
+    fig.suptitle("Co-localized modifications: POOLED observed vs expected 2x2 (red = enriched over "
+                 "independence); significance + ranking are sample-stratified — see table",
                  fontsize=10)
     _save_report_chart(fig, "mod_mod_concordance")
     buf = BytesIO()
@@ -2580,8 +2584,11 @@ def main():
             conc_img = mod_mod_concordance_png(mm_view, top_n=args.max_snp_figs)
             fig_html = clickable_image_html(
                 conc_img, "Co-localized modification 2x2 concordance panels",
-                caption="Top pairs by FDR. Each 2x2 is observed count (expected under independence); "
-                        "red = enriched. A concordant pair reddens the diagonal (both-modified / both-unmodified).",
+                caption="Top pairs by FDR. Each 2x2 is the POOLED observed count (expected under "
+                        "independence) with the pooled odds ratio in its title; red = enriched. A concordant "
+                        "pair reddens the diagonal (both-modified / both-unmodified). The significance (CMH p) "
+                        "and the odds_ratio/direction that rank and label each pair are sample-stratified — "
+                        "see the table; a panel can look concordant while the stratified verdict is null.",
                 figure_class="hero-figure") if conc_img else ""
             mm_body = header + fig_html + df_to_html(mm_view, max_rows=args.top_genes)
         else:
@@ -2593,9 +2600,11 @@ def main():
                   "the state of the other? The 2x2 is tested conditional on reads covering both sites, and enrichment "
                   "is judged against the expected co-occurrence given each site's own marginal stoichiometry — so a "
                   "concordant call means the two are modified together MORE than their individual rates alone would "
-                  "predict, not merely that both are often modified. effect_abs_delta_mod_frac is "
-                  "|P(B modified | A modified) - P(B modified | A unmodified)|; jaccard_both is co-modified reads / "
-                  "reads modified at either.",
+                  "predict, not merely that both are often modified. Significance, effect_abs_delta_mod_frac "
+                  "(|P(B mod|A mod) − P(B mod|A unmod)|), and odds_ratio/direction are all SAMPLE-STRATIFIED "
+                  "(Cochran–Mantel–Haenszel p, Mantel–Haenszel common odds ratio); the *_pooled columns are the "
+                  "single-2x2 companions and can be Simpson's-paradox inflated. jaccard_both_pooled is co-modified "
+                  "reads / reads modified at either.",
             definitions=definitions_html(column_definitions(list(mod_mod_df.columns)), summary="Column definitions") if not mod_mod_df.empty else "",
         )
 

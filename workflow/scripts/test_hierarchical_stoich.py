@@ -35,8 +35,30 @@ import numpy as np
 import pandas as pd
 from pyroaring import BitMap
 
-from genotype_utils import (benjamini_hochberg, cmh_stratified_test, mh_stratified_effect,
-                            run_contingency_test, shard_tsv_by_chrom, tsv_header)
+from genotype_utils import (benjamini_hochberg, cmh_stratified_test, run_contingency_test,
+                            shard_tsv_by_chrom, tsv_header)
+
+
+def _adjusted_ab(strata):
+    """Sample-adjusted (fa, fb, delta=fb-fa) from a list of per-sample [[am,au],[bm,bu]] tables.
+    Each sample's a- and b-arm modified fractions are combined with a COMMON per-sample weight
+    (that sample's informative-read total), over samples where BOTH arms have reads -- so fa, fb and
+    delta stay mutually consistent and are not Simpson's-paradox inflated the way the pooled fractions
+    are. Returns None when no sample covers both arms (caller falls back to the pooled fractions)."""
+    num_a = num_b = den = 0.0
+    for T in strata:
+        (am, au), (bm, bu) = T
+        na, nb = am + au, bm + bu
+        if na <= 0 or nb <= 0:
+            continue
+        w = na + nb
+        num_a += w * (am / na)
+        num_b += w * (bm / nb)
+        den += w
+    if den <= 0:
+        return None
+    fa, fb = num_a / den, num_b / den
+    return fa, fb, fb - fa
 
 OUT_COLS = [
     "gene_name", "chrom", "strand", "fragmentform_a", "fragmentform_b",
@@ -44,6 +66,7 @@ OUT_COLS = [
     "n_informative", "n_informative_a", "n_informative_b", "n_strata_informative",
     "a_modified", "a_unmodified", "b_modified", "b_unmodified",
     "frac_modified_a", "frac_modified_b", "delta", "test_name", "stat_value", "p_value",
+    "frac_modified_a_pooled", "frac_modified_b_pooled", "delta_pooled",
     "test_name_pooled", "stat_value_pooled", "p_value_pooled",
     "naive_n_a", "naive_n_b", "naive_frac_a", "naive_frac_b", "naive_delta", "naive_p_value",
     "reads_dropped_as_uninformative", "p_adj_bh",
@@ -313,11 +336,17 @@ def _process_chrom(ra, mods, gtf, args):
                     strata = [[[float(ia_m.intersection_cardinality(sbm)), float(ia_u.intersection_cardinality(sbm))],
                                [float(ib_m.intersection_cardinality(sbm)), float(ib_u.intersection_cardinality(sbm))]]
                               for sbm in sample_bm.values()]
+                    fa_pool = am / (am + au); fb_pool = bm_ / (bm_ + bu)
                     if len(sample_bm) > 1:
                         tname, _sn, sval, pval, n_strata = cmh_stratified_test(strata)
+                        # reader-facing fractions + delta must be sample-ADJUSTED like the CMH p, else the
+                        # browser shows a confounded pooled -45.2% next to FDR 0.96 and the table sorts the
+                        # most-confounded rows to the top (it ranks by |delta|).
+                        _adj = _adjusted_ab(strata)
+                        fa, fb, delta = _adj if _adj is not None else (fa_pool, fb_pool, fb_pool - fa_pool)
                     else:
                         tname, sval, pval, n_strata = ptname, psval, ppval, 0
-                    fa = am / (am + au); fb = bm_ / (bm_ + bu)
+                        fa, fb, delta = fa_pool, fb_pool, fb_pool - fa_pool
                     row = {
                         "gene_name": gene, "chrom": chrom, "strand": strand,
                         "fragmentform_a": a, "fragmentform_b": b,
@@ -328,8 +357,10 @@ def _process_chrom(ra, mods, gtf, args):
                         "n_strata_informative": int(n_strata),
                         "a_modified": am, "a_unmodified": au, "b_modified": bm_, "b_unmodified": bu,
                         "frac_modified_a": round(fa, 5), "frac_modified_b": round(fb, 5),
-                        "delta": round(fb - fa, 5), "test_name": tname,
+                        "delta": round(delta, 5), "test_name": tname,
                         "stat_value": sval, "p_value": pval,
+                        "frac_modified_a_pooled": round(fa_pool, 5), "frac_modified_b_pooled": round(fb_pool, 5),
+                        "delta_pooled": round(fb_pool - fa_pool, 5),
                         "test_name_pooled": ptname, "stat_value_pooled": psval, "p_value_pooled": ppval,
                     }
                     if args.also_naive:

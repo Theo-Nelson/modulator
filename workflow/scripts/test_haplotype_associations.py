@@ -85,8 +85,10 @@ def _hap_for_one_chrom(hap_path, mod_path, args):
         # PRIMARY: stratify the haplotype x transcript table by SAMPLE, aligning to the same
         # keep_haps x keep_tx grid in each stratum, then generalized CMH (BLOCKER: pooling reads across
         # replicates lets per-sample composition imbalance fake a haplotype-transcript association).
+        # >1 sample only: a single-sample CMH is an uncorrected asymptotic chi2 (anti-conservative),
+        # so a lone sample keeps the exact pooled test.
         strata = []
-        if "sample" in sub.columns:
+        if "sample" in sub.columns and sub["sample"].nunique() > 1:
             for _samp, _sg in sub.groupby("sample", sort=False):
                 st = (_sg.groupby(["haplotype", "ZT"]).size()
                           .unstack(fill_value=0).reindex(index=keep_haps, columns=keep_tx, fill_value=0))
@@ -173,8 +175,10 @@ def _hap_for_one_chrom(hap_path, mod_path, args):
                         # pooled (kept as *_pooled companion)
                         p_test_name, p_stat_name, p_stat_value, p_pooled = run_contingency_test(
                             tt, test=args.test, pseudocount=args.pseudocount)
-                        # PRIMARY: sample-stratified generalized CMH over per-sample haplotype x [mod,unmod] tables
-                        if samp_bits:
+                        # PRIMARY: sample-stratified generalized CMH over per-sample haplotype x [mod,unmod] tables.
+                        # >1 sample only: a single-sample CMH is an uncorrected asymptotic chi2 (anti-conservative),
+                        # so a lone sample keeps the exact pooled test.
+                        if len(samp_bits) > 1:
                             strata = []
                             for _sb in samp_bits.values():
                                 strata.append([[(hbm[h] & mod_bm & _sb).__len__(),

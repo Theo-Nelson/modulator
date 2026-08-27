@@ -73,9 +73,10 @@ def main():
         # SAMPLE-STRATIFIED CMH (primary): one 2 x len(keep_tx) allele x transcript table per sample,
         # combined by the generalized (Landis-Koch) CMH general-association statistic. Transcript column
         # order is FIXED (keep_tx) across strata; a sample lacking both alleles or >=2 transcripts is
-        # dropped as uninformative.
+        # dropped as uninformative. With only ONE sample the CMH statistic is an uncorrected asymptotic
+        # chi2 (anti-conservative at small counts), so a lone sample keeps the exact pooled test instead.
         strata = []
-        if "sample" in sub.columns:
+        if "sample" in sub.columns and sub["sample"].nunique() > 1:
             sgrp = sub.groupby(["sample", "allele_class", "ZT"], as_index=False, observed=True).size()
             sgrp = sgrp[sgrp["ZT"].isin(keep_tx)]
             for _samp, ss in sgrp.groupby("sample", observed=True):
