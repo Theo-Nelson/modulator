@@ -230,7 +230,7 @@
     </header>
     <section id='sec-run-parameters'><details class='run-manifest'><summary>Run inputs &amp; parameters <span class='muted'>(click to expand)</span></summary><pre class='manifest-pre'>modulator run manifest
 ================================================================
-Run date / time : 2026-08-26 12:38:49 EDT
+Run date / time : 2026-08-26 22:27:14 EDT
 Prefix          : demo14
 Project root    : /athena/cayuga_0003/scratch/users/thn4005/scripts/projects_v2/modulator_validation_testing/demo14genes_run
 Command         : /home/fs01/thn4005/.local/share/mamba/envs/modulator/bin/python /athena/cayuga_0003/scratch/users/thn4005/scripts/projects_v2/modulator_validation_testing/demo14genes_run/src/modulator/__main__.py run --config config/config.yaml --workdir /athena/cayuga_0003/scratch/users/thn4005/scripts/projects_v2/modulator_validation_testing/demo14genes_run --jobs 6 --set reference_fa=/athena/cayuga_0003/scratch/users/thn4005/scripts/projects_v2/modulator/modulator_06272026/hg38.fa reference_gtf=/athena/cayuga_0003/scratch/users/thn4005/scripts/projects_v2/modulator/modulator_06272026/hg38.ncbiRefSeq.gtf samplesheet=samples.tsv bams_dir=/athena/cayuga_0003/scratch/users/thn4005/scripts/projects_v2/modulator/modulator_06272026/benchmark/merged_bams bam_glob=*.bam prefix=demo14 threads=8 genotype.enable=true genotype.jobs=6
@@ -1199,7 +1199,7 @@ reference_gtf: /athena/cayuga_0003/scratch/users/thn4005/scripts/projects_v2/mod
       <td>13.0</td>
     </tr>
   </tbody>
-</table></div></div></details></section><section id='sec-per-sample-read-usage-length-statistics'><details class='report-section' open><summary><h2>Per-Sample Read Usage &amp; Length Statistics</h2></summary><div class='section-body'><p class='section-intro'>Sample-level retention across the primary read filters and fragmentform-assignment workflow.</p><div class='subsection'><h3>Read Retention Counts</h3><details class='definitions'><summary>Column definitions</summary><dl><dt>sample</dt><dd>Sample identifier derived from the BAM filename.</dd><dt>total_reads_bam</dt><dd>Total alignment records in the input BAM for this sample.</dd><dt>total_mapped</dt><dd>Reads with a mapped primary alignment.</dd><dt>total_unmapped</dt><dd>Reads with no mapped alignment.</dd><dt>considered_reads</dt><dd>Reads that passed every primary QC filter (mapped, primary, MAPQ, intron count, 3&#x27; soft-clip) and are eligible for fragmentform assignment.</dd><dt>failed_unmapped</dt><dd>Number of reads filtered because they were unmapped.</dd><dt>failed_secondary_or_supp</dt><dd>Number of reads filtered because they were secondary or supplementary alignments.</dd><dt>failed_low_mapq</dt><dd>Number of reads filtered because their mapping quality was below the minimum (see input parameter min_mapq).</dd><dt>failed_low_introns</dt><dd>Number of reads filtered because they had too few introns (see input parameter assembler.min_introns_read).</dd><dt>failed_low_softclip3p</dt><dd>Number of reads filtered because their 3&#x27; soft-clip (candidate poly(A)) was too short (see input parameter assembler.require_softclip3p).</dd><dt>zt_tagged_exists</dt><dd>Whether a ZT-tagged BAM (fragmentform assignments) was written for this sample.</dd><dt>zt_total_records</dt><dd>Total alignment records in the ZT-tagged BAM.</dd><dt>zt_unmapped_records</dt><dd>Unmapped records in the ZT-tagged BAM.</dd><dt>zt_mapped_records</dt><dd>Mapped records in the ZT-tagged BAM.</dd><dt>assigned_reads</dt><dd>Number of reads contributing to the reported fragmentform-length summary.</dd><dt>zt_mapped_unassigned_reads</dt><dd>Mapped reads in the ZT BAM that were not assigned to any retained fragmentform.</dd></dl></details><div class='table-wrap'><table class="dataframe datatable">
+</table></div></div></details></section><section id='sec-per-sample-read-usage-length-statistics'><details class='report-section' open><summary><h2>Per-Sample Read Usage &amp; Length Statistics</h2></summary><div class='section-body'><p class='section-intro'>Sample-level retention across the primary read filters and fragmentform-assignment workflow.</p><div class='subsection'><h3>Read Retention Counts</h3><details class='definitions'><summary>Column definitions</summary><dl><dt>sample</dt><dd>Sample identifier derived from the BAM filename.</dd><dt>total_reads_bam</dt><dd>Total alignment records in the input BAM for this sample.</dd><dt>total_mapped</dt><dd>Reads with a mapped primary alignment.</dd><dt>total_unmapped</dt><dd>Reads with no mapped alignment.</dd><dt>considered_reads</dt><dd>Reads that passed every primary QC filter (mapped, primary, MAPQ, intron count, 3&#x27; soft-clip) and are eligible for fragmentform assignment.</dd><dt>failed_unmapped</dt><dd>Number of reads filtered because they were unmapped.</dd><dt>failed_low_mapq</dt><dd>Number of reads filtered because their mapping quality was below the minimum (see input parameter min_mapq).</dd><dt>failed_low_introns</dt><dd>Number of reads filtered because they had too few introns (see input parameter assembler.min_introns_read).</dd><dt>failed_low_softclip3p</dt><dd>Number of reads filtered because their 3&#x27; soft-clip (candidate poly(A)) was too short (see input parameter assembler.require_softclip3p).</dd><dt>zt_tagged_exists</dt><dd>Whether a ZT-tagged BAM (fragmentform assignments) was written for this sample.</dd><dt>zt_total_records</dt><dd>Total alignment records in the ZT-tagged BAM.</dd><dt>zt_unmapped_records</dt><dd>Unmapped records in the ZT-tagged BAM.</dd><dt>zt_mapped_records</dt><dd>Mapped records in the ZT-tagged BAM.</dd><dt>assigned_reads</dt><dd>Number of reads contributing to the reported fragmentform-length summary.</dd><dt>zt_mapped_unassigned_reads</dt><dd>Mapped reads in the ZT BAM that were not assigned to any retained fragmentform.</dd></dl></details><div class='table-wrap'><table class="dataframe datatable">
   <thead>
     <tr style="text-align: right;">
       <th>sample</th>
@@ -1208,7 +1208,6 @@ reference_gtf: /athena/cayuga_0003/scratch/users/thn4005/scripts/projects_v2/mod
       <th>total_unmapped</th>
       <th>considered_reads</th>
       <th>failed_unmapped</th>
-      <th>failed_secondary_or_supp</th>
       <th>failed_low_mapq</th>
       <th>failed_low_introns</th>
       <th>failed_low_softclip3p</th>
@@ -1228,7 +1227,6 @@ reference_gtf: /athena/cayuga_0003/scratch/users/thn4005/scripts/projects_v2/mod
       <td>0</td>
       <td>11652</td>
       <td>0</td>
-      <td>0</td>
       <td>25</td>
       <td>2025</td>
       <td>0</td>
@@ -1245,7 +1243,6 @@ reference_gtf: /athena/cayuga_0003/scratch/users/thn4005/scripts/projects_v2/mod
       <td>10801</td>
       <td>0</td>
       <td>9109</td>
-      <td>0</td>
       <td>0</td>
       <td>27</td>
       <td>1665</td>
@@ -1264,7 +1261,6 @@ reference_gtf: /athena/cayuga_0003/scratch/users/thn4005/scripts/projects_v2/mod
       <td>0</td>
       <td>9691</td>
       <td>0</td>
-      <td>0</td>
       <td>33</td>
       <td>1810</td>
       <td>0</td>
@@ -1281,7 +1277,6 @@ reference_gtf: /athena/cayuga_0003/scratch/users/thn4005/scripts/projects_v2/mod
       <td>17121</td>
       <td>0</td>
       <td>14801</td>
-      <td>0</td>
       <td>0</td>
       <td>54</td>
       <td>2266</td>
@@ -1300,7 +1295,6 @@ reference_gtf: /athena/cayuga_0003/scratch/users/thn4005/scripts/projects_v2/mod
       <td>0</td>
       <td>12965</td>
       <td>0</td>
-      <td>0</td>
       <td>38</td>
       <td>2481</td>
       <td>0</td>
@@ -1317,7 +1311,6 @@ reference_gtf: /athena/cayuga_0003/scratch/users/thn4005/scripts/projects_v2/mod
       <td>10876</td>
       <td>0</td>
       <td>9283</td>
-      <td>0</td>
       <td>0</td>
       <td>22</td>
       <td>1571</td>
@@ -2008,7 +2001,7 @@ reference_gtf: /athena/cayuga_0003/scratch/users/thn4005/scripts/projects_v2/mod
       <td>13.0</td>
     </tr>
   </tbody>
-</table></div></div></div></details></section><section id='sec-sites-with-differential-epitranscriptomic-modification-between-fragmentforms'><details class='report-section' open><summary><h2>Sites with Differential Epitranscriptomic Modification Between Fragmentforms</h2></summary><div class='section-body'><p class='section-intro'>Positions where the modification stoichiometry differs between the fragmentforms of a gene (across all detected mod codes; sample-stratified Cochran-Mantel-Haenszel with Benjamini-Hochberg FDR). The table shows sites at <b>FDR&lt;0.05 and |Δ|≥10%</b> only. The effect threshold (default 10%) and the FDR are tunable — see input parameters classify_diffs.min_effect and classify_diffs.fdr.</p><details class='definitions'><summary>Result-column definitions</summary><dl><dt>gene_name</dt><dd>Gene label assigned to the reported row or site.</dd><dt>mod_code</dt><dd>Modification code reported by modkit or downstream aggregation.</dd><dt>chrom</dt><dd>Reference chromosome or contig containing the reported feature.</dd><dt>start0</dt><dd>0-based inclusive start coordinate of the reported modification site.</dd><dt>end0</dt><dd>0-based exclusive end coordinate of the reported modification site.</dd><dt>strand</dt><dd>Genomic strand of the reported feature.</dd><dt>p_value</dt><dd>Nominal p-value from the reported hypothesis test.</dd><dt>p_adj_bh</dt><dd>Benjamini-Hochberg false-discovery-rate adjusted p-value.</dd><dt>effect_max_abs_frac_diff</dt><dd>Maximum absolute difference in pooled modified fraction across tested fragmentform partitions.</dd></dl></details><div class='table-wrap'><table class="dataframe datatable">
+</table></div></div></div></details></section><section id='sec-sites-with-differential-epitranscriptomic-modification-between-fragmentforms'><details class='report-section' open><summary><h2>Sites with Differential Epitranscriptomic Modification Between Fragmentforms</h2></summary><div class='section-body'><p class='section-intro'>Positions where the modification stoichiometry differs between the fragmentforms of a gene (across all detected mod codes; sample-stratified Cochran-Mantel-Haenszel with Benjamini-Hochberg FDR). The table shows sites at <b>FDR&lt;0.05 and |Δ|≥10%</b> only — the exact thresholds this run used. Both are tunable — see input parameters classify_diffs.min_effect and classify_diffs.fdr.</p><details class='definitions'><summary>Result-column definitions</summary><dl><dt>gene_name</dt><dd>Gene label assigned to the reported row or site.</dd><dt>mod_code</dt><dd>Modification code reported by modkit or downstream aggregation.</dd><dt>chrom</dt><dd>Reference chromosome or contig containing the reported feature.</dd><dt>start0</dt><dd>0-based inclusive start coordinate of the reported modification site.</dd><dt>end0</dt><dd>0-based exclusive end coordinate of the reported modification site.</dd><dt>strand</dt><dd>Genomic strand of the reported feature.</dd><dt>p_value</dt><dd>Nominal p-value from the reported hypothesis test.</dd><dt>p_adj_bh</dt><dd>Benjamini-Hochberg false-discovery-rate adjusted p-value.</dd><dt>effect_max_abs_frac_diff</dt><dd>Maximum absolute difference in pooled modified fraction across tested fragmentform partitions.</dd></dl></details><div class='table-wrap'><table class="dataframe datatable">
   <thead>
     <tr style="text-align: right;">
       <th>gene_name</th>
@@ -4973,7 +4966,7 @@ reference_gtf: /athena/cayuga_0003/scratch/users/thn4005/scripts/projects_v2/mod
       <td>a@7115323 (0.0294)</td>
     </tr>
   </tbody>
-</table></div></div></div></details></section><section id='sec-differential-polya-tail-length-by-fragmentform-and-modification-status'><details class='report-section' open><summary><h2>Differential polyA Tail Length by Fragmentform and Modification Status</h2></summary><div class='section-body'><p class='section-intro'>Direct per-read poly(A) tail-length estimates from the dorado basecaller (pt:i tag), grouped by fragmentform (isoform). Tail length is mechanistically tied to m6A, RNA stability, and translation, so it is reported as a first-class readout: its distribution across fragmentforms, whether the fragmentforms of a gene differ in tail length, and whether modification at a site tracks with a read's tail length.</p><details class='definitions'><summary>Column definitions</summary><dl><dt>effect_median_range_nt</dt><dd>Spread (nt) of per-fragmentform median tail lengths within a gene — how differently its isoforms are tailed.</dd><dt>effect_median_diff_nt</dt><dd>Median tail length of modified reads minus unmodified reads at a site (negative = modification associates with shorter tails).</dd><dt>test</dt><dd>Mann-Whitney U (2 groups) or Kruskal-Wallis (&gt;2) on tail-length distributions; p_adj_bh is BH-FDR.</dd></dl></details><figure class='image-card'><a class='image-link' href='demo14_report_files/fig_0118.png' target='_blank' rel='noopener noreferrer' title='Open full-size image in a new tab'><img src='demo14_report_files/fig_0118.png' alt='poly(A) tail-length distribution' loading='lazy' /><span class='expand-badge' aria-hidden='true'>↗</span></a><figcaption>Left: per-fragmentform median tail length. Right: median tail by fragmentform class.</figcaption></figure><h3>Summary Across All Poly(A) Tail Measurements</h3><ul><li><b>127</b> fragmentforms with a tail-length distribution; overall median <b>106 nt</b></li><li><b>10</b> genes with differential tail length between their fragmentforms (FDR&lt;0.05)</li><li><b>3</b> modification sites where tail length differs by modification state WITHIN (sample, fragmentform) strata (sample-stratified van Elteren test, FDR&lt;0.05; confounded sites excluded)</li></ul><div class='subsection'><h3>Differential tail length between fragmentforms of a gene</h3><details class='definitions'><summary>Column definitions</summary><dl><dt>gene_name</dt><dd>Gene label assigned to the reported row or site.</dd><dt>n_fragmentforms_tested</dt><dd>Number of the gene&#x27;s fragmentforms with enough tailed reads to compare.</dd><dt>n_reads</dt><dd>Total reads contributing to the reported test.</dd><dt>effect_median_range_nt</dt><dd>Spread (nt) of per-fragmentform median tail lengths within a gene — how differently its isoforms are tailed.</dd><dt>min_median_tail</dt><dd>Smallest per-fragmentform median tail length (nt) among the gene&#x27;s fragmentforms.</dd><dt>max_median_tail</dt><dd>Largest per-fragmentform median tail length (nt) among the gene&#x27;s fragmentforms.</dd><dt>test_name</dt><dd>Statistical test used: Mann-Whitney U (2 groups) or Kruskal-Wallis (&gt;2 groups).</dd><dt>p_value</dt><dd>Nominal p-value from the reported hypothesis test.</dd><dt>p_adj_bh</dt><dd>Benjamini-Hochberg false-discovery-rate adjusted p-value.</dd></dl></details><div class='table-wrap'><table class="dataframe datatable">
+</table></div></div></div></details></section><section id='sec-differential-polya-tail-length-by-fragmentform-and-modification-status'><details class='report-section' open><summary><h2>Differential polyA Tail Length by Fragmentform and Modification Status</h2></summary><div class='section-body'><p class='section-intro'>Direct per-read poly(A) tail-length estimates from the dorado basecaller (pt:i tag), grouped by fragmentform (isoform). Tail length is mechanistically tied to m6A, RNA stability, and translation, so it is reported as a first-class readout: its distribution across fragmentforms, whether the fragmentforms of a gene differ in tail length, and whether modification at a site tracks with a read's tail length.</p><details class='definitions'><summary>Column definitions</summary><dl><dt>effect_median_range_nt</dt><dd>Spread (nt) of per-fragmentform median tail lengths within a gene — how differently its isoforms are tailed.</dd><dt>effect_median_diff_nt</dt><dd>Median tail length of modified reads minus unmodified reads at a site (negative = modification associates with shorter tails).</dd><dt>test</dt><dd>Mann-Whitney U (2 groups) or Kruskal-Wallis (&gt;2) on tail-length distributions; p_adj_bh is BH-FDR.</dd></dl></details><figure class='image-card'><a class='image-link' href='demo14_report_files/fig_0118.png' target='_blank' rel='noopener noreferrer' title='Open full-size image in a new tab'><img src='demo14_report_files/fig_0118.png' alt='poly(A) tail-length distribution' loading='lazy' /><span class='expand-badge' aria-hidden='true'>↗</span></a><figcaption>Left: per-fragmentform median tail length. Right: median tail by fragmentform class.</figcaption></figure><h3>Summary Across All Poly(A) Tail Measurements</h3><ul><li><b>127</b> fragmentforms with a tail-length distribution; overall median <b>106 nt</b></li><li><b>11</b> genes with differential tail length between their fragmentforms (FDR&lt;0.05)</li><li><b>10</b> modification sites where tail length differs by modification state WITHIN (sample, fragmentform) strata (sample-stratified van Elteren test, FDR&lt;0.05; confounded sites excluded)</li></ul><div class='subsection'><h3>Differential tail length between fragmentforms of a gene</h3><details class='definitions'><summary>Column definitions</summary><dl><dt>gene_name</dt><dd>Gene label assigned to the reported row or site.</dd><dt>n_fragmentforms_tested</dt><dd>Number of the gene&#x27;s fragmentforms with enough tailed reads to compare.</dd><dt>n_reads</dt><dd>Total reads contributing to the reported test.</dd><dt>effect_median_range_nt</dt><dd>Spread (nt) of per-fragmentform median tail lengths within a gene — how differently its isoforms are tailed.</dd><dt>min_median_tail</dt><dd>Smallest per-fragmentform median tail length (nt) among the gene&#x27;s fragmentforms.</dd><dt>max_median_tail</dt><dd>Largest per-fragmentform median tail length (nt) among the gene&#x27;s fragmentforms.</dd><dt>test_name</dt><dd>Statistical test used: Mann-Whitney U (2 groups) or Kruskal-Wallis (&gt;2 groups).</dd><dt>p_value</dt><dd>Nominal p-value from the reported hypothesis test.</dd><dt>p_adj_bh</dt><dd>Benjamini-Hochberg false-discovery-rate adjusted p-value.</dd></dl></details><div class='table-wrap'><table class="dataframe datatable">
   <thead>
     <tr style="text-align: right;">
       <th>gene_name</th>
@@ -4992,147 +4985,147 @@ reference_gtf: /athena/cayuga_0003/scratch/users/thn4005/scripts/projects_v2/mod
       <td>ASGR2</td>
       <td>32</td>
       <td>24046</td>
-      <td>61.0</td>
+      <td>114.90</td>
       <td>75.5</td>
       <td>136.5</td>
-      <td>kruskal</td>
-      <td>1.012967e-30</td>
-      <td>1.316857e-29</td>
+      <td>van_elteren_stratified_kw</td>
+      <td>1.936055e-35</td>
+      <td>2.516871e-34</td>
     </tr>
     <tr>
       <td>RIOK3</td>
       <td>8</td>
       <td>2038</td>
-      <td>30.0</td>
+      <td>52.78</td>
       <td>123.0</td>
       <td>153.0</td>
-      <td>kruskal</td>
-      <td>1.205591e-20</td>
-      <td>7.836343e-20</td>
+      <td>van_elteren_stratified_kw</td>
+      <td>3.487397e-14</td>
+      <td>2.266808e-13</td>
     </tr>
     <tr>
       <td>IP6K2</td>
       <td>18</td>
       <td>4444</td>
-      <td>28.5</td>
+      <td>76.49</td>
       <td>88.0</td>
       <td>116.5</td>
-      <td>kruskal</td>
-      <td>2.226307e-12</td>
-      <td>9.647328e-12</td>
+      <td>van_elteren_stratified_kw</td>
+      <td>3.395829e-12</td>
+      <td>1.471526e-11</td>
     </tr>
     <tr>
       <td>SERAC1</td>
       <td>8</td>
       <td>610</td>
-      <td>69.0</td>
+      <td>83.45</td>
       <td>116.5</td>
       <td>185.5</td>
-      <td>kruskal</td>
-      <td>1.533407e-10</td>
-      <td>4.983573e-10</td>
-    </tr>
-    <tr>
-      <td>MXD1</td>
-      <td>4</td>
-      <td>538</td>
-      <td>38.0</td>
-      <td>125.0</td>
-      <td>163.0</td>
-      <td>kruskal</td>
-      <td>6.905636e-08</td>
-      <td>1.795465e-07</td>
-    </tr>
-    <tr>
-      <td>RANBP3</td>
-      <td>10</td>
-      <td>2282</td>
-      <td>48.5</td>
-      <td>97.0</td>
-      <td>145.5</td>
-      <td>kruskal</td>
-      <td>5.824285e-07</td>
-      <td>1.261928e-06</td>
+      <td>van_elteren_stratified_kw</td>
+      <td>6.998881e-11</td>
+      <td>2.274636e-10</td>
     </tr>
     <tr>
       <td>ALCAM</td>
       <td>5</td>
       <td>1106</td>
-      <td>41.5</td>
+      <td>64.10</td>
       <td>104.5</td>
       <td>146.0</td>
-      <td>kruskal</td>
-      <td>1.433358e-04</td>
-      <td>2.661951e-04</td>
+      <td>van_elteren_stratified_kw</td>
+      <td>8.246958e-09</td>
+      <td>2.144209e-08</td>
+    </tr>
+    <tr>
+      <td>RANBP3</td>
+      <td>10</td>
+      <td>2282</td>
+      <td>68.13</td>
+      <td>97.0</td>
+      <td>145.5</td>
+      <td>van_elteren_stratified_kw</td>
+      <td>3.048629e-08</td>
+      <td>6.605364e-08</td>
+    </tr>
+    <tr>
+      <td>MXD1</td>
+      <td>4</td>
+      <td>538</td>
+      <td>39.91</td>
+      <td>125.0</td>
+      <td>163.0</td>
+      <td>van_elteren_stratified_kw</td>
+      <td>9.737308e-08</td>
+      <td>1.808357e-07</td>
     </tr>
     <tr>
       <td>ASGR1</td>
       <td>11</td>
       <td>7644</td>
-      <td>25.0</td>
+      <td>53.51</td>
       <td>86.0</td>
       <td>111.0</td>
-      <td>kruskal</td>
-      <td>2.771836e-04</td>
-      <td>4.504233e-04</td>
+      <td>van_elteren_stratified_kw</td>
+      <td>2.197667e-06</td>
+      <td>3.571209e-06</td>
     </tr>
     <tr>
       <td>ATG7</td>
       <td>7</td>
       <td>1904</td>
-      <td>24.0</td>
+      <td>61.19</td>
       <td>94.0</td>
       <td>118.0</td>
-      <td>kruskal</td>
-      <td>1.263652e-03</td>
-      <td>1.825275e-03</td>
+      <td>van_elteren_stratified_kw</td>
+      <td>6.516522e-04</td>
+      <td>9.412754e-04</td>
     </tr>
     <tr>
       <td>PCID2</td>
       <td>8</td>
       <td>2693</td>
-      <td>24.5</td>
+      <td>97.88</td>
       <td>108.5</td>
       <td>133.0</td>
-      <td>kruskal</td>
-      <td>8.364463e-03</td>
-      <td>1.087380e-02</td>
+      <td>van_elteren_stratified_kw</td>
+      <td>7.851749e-03</td>
+      <td>1.020727e-02</td>
     </tr>
     <tr>
       <td>C8A</td>
       <td>7</td>
       <td>1171</td>
-      <td>19.5</td>
+      <td>56.41</td>
       <td>94.0</td>
       <td>113.5</td>
-      <td>kruskal</td>
-      <td>5.808698e-02</td>
-      <td>6.864825e-02</td>
+      <td>van_elteren_stratified_kw</td>
+      <td>2.440537e-02</td>
+      <td>2.884271e-02</td>
     </tr>
     <tr>
       <td>NHSL1</td>
       <td>4</td>
       <td>276</td>
-      <td>12.5</td>
+      <td>56.75</td>
       <td>131.5</td>
       <td>144.0</td>
-      <td>kruskal</td>
-      <td>9.827583e-02</td>
-      <td>1.064655e-01</td>
+      <td>van_elteren_stratified_kw</td>
+      <td>1.006333e-01</td>
+      <td>1.090194e-01</td>
     </tr>
     <tr>
       <td>VGLL4</td>
       <td>4</td>
       <td>956</td>
-      <td>12.0</td>
+      <td>37.24</td>
       <td>117.0</td>
       <td>129.0</td>
-      <td>kruskal</td>
-      <td>8.553587e-01</td>
-      <td>8.553587e-01</td>
+      <td>van_elteren_stratified_kw</td>
+      <td>6.568480e-01</td>
+      <td>6.568480e-01</td>
     </tr>
   </tbody>
-</table></div><details class='definitions' open><summary>Top 10 per-gene tail-distribution figure(s) — tail length by fragmentform</summary><div class='gallery'><figure class='image-card'><a class='image-link' href='demo14_report_files/fig_0119.png' target='_blank' rel='noopener noreferrer' title='Open full-size image in a new tab'><img src='demo14_report_files/fig_0119.png' alt='rank01_ASGR2.png' loading='lazy' /><span class='expand-badge' aria-hidden='true'>↗</span></a><figcaption>rank01_ASGR2.png</figcaption></figure><figure class='image-card'><a class='image-link' href='demo14_report_files/fig_0120.png' target='_blank' rel='noopener noreferrer' title='Open full-size image in a new tab'><img src='demo14_report_files/fig_0120.png' alt='rank02_RIOK3.png' loading='lazy' /><span class='expand-badge' aria-hidden='true'>↗</span></a><figcaption>rank02_RIOK3.png</figcaption></figure><figure class='image-card'><a class='image-link' href='demo14_report_files/fig_0121.png' target='_blank' rel='noopener noreferrer' title='Open full-size image in a new tab'><img src='demo14_report_files/fig_0121.png' alt='rank03_IP6K2.png' loading='lazy' /><span class='expand-badge' aria-hidden='true'>↗</span></a><figcaption>rank03_IP6K2.png</figcaption></figure><figure class='image-card'><a class='image-link' href='demo14_report_files/fig_0122.png' target='_blank' rel='noopener noreferrer' title='Open full-size image in a new tab'><img src='demo14_report_files/fig_0122.png' alt='rank04_SERAC1.png' loading='lazy' /><span class='expand-badge' aria-hidden='true'>↗</span></a><figcaption>rank04_SERAC1.png</figcaption></figure><figure class='image-card'><a class='image-link' href='demo14_report_files/fig_0123.png' target='_blank' rel='noopener noreferrer' title='Open full-size image in a new tab'><img src='demo14_report_files/fig_0123.png' alt='rank05_MXD1.png' loading='lazy' /><span class='expand-badge' aria-hidden='true'>↗</span></a><figcaption>rank05_MXD1.png</figcaption></figure><figure class='image-card'><a class='image-link' href='demo14_report_files/fig_0124.png' target='_blank' rel='noopener noreferrer' title='Open full-size image in a new tab'><img src='demo14_report_files/fig_0124.png' alt='rank06_RANBP3.png' loading='lazy' /><span class='expand-badge' aria-hidden='true'>↗</span></a><figcaption>rank06_RANBP3.png</figcaption></figure><figure class='image-card'><a class='image-link' href='demo14_report_files/fig_0125.png' target='_blank' rel='noopener noreferrer' title='Open full-size image in a new tab'><img src='demo14_report_files/fig_0125.png' alt='rank07_ALCAM.png' loading='lazy' /><span class='expand-badge' aria-hidden='true'>↗</span></a><figcaption>rank07_ALCAM.png</figcaption></figure><figure class='image-card'><a class='image-link' href='demo14_report_files/fig_0126.png' target='_blank' rel='noopener noreferrer' title='Open full-size image in a new tab'><img src='demo14_report_files/fig_0126.png' alt='rank08_ASGR1.png' loading='lazy' /><span class='expand-badge' aria-hidden='true'>↗</span></a><figcaption>rank08_ASGR1.png</figcaption></figure><figure class='image-card'><a class='image-link' href='demo14_report_files/fig_0127.png' target='_blank' rel='noopener noreferrer' title='Open full-size image in a new tab'><img src='demo14_report_files/fig_0127.png' alt='rank09_ATG7.png' loading='lazy' /><span class='expand-badge' aria-hidden='true'>↗</span></a><figcaption>rank09_ATG7.png</figcaption></figure><figure class='image-card'><a class='image-link' href='demo14_report_files/fig_0128.png' target='_blank' rel='noopener noreferrer' title='Open full-size image in a new tab'><img src='demo14_report_files/fig_0128.png' alt='rank10_PCID2.png' loading='lazy' /><span class='expand-badge' aria-hidden='true'>↗</span></a><figcaption>rank10_PCID2.png</figcaption></figure></div></details></div><div class='subsection'><h3>Poly(A) tail length vs modification state</h3><details class='definitions'><summary>Column definitions</summary><dl><dt>gene_name</dt><dd>Gene label assigned to the reported row or site.</dd><dt>mod_site_id</dt><dd>Canonical modification-site identifier in `chrom:start-end:strand:mod` format.</dd><dt>target_mod_code</dt><dd>Modification code tested at the reported site.</dd><dt>n_modified</dt><dd>Reads classified as modified for the target mod code.</dd><dt>n_unmodified</dt><dd>Number of reads unmodified at the target site.</dd><dt>median_tail_modified</dt><dd>Median tail length (nt) of reads modified at the target site.</dd><dt>median_tail_unmodified</dt><dd>Median tail length (nt) of reads unmodified at the target site.</dd><dt>effect_median_diff_nt</dt><dd>Median tail of modified reads minus unmodified reads at a site (negative = modification associates with shorter tails).</dd><dt>test_name</dt><dd>Statistical test used: Mann-Whitney U (2 groups) or Kruskal-Wallis (&gt;2 groups).</dd><dt>p_value</dt><dd>Nominal p-value from the reported hypothesis test.</dd><dt>p_adj_bh</dt><dd>Benjamini-Hochberg false-discovery-rate adjusted p-value.</dd><dt>n_strata_informative</dt><dd>Number of (sample, fragmentform) strata that carried BOTH modification states and so contributed to the sample-stratified van Elteren test (the primary p-value).</dd><dt>n_forms_comparable</dt><dd>Number of fragmentforms with &gt;=3 reads in BOTH the modified and unmodified state (the forms in which a within-fragmentform tail comparison is possible).</dd><dt>n_forms_concordant</dt><dd>Of the comparable fragmentforms, how many shift in the SAME direction as (and with at least a third of) the reported within-stratum effect. When this is a minority, the site is flagged tailmod_confounded and excluded from the headline count.</dd><dt>tailmod_confounded</dt><dd>True when fewer than half of the comparable fragmentforms reproduce the effect within-form — i.e. the modified-vs-unmodified tail gap is likely the modification proxying for a differently-tailed isoform rather than a within-isoform effect. Confounded sites are excluded from the headline significant count.</dd><dt>effect_median_diff_nt_pooled</dt><dd>The OLD pooled median(mod)-median(unmod) over all reads at the site, ignoring sample/fragmentform structure. Retained for transparency; can be badly inflated by the isoform confound — do not rank on it.</dd><dt>p_value_pooled</dt><dd>The OLD pooled Mann-Whitney p-value (mod vs unmod reads pooled across all fragmentforms and samples). Retained for transparency; the primary p_value is the sample-stratified van Elteren test.</dd></dl></details><div class='table-wrap'><table class="dataframe datatable">
+</table></div><details class='definitions' open><summary>Top 10 per-gene tail-distribution figure(s) — tail length by fragmentform</summary><div class='gallery'><figure class='image-card'><a class='image-link' href='demo14_report_files/fig_0119.png' target='_blank' rel='noopener noreferrer' title='Open full-size image in a new tab'><img src='demo14_report_files/fig_0119.png' alt='rank01_ASGR2.png' loading='lazy' /><span class='expand-badge' aria-hidden='true'>↗</span></a><figcaption>rank01_ASGR2.png</figcaption></figure><figure class='image-card'><a class='image-link' href='demo14_report_files/fig_0120.png' target='_blank' rel='noopener noreferrer' title='Open full-size image in a new tab'><img src='demo14_report_files/fig_0120.png' alt='rank02_RIOK3.png' loading='lazy' /><span class='expand-badge' aria-hidden='true'>↗</span></a><figcaption>rank02_RIOK3.png</figcaption></figure><figure class='image-card'><a class='image-link' href='demo14_report_files/fig_0121.png' target='_blank' rel='noopener noreferrer' title='Open full-size image in a new tab'><img src='demo14_report_files/fig_0121.png' alt='rank03_IP6K2.png' loading='lazy' /><span class='expand-badge' aria-hidden='true'>↗</span></a><figcaption>rank03_IP6K2.png</figcaption></figure><figure class='image-card'><a class='image-link' href='demo14_report_files/fig_0122.png' target='_blank' rel='noopener noreferrer' title='Open full-size image in a new tab'><img src='demo14_report_files/fig_0122.png' alt='rank04_SERAC1.png' loading='lazy' /><span class='expand-badge' aria-hidden='true'>↗</span></a><figcaption>rank04_SERAC1.png</figcaption></figure><figure class='image-card'><a class='image-link' href='demo14_report_files/fig_0123.png' target='_blank' rel='noopener noreferrer' title='Open full-size image in a new tab'><img src='demo14_report_files/fig_0123.png' alt='rank05_ALCAM.png' loading='lazy' /><span class='expand-badge' aria-hidden='true'>↗</span></a><figcaption>rank05_ALCAM.png</figcaption></figure><figure class='image-card'><a class='image-link' href='demo14_report_files/fig_0124.png' target='_blank' rel='noopener noreferrer' title='Open full-size image in a new tab'><img src='demo14_report_files/fig_0124.png' alt='rank06_RANBP3.png' loading='lazy' /><span class='expand-badge' aria-hidden='true'>↗</span></a><figcaption>rank06_RANBP3.png</figcaption></figure><figure class='image-card'><a class='image-link' href='demo14_report_files/fig_0125.png' target='_blank' rel='noopener noreferrer' title='Open full-size image in a new tab'><img src='demo14_report_files/fig_0125.png' alt='rank07_MXD1.png' loading='lazy' /><span class='expand-badge' aria-hidden='true'>↗</span></a><figcaption>rank07_MXD1.png</figcaption></figure><figure class='image-card'><a class='image-link' href='demo14_report_files/fig_0126.png' target='_blank' rel='noopener noreferrer' title='Open full-size image in a new tab'><img src='demo14_report_files/fig_0126.png' alt='rank08_ASGR1.png' loading='lazy' /><span class='expand-badge' aria-hidden='true'>↗</span></a><figcaption>rank08_ASGR1.png</figcaption></figure><figure class='image-card'><a class='image-link' href='demo14_report_files/fig_0127.png' target='_blank' rel='noopener noreferrer' title='Open full-size image in a new tab'><img src='demo14_report_files/fig_0127.png' alt='rank09_ATG7.png' loading='lazy' /><span class='expand-badge' aria-hidden='true'>↗</span></a><figcaption>rank09_ATG7.png</figcaption></figure><figure class='image-card'><a class='image-link' href='demo14_report_files/fig_0128.png' target='_blank' rel='noopener noreferrer' title='Open full-size image in a new tab'><img src='demo14_report_files/fig_0128.png' alt='rank10_PCID2.png' loading='lazy' /><span class='expand-badge' aria-hidden='true'>↗</span></a><figcaption>rank10_PCID2.png</figcaption></figure></div></details></div><div class='subsection'><h3>Poly(A) tail length vs modification state</h3><details class='definitions'><summary>Column definitions</summary><dl><dt>gene_name</dt><dd>Gene label assigned to the reported row or site.</dd><dt>mod_site_id</dt><dd>Canonical modification-site identifier in `chrom:start-end:strand:mod` format.</dd><dt>target_mod_code</dt><dd>Modification code tested at the reported site.</dd><dt>n_modified</dt><dd>Reads classified as modified for the target mod code.</dd><dt>n_unmodified</dt><dd>Number of reads unmodified at the target site.</dd><dt>median_tail_modified</dt><dd>Median tail length (nt) of reads modified at the target site.</dd><dt>median_tail_unmodified</dt><dd>Median tail length (nt) of reads unmodified at the target site.</dd><dt>effect_median_diff_nt</dt><dd>Median tail of modified reads minus unmodified reads at a site (negative = modification associates with shorter tails).</dd><dt>test_name</dt><dd>Statistical test used: Mann-Whitney U (2 groups) or Kruskal-Wallis (&gt;2 groups).</dd><dt>p_value</dt><dd>Nominal p-value from the reported hypothesis test.</dd><dt>p_adj_bh</dt><dd>Benjamini-Hochberg false-discovery-rate adjusted p-value.</dd><dt>n_strata_informative</dt><dd>Number of (sample, fragmentform) strata that carried BOTH modification states and so contributed to the sample-stratified van Elteren test (the primary p-value).</dd><dt>n_forms_comparable</dt><dd>Number of fragmentforms with &gt;=3 reads in BOTH the modified and unmodified state (the forms in which a within-fragmentform tail comparison is possible).</dd><dt>n_forms_concordant</dt><dd>Of the comparable fragmentforms, how many shift in the SAME direction as (and with at least a third of) the reported within-stratum effect. When this is a minority, the site is flagged tailmod_confounded and excluded from the headline count.</dd><dt>tailmod_confounded</dt><dd>True when fewer than half of the comparable fragmentforms reproduce the effect within-form — i.e. the modified-vs-unmodified tail gap is likely the modification proxying for a differently-tailed isoform rather than a within-isoform effect. Confounded sites are excluded from the headline significant count.</dd><dt>effect_median_diff_nt_pooled</dt><dd>The OLD pooled median(mod)-median(unmod) over all reads at the site, ignoring sample/fragmentform structure. Retained for transparency; can be badly inflated by the isoform confound — do not rank on it.</dd><dt>p_value_pooled</dt><dd>The OLD pooled Mann-Whitney p-value (mod vs unmod reads pooled across all fragmentforms and samples). Retained for transparency; the primary p_value is the sample-stratified van Elteren test.</dd></dl></details><div class='table-wrap'><table class="dataframe datatable">
   <thead>
     <tr style="text-align: right;">
       <th>gene_name</th>
@@ -5163,14 +5156,14 @@ reference_gtf: /athena/cayuga_0003/scratch/users/thn4005/scripts/projects_v2/mod
       <td>3545</td>
       <td>62.0</td>
       <td>106.0</td>
-      <td>-43.22</td>
+      <td>-43.61</td>
       <td>van_elteren_stratified_wilcoxon</td>
-      <td>4.659121e-127</td>
-      <td>6.117426e-124</td>
-      <td>55</td>
+      <td>7.843001e-128</td>
+      <td>1.022727e-124</td>
+      <td>48</td>
       <td>11</td>
       <td>10</td>
-      <td>True</td>
+      <td>False</td>
       <td>-44.0</td>
       <td>4.490511e-129</td>
     </tr>
@@ -5182,14 +5175,14 @@ reference_gtf: /athena/cayuga_0003/scratch/users/thn4005/scripts/projects_v2/mod
       <td>14705</td>
       <td>109.0</td>
       <td>96.0</td>
-      <td>13.49</td>
+      <td>12.81</td>
       <td>van_elteren_stratified_wilcoxon</td>
-      <td>1.344907e-31</td>
-      <td>8.829316e-29</td>
-      <td>136</td>
+      <td>7.506336e-30</td>
+      <td>4.894131e-27</td>
+      <td>89</td>
       <td>28</td>
       <td>23</td>
-      <td>True</td>
+      <td>False</td>
       <td>13.0</td>
       <td>1.075471e-33</td>
     </tr>
@@ -5201,14 +5194,14 @@ reference_gtf: /athena/cayuga_0003/scratch/users/thn4005/scripts/projects_v2/mod
       <td>20622</td>
       <td>56.0</td>
       <td>89.0</td>
-      <td>-31.48</td>
+      <td>-31.70</td>
       <td>van_elteren_stratified_wilcoxon</td>
-      <td>2.920827e-27</td>
-      <td>1.278348e-24</td>
-      <td>82</td>
+      <td>6.634850e-24</td>
+      <td>2.883948e-21</td>
+      <td>43</td>
       <td>14</td>
       <td>11</td>
-      <td>True</td>
+      <td>False</td>
       <td>-33.0</td>
       <td>1.620014e-28</td>
     </tr>
@@ -5220,54 +5213,16 @@ reference_gtf: /athena/cayuga_0003/scratch/users/thn4005/scripts/projects_v2/mod
       <td>2433</td>
       <td>85.0</td>
       <td>117.0</td>
-      <td>-33.44</td>
+      <td>-35.45</td>
       <td>van_elteren_stratified_wilcoxon</td>
-      <td>5.884616e-10</td>
-      <td>1.931625e-07</td>
-      <td>29</td>
+      <td>3.394885e-10</td>
+      <td>1.106732e-07</td>
+      <td>21</td>
       <td>6</td>
       <td>6</td>
       <td>False</td>
       <td>-32.0</td>
       <td>1.917868e-10</td>
-    </tr>
-    <tr>
-      <td>ASGR2</td>
-      <td>chr17:7102103-7102104:-:17802</td>
-      <td>17802 (pseudouridine)</td>
-      <td>290</td>
-      <td>23507</td>
-      <td>74.5</td>
-      <td>91.0</td>
-      <td>-14.91</td>
-      <td>van_elteren_stratified_wilcoxon</td>
-      <td>1.602686e-07</td>
-      <td>4.208653e-05</td>
-      <td>61</td>
-      <td>10</td>
-      <td>7</td>
-      <td>True</td>
-      <td>-16.5</td>
-      <td>2.145444e-07</td>
-    </tr>
-    <tr>
-      <td>ASGR2</td>
-      <td>chr17:7101323-7101324:-:m</td>
-      <td>m (5mC)</td>
-      <td>1263</td>
-      <td>2390</td>
-      <td>99.0</td>
-      <td>93.0</td>
-      <td>7.29</td>
-      <td>van_elteren_stratified_wilcoxon</td>
-      <td>1.011941e-06</td>
-      <td>2.214464e-04</td>
-      <td>104</td>
-      <td>26</td>
-      <td>18</td>
-      <td>True</td>
-      <td>6.0</td>
-      <td>3.696017e-07</td>
     </tr>
     <tr>
       <td>PCID2</td>
@@ -5277,16 +5232,54 @@ reference_gtf: /athena/cayuga_0003/scratch/users/thn4005/scripts/projects_v2/mod
       <td>2643</td>
       <td>50.5</td>
       <td>115.0</td>
-      <td>10.59</td>
+      <td>-35.10</td>
       <td>van_elteren_stratified_wilcoxon</td>
-      <td>6.882951e-06</td>
-      <td>1.291045e-03</td>
-      <td>16</td>
+      <td>1.402112e-07</td>
+      <td>3.656709e-05</td>
+      <td>9</td>
       <td>5</td>
-      <td>2</td>
-      <td>True</td>
+      <td>3</td>
+      <td>False</td>
       <td>-64.5</td>
       <td>3.175321e-08</td>
+    </tr>
+    <tr>
+      <td>ASGR2</td>
+      <td>chr17:7101323-7101324:-:m</td>
+      <td>m (5mC)</td>
+      <td>1263</td>
+      <td>2390</td>
+      <td>99.0</td>
+      <td>93.0</td>
+      <td>7.10</td>
+      <td>van_elteren_stratified_wilcoxon</td>
+      <td>2.864676e-07</td>
+      <td>6.225896e-05</td>
+      <td>64</td>
+      <td>26</td>
+      <td>18</td>
+      <td>False</td>
+      <td>6.0</td>
+      <td>3.696017e-07</td>
+    </tr>
+    <tr>
+      <td>ASGR2</td>
+      <td>chr17:7102103-7102104:-:17802</td>
+      <td>17802 (pseudouridine)</td>
+      <td>290</td>
+      <td>23507</td>
+      <td>74.5</td>
+      <td>91.0</td>
+      <td>-15.18</td>
+      <td>van_elteren_stratified_wilcoxon</td>
+      <td>1.634218e-06</td>
+      <td>3.044314e-04</td>
+      <td>29</td>
+      <td>10</td>
+      <td>7</td>
+      <td>False</td>
+      <td>-16.5</td>
+      <td>2.145444e-07</td>
     </tr>
     <tr>
       <td>ASGR2</td>
@@ -5296,35 +5289,16 @@ reference_gtf: /athena/cayuga_0003/scratch/users/thn4005/scripts/projects_v2/mod
       <td>22022</td>
       <td>72.5</td>
       <td>91.0</td>
-      <td>-18.90</td>
+      <td>-20.44</td>
       <td>van_elteren_stratified_wilcoxon</td>
-      <td>3.027252e-05</td>
-      <td>4.968478e-03</td>
-      <td>38</td>
+      <td>8.171777e-05</td>
+      <td>1.332000e-02</td>
+      <td>18</td>
       <td>8</td>
       <td>6</td>
-      <td>True</td>
+      <td>False</td>
       <td>-18.5</td>
       <td>1.043602e-04</td>
-    </tr>
-    <tr>
-      <td>ASGR1</td>
-      <td>chr17:7173478-7173479:-:17802</td>
-      <td>17802 (pseudouridine)</td>
-      <td>50</td>
-      <td>7545</td>
-      <td>76.5</td>
-      <td>98.0</td>
-      <td>-24.85</td>
-      <td>van_elteren_stratified_wilcoxon</td>
-      <td>1.022627e-04</td>
-      <td>1.491900e-02</td>
-      <td>16</td>
-      <td>2</td>
-      <td>2</td>
-      <td>False</td>
-      <td>-21.5</td>
-      <td>5.529903e-04</td>
     </tr>
     <tr>
       <td>RIOK3</td>
@@ -5334,11 +5308,11 @@ reference_gtf: /athena/cayuga_0003/scratch/users/thn4005/scripts/projects_v2/mod
       <td>1746</td>
       <td>99.0</td>
       <td>134.0</td>
-      <td>-22.91</td>
+      <td>-19.25</td>
       <td>van_elteren_stratified_wilcoxon</td>
-      <td>2.209336e-04</td>
-      <td>2.900858e-02</td>
-      <td>15</td>
+      <td>2.632382e-04</td>
+      <td>3.814029e-02</td>
+      <td>10</td>
       <td>2</td>
       <td>2</td>
       <td>False</td>
@@ -5353,14 +5327,14 @@ reference_gtf: /athena/cayuga_0003/scratch/users/thn4005/scripts/projects_v2/mod
       <td>23612</td>
       <td>80.0</td>
       <td>91.0</td>
-      <td>-9.19</td>
+      <td>-11.06</td>
       <td>van_elteren_stratified_wilcoxon</td>
-      <td>4.658913e-04</td>
-      <td>5.561048e-02</td>
-      <td>67</td>
+      <td>2.925773e-04</td>
+      <td>3.815208e-02</td>
+      <td>25</td>
       <td>10</td>
       <td>8</td>
-      <td>True</td>
+      <td>False</td>
       <td>-11.0</td>
       <td>5.732606e-04</td>
     </tr>
@@ -5372,73 +5346,16 @@ reference_gtf: /athena/cayuga_0003/scratch/users/thn4005/scripts/projects_v2/mod
       <td>23826</td>
       <td>78.0</td>
       <td>91.0</td>
-      <td>-12.20</td>
+      <td>-17.77</td>
       <td>van_elteren_stratified_wilcoxon</td>
-      <td>5.442126e-04</td>
-      <td>5.954593e-02</td>
-      <td>41</td>
+      <td>5.877739e-04</td>
+      <td>6.967792e-02</td>
+      <td>18</td>
       <td>5</td>
       <td>2</td>
       <td>True</td>
       <td>-13.0</td>
       <td>1.019615e-03</td>
-    </tr>
-    <tr>
-      <td>PCID2</td>
-      <td>chr13:113179085-113179086:-:17802</td>
-      <td>17802 (pseudouridine)</td>
-      <td>41</td>
-      <td>2549</td>
-      <td>78.0</td>
-      <td>115.0</td>
-      <td>-28.67</td>
-      <td>van_elteren_stratified_wilcoxon</td>
-      <td>1.135695e-03</td>
-      <td>1.147052e-01</td>
-      <td>20</td>
-      <td>3</td>
-      <td>3</td>
-      <td>False</td>
-      <td>-37.0</td>
-      <td>1.543396e-03</td>
-    </tr>
-    <tr>
-      <td>PCID2</td>
-      <td>chr13:113179041-113179042:-:17802</td>
-      <td>17802 (pseudouridine)</td>
-      <td>20</td>
-      <td>2610</td>
-      <td>75.5</td>
-      <td>115.0</td>
-      <td>-35.86</td>
-      <td>van_elteren_stratified_wilcoxon</td>
-      <td>1.480340e-03</td>
-      <td>1.388347e-01</td>
-      <td>13</td>
-      <td>2</td>
-      <td>2</td>
-      <td>False</td>
-      <td>-39.5</td>
-      <td>1.115215e-03</td>
-    </tr>
-    <tr>
-      <td>RIOK3</td>
-      <td>chr18:23482484-23482485:+:17596</td>
-      <td>17596 (inosine)</td>
-      <td>25</td>
-      <td>1378</td>
-      <td>105.0</td>
-      <td>133.0</td>
-      <td>-32.35</td>
-      <td>van_elteren_stratified_wilcoxon</td>
-      <td>1.887401e-03</td>
-      <td>1.652105e-01</td>
-      <td>9</td>
-      <td>2</td>
-      <td>1</td>
-      <td>True</td>
-      <td>-28.0</td>
-      <td>6.949704e-03</td>
     </tr>
     <tr>
       <td>RIOK3</td>
@@ -5448,16 +5365,92 @@ reference_gtf: /athena/cayuga_0003/scratch/users/thn4005/scripts/projects_v2/mod
       <td>1286</td>
       <td>142.5</td>
       <td>132.0</td>
-      <td>10.94</td>
+      <td>12.49</td>
       <td>van_elteren_stratified_wilcoxon</td>
-      <td>2.201839e-03</td>
-      <td>1.806884e-01</td>
-      <td>25</td>
+      <td>1.156611e-03</td>
+      <td>1.256851e-01</td>
+      <td>16</td>
       <td>7</td>
       <td>3</td>
       <td>True</td>
       <td>10.5</td>
       <td>8.154021e-03</td>
+    </tr>
+    <tr>
+      <td>ASGR1</td>
+      <td>chr17:7173478-7173479:-:17802</td>
+      <td>17802 (pseudouridine)</td>
+      <td>50</td>
+      <td>7545</td>
+      <td>76.5</td>
+      <td>98.0</td>
+      <td>-24.33</td>
+      <td>van_elteren_stratified_wilcoxon</td>
+      <td>2.145451e-03</td>
+      <td>2.128454e-01</td>
+      <td>8</td>
+      <td>2</td>
+      <td>2</td>
+      <td>False</td>
+      <td>-21.5</td>
+      <td>5.529903e-04</td>
+    </tr>
+    <tr>
+      <td>ALCAM</td>
+      <td>chr3:105547278-105547279:+:17802</td>
+      <td>17802 (pseudouridine)</td>
+      <td>44</td>
+      <td>810</td>
+      <td>87.0</td>
+      <td>117.0</td>
+      <td>-21.13</td>
+      <td>van_elteren_stratified_wilcoxon</td>
+      <td>2.285150e-03</td>
+      <td>2.128454e-01</td>
+      <td>6</td>
+      <td>1</td>
+      <td>1</td>
+      <td>False</td>
+      <td>-30.0</td>
+      <td>1.439020e-03</td>
+    </tr>
+    <tr>
+      <td>ASGR2</td>
+      <td>chr17:7114219-7114220:-:19227</td>
+      <td>19227 (2'-O-methyluridine, Um)</td>
+      <td>204</td>
+      <td>20952</td>
+      <td>80.0</td>
+      <td>91.0</td>
+      <td>-12.28</td>
+      <td>van_elteren_stratified_wilcoxon</td>
+      <td>2.500546e-03</td>
+      <td>2.173808e-01</td>
+      <td>27</td>
+      <td>9</td>
+      <td>4</td>
+      <td>True</td>
+      <td>-11.0</td>
+      <td>1.477391e-02</td>
+    </tr>
+    <tr>
+      <td>ASGR2</td>
+      <td>chr17:7101355-7101356:-:17802</td>
+      <td>17802 (pseudouridine)</td>
+      <td>871</td>
+      <td>23102</td>
+      <td>85.0</td>
+      <td>91.0</td>
+      <td>-5.82</td>
+      <td>van_elteren_stratified_wilcoxon</td>
+      <td>3.008688e-03</td>
+      <td>2.307840e-01</td>
+      <td>64</td>
+      <td>23</td>
+      <td>11</td>
+      <td>True</td>
+      <td>-6.0</td>
+      <td>9.317975e-03</td>
     </tr>
     <tr>
       <td>ASGR1</td>
@@ -5467,14 +5460,14 @@ reference_gtf: /athena/cayuga_0003/scratch/users/thn4005/scripts/projects_v2/mod
       <td>6563</td>
       <td>101.0</td>
       <td>97.0</td>
-      <td>2.61</td>
+      <td>2.62</td>
       <td>van_elteren_stratified_wilcoxon</td>
-      <td>2.638027e-03</td>
-      <td>2.037488e-01</td>
-      <td>53</td>
+      <td>2.900093e-03</td>
+      <td>2.307840e-01</td>
+      <td>41</td>
       <td>11</td>
       <td>9</td>
-      <td>True</td>
+      <td>False</td>
       <td>4.0</td>
       <td>7.633126e-03</td>
     </tr>
@@ -5486,57 +5479,57 @@ reference_gtf: /athena/cayuga_0003/scratch/users/thn4005/scripts/projects_v2/mod
       <td>1004</td>
       <td>187.0</td>
       <td>113.0</td>
-      <td>54.79</td>
+      <td>47.71</td>
       <td>van_elteren_stratified_wilcoxon</td>
-      <td>2.911804e-03</td>
-      <td>2.088760e-01</td>
-      <td>9</td>
+      <td>3.603883e-03</td>
+      <td>2.610813e-01</td>
+      <td>5</td>
       <td>2</td>
       <td>1</td>
-      <td>True</td>
+      <td>False</td>
       <td>74.0</td>
       <td>1.813565e-03</td>
     </tr>
     <tr>
-      <td>ALCAM</td>
-      <td>chr3:105547278-105547279:+:17802</td>
+      <td>PCID2</td>
+      <td>chr13:113181151-113181152:-:17802</td>
       <td>17802 (pseudouridine)</td>
-      <td>44</td>
-      <td>810</td>
-      <td>87.0</td>
-      <td>117.0</td>
-      <td>-19.87</td>
+      <td>45</td>
+      <td>2400</td>
+      <td>90.0</td>
+      <td>115.0</td>
+      <td>-20.50</td>
       <td>van_elteren_stratified_wilcoxon</td>
-      <td>3.022577e-03</td>
-      <td>2.088760e-01</td>
-      <td>11</td>
-      <td>1</td>
-      <td>1</td>
+      <td>4.116931e-03</td>
+      <td>2.825514e-01</td>
+      <td>13</td>
+      <td>5</td>
+      <td>4</td>
       <td>False</td>
-      <td>-30.0</td>
-      <td>1.439020e-03</td>
+      <td>-25.0</td>
+      <td>6.319713e-03</td>
     </tr>
     <tr>
-      <td>SERAC1</td>
-      <td>chr6:158148904-158148905:-:17596</td>
-      <td>17596 (inosine)</td>
-      <td>33</td>
-      <td>383</td>
-      <td>164.0</td>
-      <td>132.0</td>
-      <td>27.54</td>
+      <td>ASGR1</td>
+      <td>chr17:7174269-7174270:-:m</td>
+      <td>m (5mC)</td>
+      <td>246</td>
+      <td>7061</td>
+      <td>89.0</td>
+      <td>99.0</td>
+      <td>-7.26</td>
       <td>van_elteren_stratified_wilcoxon</td>
-      <td>3.220254e-03</td>
-      <td>2.114097e-01</td>
-      <td>19</td>
-      <td>5</td>
-      <td>3</td>
-      <td>True</td>
-      <td>32.0</td>
-      <td>1.402554e-02</td>
+      <td>4.350899e-03</td>
+      <td>2.836786e-01</td>
+      <td>21</td>
+      <td>7</td>
+      <td>6</td>
+      <td>False</td>
+      <td>-10.0</td>
+      <td>8.475195e-03</td>
     </tr>
   </tbody>
-</table></div><details class='definitions' open><summary>Top 10 per-site figure(s) — modified vs unmodified tail length</summary><div class='gallery'><figure class='image-card'><a class='image-link' href='demo14_report_files/fig_0129.png' target='_blank' rel='noopener noreferrer' title='Open full-size image in a new tab'><img src='demo14_report_files/fig_0129.png' alt='rank01_ASGR1_chr17_7173437-7173438_-_19227.png' loading='lazy' /><span class='expand-badge' aria-hidden='true'>↗</span></a><figcaption>rank01_ASGR1_chr17_7173437-7173438_-_19227.png</figcaption></figure><figure class='image-card'><a class='image-link' href='demo14_report_files/fig_0130.png' target='_blank' rel='noopener noreferrer' title='Open full-size image in a new tab'><img src='demo14_report_files/fig_0130.png' alt='rank02_ASGR2_chr17_7101328-7101329_-_17802.png' loading='lazy' /><span class='expand-badge' aria-hidden='true'>↗</span></a><figcaption>rank02_ASGR2_chr17_7101328-7101329_-_17802.png</figcaption></figure><figure class='image-card'><a class='image-link' href='demo14_report_files/fig_0131.png' target='_blank' rel='noopener noreferrer' title='Open full-size image in a new tab'><img src='demo14_report_files/fig_0131.png' alt='rank03_ASGR2_chr17_7101332-7101333_-_17802.png' loading='lazy' /><span class='expand-badge' aria-hidden='true'>↗</span></a><figcaption>rank03_ASGR2_chr17_7101332-7101333_-_17802.png</figcaption></figure><figure class='image-card'><a class='image-link' href='demo14_report_files/fig_0132.png' target='_blank' rel='noopener noreferrer' title='Open full-size image in a new tab'><img src='demo14_report_files/fig_0132.png' alt='rank04_PCID2_chr13_113177838-113177839_-_17802.png' loading='lazy' /><span class='expand-badge' aria-hidden='true'>↗</span></a><figcaption>rank04_PCID2_chr13_113177838-113177839_-_17802.png</figcaption></figure><figure class='image-card'><a class='image-link' href='demo14_report_files/fig_0133.png' target='_blank' rel='noopener noreferrer' title='Open full-size image in a new tab'><img src='demo14_report_files/fig_0133.png' alt='rank05_ASGR2_chr17_7102103-7102104_-_17802.png' loading='lazy' /><span class='expand-badge' aria-hidden='true'>↗</span></a><figcaption>rank05_ASGR2_chr17_7102103-7102104_-_17802.png</figcaption></figure><figure class='image-card'><a class='image-link' href='demo14_report_files/fig_0134.png' target='_blank' rel='noopener noreferrer' title='Open full-size image in a new tab'><img src='demo14_report_files/fig_0134.png' alt='rank06_ASGR2_chr17_7101323-7101324_-_m.png' loading='lazy' /><span class='expand-badge' aria-hidden='true'>↗</span></a><figcaption>rank06_ASGR2_chr17_7101323-7101324_-_m.png</figcaption></figure><figure class='image-card'><a class='image-link' href='demo14_report_files/fig_0135.png' target='_blank' rel='noopener noreferrer' title='Open full-size image in a new tab'><img src='demo14_report_files/fig_0135.png' alt='rank07_PCID2_chr13_113177764-113177765_-_69426.png' loading='lazy' /><span class='expand-badge' aria-hidden='true'>↗</span></a><figcaption>rank07_PCID2_chr13_113177764-113177765_-_69426.png</figcaption></figure><figure class='image-card'><a class='image-link' href='demo14_report_files/fig_0136.png' target='_blank' rel='noopener noreferrer' title='Open full-size image in a new tab'><img src='demo14_report_files/fig_0136.png' alt='rank08_ASGR2_chr17_7107266-7107267_-_17802.png' loading='lazy' /><span class='expand-badge' aria-hidden='true'>↗</span></a><figcaption>rank08_ASGR2_chr17_7107266-7107267_-_17802.png</figcaption></figure><figure class='image-card'><a class='image-link' href='demo14_report_files/fig_0137.png' target='_blank' rel='noopener noreferrer' title='Open full-size image in a new tab'><img src='demo14_report_files/fig_0137.png' alt='rank09_ASGR1_chr17_7173478-7173479_-_17802.png' loading='lazy' /><span class='expand-badge' aria-hidden='true'>↗</span></a><figcaption>rank09_ASGR1_chr17_7173478-7173479_-_17802.png</figcaption></figure><figure class='image-card'><a class='image-link' href='demo14_report_files/fig_0138.png' target='_blank' rel='noopener noreferrer' title='Open full-size image in a new tab'><img src='demo14_report_files/fig_0138.png' alt='rank10_RIOK3_chr18_23475092-23475093___17802.png' loading='lazy' /><span class='expand-badge' aria-hidden='true'>↗</span></a><figcaption>rank10_RIOK3_chr18_23475092-23475093___17802.png</figcaption></figure></div></details></div></div></details></section><section id='sec-between-condition-changes-in-fragment-form-usage-junction-usage-apa-usage-polya-tail-length-and-modification-stoichiometries'><details class='report-section' open><summary><h2>Between-Condition Changes in Fragment-form Usage, Junction Usage, APA Usage, polyA Tail Length, and Modification Stoichiometries</h2></summary><div class='section-body'><p class='section-intro'>Replicate-aware comparisons between conditions, from the samplesheet's `condition` column. Counts (modification and isoform/APA/junction usage) use a beta-binomial likelihood-ratio test with dispersion shrinkage across features; poly(A) tail length is continuous and is compared with Welch's t-test across per-replicate medians. Reads are never pooled across replicates -- the biological unit is the replicate, and pooling would make trivial differences look overwhelmingly significant. Differential modification is reported two ways: a SITE-LEVEL table (counts summed across a site's fragmentforms -- the headline change at the modified position), and, when the per-transcript table is enabled, a PER-FRAGMENTFORM table that tests each ZN transcript partition on its own to resolve which fragmentform carries the change. Each analysis shows a top-by-effect figure with the individual replicate values, so effect size and replicate agreement are visible together.</p><details class='definitions'><summary>Column definitions</summary><dl><dt>ZN_transcript_index</dt><dd>Transcript partition (ZN) the modification site belongs to. Present only in the per-fragmentform table; the site-level table pools counts across a site&#x27;s partitions and omits this column.</dd><dt>mu_reference / mu_test</dt><dd>Fitted modified (or usage) fraction in the reference and test condition.</dd><dt>delta</dt><dd>mu_test - mu_reference: the effect size, in fraction units (delta_nt = nucleotides of tail).</dd><dt>p_adj_bh</dt><dd>Benjamini-Hochberg FDR over all features in that analysis.</dd><dt>per_replicate_json</dt><dd>Per-replicate observed value in each condition ({reference:{...}, test:{...}}); drives the top-by-effect dot plots.</dd></dl></details><div class='callout-warn'><b>Read this first — please consider both effect size and p-value.</b> Your replicates are highly reproducible: within <b>mock</b> (3 replicates) the typical site differs by only <b>~0.0 pp</b> between replicates; within <b>zikv</b> (3 replicates) the typical site differs by only <b>~0.0 pp</b> between replicates. When replicates agree this tightly the replicate-aware tests have very high power, so a shift of only a couple of percentage points can clear FDR even though it may be biologically less meaningful.</div><div class='subsection'><h3>Contrast: zikv_vs_mock</h3><p class='section-intro'><b>Reference condition:</b> mock &nbsp;·&nbsp; <b>Test condition:</b> zikv. Every <b>delta</b> is <b>test − reference</b> (mu_test − mu_reference / mean_tail_test − mean_tail_reference), so a POSITIVE value means higher in <b>zikv</b> (test) than in <b>mock</b> (reference), and a negative value means lower.</p><div class='table-wrap'><table class="dataframe datatable">
+</table></div><details class='definitions' open><summary>Top 10 per-site figure(s) — modified vs unmodified tail length</summary><div class='gallery'><figure class='image-card'><a class='image-link' href='demo14_report_files/fig_0129.png' target='_blank' rel='noopener noreferrer' title='Open full-size image in a new tab'><img src='demo14_report_files/fig_0129.png' alt='rank01_ASGR1_chr17_7173437-7173438_-_19227.png' loading='lazy' /><span class='expand-badge' aria-hidden='true'>↗</span></a><figcaption>rank01_ASGR1_chr17_7173437-7173438_-_19227.png</figcaption></figure><figure class='image-card'><a class='image-link' href='demo14_report_files/fig_0130.png' target='_blank' rel='noopener noreferrer' title='Open full-size image in a new tab'><img src='demo14_report_files/fig_0130.png' alt='rank02_ASGR2_chr17_7101328-7101329_-_17802.png' loading='lazy' /><span class='expand-badge' aria-hidden='true'>↗</span></a><figcaption>rank02_ASGR2_chr17_7101328-7101329_-_17802.png</figcaption></figure><figure class='image-card'><a class='image-link' href='demo14_report_files/fig_0131.png' target='_blank' rel='noopener noreferrer' title='Open full-size image in a new tab'><img src='demo14_report_files/fig_0131.png' alt='rank03_ASGR2_chr17_7101332-7101333_-_17802.png' loading='lazy' /><span class='expand-badge' aria-hidden='true'>↗</span></a><figcaption>rank03_ASGR2_chr17_7101332-7101333_-_17802.png</figcaption></figure><figure class='image-card'><a class='image-link' href='demo14_report_files/fig_0132.png' target='_blank' rel='noopener noreferrer' title='Open full-size image in a new tab'><img src='demo14_report_files/fig_0132.png' alt='rank04_PCID2_chr13_113177838-113177839_-_17802.png' loading='lazy' /><span class='expand-badge' aria-hidden='true'>↗</span></a><figcaption>rank04_PCID2_chr13_113177838-113177839_-_17802.png</figcaption></figure><figure class='image-card'><a class='image-link' href='demo14_report_files/fig_0133.png' target='_blank' rel='noopener noreferrer' title='Open full-size image in a new tab'><img src='demo14_report_files/fig_0133.png' alt='rank05_PCID2_chr13_113177764-113177765_-_69426.png' loading='lazy' /><span class='expand-badge' aria-hidden='true'>↗</span></a><figcaption>rank05_PCID2_chr13_113177764-113177765_-_69426.png</figcaption></figure><figure class='image-card'><a class='image-link' href='demo14_report_files/fig_0134.png' target='_blank' rel='noopener noreferrer' title='Open full-size image in a new tab'><img src='demo14_report_files/fig_0134.png' alt='rank06_ASGR2_chr17_7101323-7101324_-_m.png' loading='lazy' /><span class='expand-badge' aria-hidden='true'>↗</span></a><figcaption>rank06_ASGR2_chr17_7101323-7101324_-_m.png</figcaption></figure><figure class='image-card'><a class='image-link' href='demo14_report_files/fig_0135.png' target='_blank' rel='noopener noreferrer' title='Open full-size image in a new tab'><img src='demo14_report_files/fig_0135.png' alt='rank07_ASGR2_chr17_7102103-7102104_-_17802.png' loading='lazy' /><span class='expand-badge' aria-hidden='true'>↗</span></a><figcaption>rank07_ASGR2_chr17_7102103-7102104_-_17802.png</figcaption></figure><figure class='image-card'><a class='image-link' href='demo14_report_files/fig_0136.png' target='_blank' rel='noopener noreferrer' title='Open full-size image in a new tab'><img src='demo14_report_files/fig_0136.png' alt='rank08_ASGR2_chr17_7107266-7107267_-_17802.png' loading='lazy' /><span class='expand-badge' aria-hidden='true'>↗</span></a><figcaption>rank08_ASGR2_chr17_7107266-7107267_-_17802.png</figcaption></figure><figure class='image-card'><a class='image-link' href='demo14_report_files/fig_0137.png' target='_blank' rel='noopener noreferrer' title='Open full-size image in a new tab'><img src='demo14_report_files/fig_0137.png' alt='rank09_RIOK3_chr18_23475092-23475093___17802.png' loading='lazy' /><span class='expand-badge' aria-hidden='true'>↗</span></a><figcaption>rank09_RIOK3_chr18_23475092-23475093___17802.png</figcaption></figure><figure class='image-card'><a class='image-link' href='demo14_report_files/fig_0138.png' target='_blank' rel='noopener noreferrer' title='Open full-size image in a new tab'><img src='demo14_report_files/fig_0138.png' alt='rank10_ASGR2_chr17_7102121-7102122_-_19229.png' loading='lazy' /><span class='expand-badge' aria-hidden='true'>↗</span></a><figcaption>rank10_ASGR2_chr17_7102121-7102122_-_19229.png</figcaption></figure></div></details></div></div></details></section><section id='sec-between-condition-changes-in-fragment-form-usage-junction-usage-apa-usage-polya-tail-length-and-modification-stoichiometries'><details class='report-section' open><summary><h2>Between-Condition Changes in Fragment-form Usage, Junction Usage, APA Usage, polyA Tail Length, and Modification Stoichiometries</h2></summary><div class='section-body'><p class='section-intro'>Replicate-aware comparisons between conditions, from the samplesheet's `condition` column. Counts (modification and isoform/APA/junction usage) use a beta-binomial likelihood-ratio test with dispersion shrinkage across features; poly(A) tail length is continuous and is compared with Welch's t-test across per-replicate medians. Reads are never pooled across replicates -- the biological unit is the replicate, and pooling would make trivial differences look overwhelmingly significant. Differential modification is reported two ways: a SITE-LEVEL table (counts summed across a site's fragmentforms -- the headline change at the modified position), and, when the per-transcript table is enabled, a PER-FRAGMENTFORM table that tests each ZN transcript partition on its own to resolve which fragmentform carries the change. Each analysis shows a top-by-effect figure with the individual replicate values, so effect size and replicate agreement are visible together.</p><details class='definitions'><summary>Column definitions</summary><dl><dt>ZN_transcript_index</dt><dd>Transcript partition (ZN) the modification site belongs to. Present only in the per-fragmentform table; the site-level table pools counts across a site&#x27;s partitions and omits this column.</dd><dt>mu_reference / mu_test</dt><dd>Fitted modified (or usage) fraction in the reference and test condition.</dd><dt>delta</dt><dd>mu_test - mu_reference: the effect size, in fraction units (delta_nt = nucleotides of tail).</dd><dt>p_adj_bh</dt><dd>Benjamini-Hochberg FDR over all features in that analysis.</dd><dt>per_replicate_json</dt><dd>Per-replicate observed value in each condition ({reference:{...}, test:{...}}); drives the top-by-effect dot plots.</dd></dl></details><div class='callout-warn'><b>Read this first — please consider both effect size and p-value.</b> Your replicates are highly reproducible: within <b>mock</b> (3 replicates) the typical site differs by only <b>~0.0 pp</b> between replicates; within <b>zikv</b> (3 replicates) the typical site differs by only <b>~0.0 pp</b> between replicates. When replicates agree this tightly the replicate-aware tests have very high power, so a shift of only a couple of percentage points can clear FDR even though it may be biologically less meaningful.</div><div class='subsection'><h3>Contrast: zikv_vs_mock</h3><p class='section-intro'><b>Reference condition:</b> mock &nbsp;·&nbsp; <b>Test condition:</b> zikv. Every <b>delta</b> is <b>test − reference</b> (mu_test − mu_reference / mean_tail_test − mean_tail_reference), so a POSITIVE value means higher in <b>zikv</b> (test) than in <b>mock</b> (reference), and a negative value means lower.</p><div class='table-wrap'><table class="dataframe datatable">
   <thead>
     <tr style="text-align: right;">
       <th>analysis</th>
@@ -5605,162 +5598,162 @@ reference_gtf: /athena/cayuga_0003/scratch/users/thn4005/scripts/projects_v2/mod
     <tr>
       <td>RIOK3</td>
       <td>RIOK3.RIOK3.G12.T1</td>
-      <td>0.78480</td>
+      <td>0.78481</td>
       <td>0.44364</td>
-      <td>-0.34116</td>
-      <td>0.000026</td>
+      <td>-0.34117</td>
+      <td>0.000024</td>
     </tr>
     <tr>
       <td>MXD1</td>
       <td>MXD1.MXD1.G7.T2</td>
-      <td>0.43565</td>
-      <td>0.11662</td>
-      <td>-0.31904</td>
-      <td>0.000222</td>
+      <td>0.43559</td>
+      <td>0.11671</td>
+      <td>-0.31888</td>
+      <td>0.000208</td>
     </tr>
     <tr>
       <td>NHSL1</td>
       <td>NHSL1.NHSL1.G8.T4</td>
-      <td>0.02939</td>
-      <td>0.29292</td>
-      <td>0.26353</td>
-      <td>0.000808</td>
+      <td>0.02941</td>
+      <td>0.29286</td>
+      <td>0.26345</td>
+      <td>0.000732</td>
     </tr>
     <tr>
       <td>ALCAM</td>
       <td>ALCAM.ALCAM.G1.T1</td>
-      <td>0.82183</td>
-      <td>0.59867</td>
-      <td>-0.22316</td>
-      <td>0.000222</td>
+      <td>0.82189</td>
+      <td>0.59860</td>
+      <td>-0.22330</td>
+      <td>0.000208</td>
     </tr>
     <tr>
       <td>MXD1</td>
       <td>MXD1.MXD1.G7.T3</td>
       <td>0.00000</td>
-      <td>0.17238</td>
-      <td>0.17238</td>
-      <td>0.000484</td>
+      <td>0.17241</td>
+      <td>0.17241</td>
+      <td>0.000460</td>
     </tr>
     <tr>
       <td>NHSL1</td>
       <td>NHSL1.NHSL1.G8.T2</td>
-      <td>0.29398</td>
-      <td>0.12859</td>
-      <td>-0.16539</td>
-      <td>0.020751</td>
+      <td>0.29411</td>
+      <td>0.12857</td>
+      <td>-0.16554</td>
+      <td>0.019642</td>
     </tr>
     <tr>
       <td>SERAC1</td>
       <td>SERAC1.SERAC1.G13.T1</td>
-      <td>0.38597</td>
-      <td>0.22626</td>
-      <td>-0.15971</td>
-      <td>0.010635</td>
+      <td>0.38596</td>
+      <td>0.22625</td>
+      <td>-0.15972</td>
+      <td>0.009921</td>
     </tr>
     <tr>
       <td>ALCAM</td>
       <td>ALCAM.ALCAM.G1.T3</td>
       <td>0.00000</td>
-      <td>0.15011</td>
-      <td>0.15011</td>
-      <td>0.000037</td>
+      <td>0.15023</td>
+      <td>0.15023</td>
+      <td>0.000024</td>
     </tr>
     <tr>
       <td>RIOK3</td>
       <td>RIOK3.RIOK3.G12.T3</td>
       <td>0.01519</td>
-      <td>0.14531</td>
-      <td>0.13012</td>
-      <td>0.000222</td>
+      <td>0.14545</td>
+      <td>0.13026</td>
+      <td>0.000208</td>
     </tr>
     <tr>
       <td>VGLL4</td>
       <td>VGLL4.VGLL4.G14.T1</td>
-      <td>0.89230</td>
-      <td>0.76421</td>
-      <td>-0.12809</td>
-      <td>0.003447</td>
+      <td>0.89191</td>
+      <td>0.76426</td>
+      <td>-0.12766</td>
+      <td>0.002970</td>
     </tr>
     <tr>
       <td>MXD1</td>
       <td>MXD1.MXD1.G7.T4</td>
-      <td>0.00616</td>
+      <td>0.00614</td>
       <td>0.12997</td>
-      <td>0.12380</td>
-      <td>0.001670</td>
+      <td>0.12384</td>
+      <td>0.001543</td>
     </tr>
     <tr>
       <td>VGLL4</td>
       <td>VGLL4.VGLL4.G14.T2</td>
-      <td>0.02690</td>
-      <td>0.14076</td>
-      <td>0.11387</td>
-      <td>0.000858</td>
+      <td>0.02702</td>
+      <td>0.14069</td>
+      <td>0.11367</td>
+      <td>0.000732</td>
     </tr>
     <tr>
       <td>C8A</td>
       <td>C8A.C8A.G5.T3</td>
-      <td>0.08553</td>
-      <td>0.19244</td>
+      <td>0.08551</td>
+      <td>0.19242</td>
       <td>0.10691</td>
-      <td>0.002846</td>
+      <td>0.002505</td>
     </tr>
     <tr>
       <td>C8A</td>
       <td>C8A.C8A.G5.T4</td>
-      <td>0.07458</td>
-      <td>0.17190</td>
-      <td>0.09732</td>
-      <td>0.003750</td>
+      <td>0.07481</td>
+      <td>0.17201</td>
+      <td>0.09720</td>
+      <td>0.003098</td>
     </tr>
     <tr>
       <td>C8A</td>
       <td>C8A.C8A.G5.T2</td>
-      <td>0.33852</td>
-      <td>0.24782</td>
-      <td>-0.09070</td>
-      <td>0.031689</td>
+      <td>0.33848</td>
+      <td>0.24781</td>
+      <td>-0.09067</td>
+      <td>0.031110</td>
     </tr>
     <tr>
       <td>IP6K2</td>
       <td>IP6K2.IP6K2.G6.T5</td>
-      <td>0.03075</td>
-      <td>0.11544</td>
-      <td>0.08468</td>
-      <td>0.000042</td>
+      <td>0.03091</td>
+      <td>0.11518</td>
+      <td>0.08427</td>
+      <td>0.000024</td>
     </tr>
     <tr>
       <td>SERAC1</td>
       <td>SERAC1.SERAC1.G13.T8</td>
-      <td>0.00586</td>
-      <td>0.08826</td>
-      <td>0.08240</td>
-      <td>0.005260</td>
+      <td>0.00585</td>
+      <td>0.08824</td>
+      <td>0.08239</td>
+      <td>0.005046</td>
     </tr>
     <tr>
       <td>RIOK3</td>
       <td>RIOK3.RIOK3.G12.T4</td>
-      <td>0.00512</td>
-      <td>0.08392</td>
-      <td>0.07880</td>
-      <td>0.000616</td>
+      <td>0.00507</td>
+      <td>0.08365</td>
+      <td>0.07859</td>
+      <td>0.000470</td>
     </tr>
     <tr>
       <td>IP6K2</td>
       <td>IP6K2.IP6K2.G6.T1</td>
-      <td>0.34808</td>
-      <td>0.27536</td>
-      <td>-0.07273</td>
-      <td>0.002389</td>
+      <td>0.34810</td>
+      <td>0.27543</td>
+      <td>-0.07267</td>
+      <td>0.001933</td>
     </tr>
     <tr>
       <td>ATG7</td>
       <td>ATG7.ATG7.G4.T2</td>
-      <td>0.10049</td>
-      <td>0.03139</td>
-      <td>-0.06910</td>
-      <td>0.000928</td>
+      <td>0.10041</td>
+      <td>0.03138</td>
+      <td>-0.06903</td>
+      <td>0.000732</td>
     </tr>
   </tbody>
 </table></div><figure class='image-card'><a class='image-link' href='demo14_report_files/fig_0141.png' target='_blank' rel='noopener noreferrer' title='Open full-size image in a new tab'><img src='demo14_report_files/fig_0141.png' alt='Differential isoform usage top 20' loading='lazy' /><span class='expand-badge' aria-hidden='true'>↗</span></a><figcaption>Top 20 by |effect|. Diamonds = condition means (joined line = the shift); small dots = individual replicates, so overlapping replicate clouds flag a weak/non-significant change.</figcaption></figure></div><div class='subsection'><h3>Differential APA-site usage — top by effect size</h3><div class='table-wrap'><table class="dataframe datatable">
@@ -5778,162 +5771,162 @@ reference_gtf: /athena/cayuga_0003/scratch/users/thn4005/scripts/projects_v2/mod
     <tr>
       <td>MXD1</td>
       <td>chr2:69942944:+</td>
-      <td>0.43597</td>
-      <td>0.11627</td>
-      <td>-0.31970</td>
-      <td>0.000212</td>
+      <td>0.43595</td>
+      <td>0.11630</td>
+      <td>-0.31965</td>
+      <td>0.000201</td>
     </tr>
     <tr>
       <td>NHSL1</td>
       <td>chr6:138446851:-</td>
-      <td>0.02932</td>
-      <td>0.29322</td>
-      <td>0.26390</td>
-      <td>0.000962</td>
+      <td>0.02933</td>
+      <td>0.29319</td>
+      <td>0.26387</td>
+      <td>0.000942</td>
     </tr>
     <tr>
       <td>ALCAM</td>
       <td>chr3:105576891:+</td>
-      <td>0.94278</td>
-      <td>0.70941</td>
-      <td>-0.23336</td>
-      <td>0.000044</td>
+      <td>0.94280</td>
+      <td>0.70938</td>
+      <td>-0.23341</td>
+      <td>0.000042</td>
     </tr>
     <tr>
       <td>MXD1</td>
       <td>chr2:69940641:+</td>
-      <td>0.55800</td>
-      <td>0.75364</td>
-      <td>0.19563</td>
-      <td>0.004407</td>
+      <td>0.55802</td>
+      <td>0.75362</td>
+      <td>0.19559</td>
+      <td>0.004330</td>
     </tr>
     <tr>
       <td>NHSL1</td>
       <td>chr6:138422043:-</td>
-      <td>0.72039</td>
-      <td>0.53459</td>
-      <td>-0.18580</td>
-      <td>0.024767</td>
+      <td>0.72040</td>
+      <td>0.53466</td>
+      <td>-0.18574</td>
+      <td>0.024505</td>
     </tr>
     <tr>
       <td>RIOK3</td>
       <td>chr18:23483137:+</td>
-      <td>0.80984</td>
-      <td>0.65369</td>
-      <td>-0.15616</td>
-      <td>0.000986</td>
+      <td>0.80986</td>
+      <td>0.65376</td>
+      <td>-0.15611</td>
+      <td>0.000943</td>
     </tr>
     <tr>
       <td>RIOK3</td>
       <td>chr18:23481478:+</td>
-      <td>0.16997</td>
-      <td>0.32527</td>
-      <td>0.15530</td>
-      <td>0.000986</td>
+      <td>0.16995</td>
+      <td>0.32519</td>
+      <td>0.15525</td>
+      <td>0.000943</td>
     </tr>
     <tr>
       <td>ALCAM</td>
       <td>chr3:105524944:+</td>
       <td>0.00000</td>
-      <td>0.14970</td>
-      <td>0.14970</td>
-      <td>0.000044</td>
+      <td>0.14973</td>
+      <td>0.14973</td>
+      <td>0.000042</td>
     </tr>
     <tr>
       <td>VGLL4</td>
       <td>chr3:11556069:-</td>
-      <td>0.93923</td>
-      <td>0.79442</td>
-      <td>-0.14481</td>
-      <td>0.000976</td>
+      <td>0.93921</td>
+      <td>0.79444</td>
+      <td>-0.14477</td>
+      <td>0.000942</td>
     </tr>
     <tr>
       <td>SERAC1</td>
       <td>chr6:158109519:-</td>
-      <td>0.45036</td>
+      <td>0.45035</td>
       <td>0.31902</td>
       <td>-0.13133</td>
-      <td>0.027588</td>
+      <td>0.027464</td>
     </tr>
     <tr>
       <td>MXD1</td>
       <td>chr2:69939558:+</td>
-      <td>0.00630</td>
+      <td>0.00629</td>
       <td>0.12998</td>
-      <td>0.12368</td>
-      <td>0.001427</td>
+      <td>0.12369</td>
+      <td>0.001358</td>
     </tr>
     <tr>
       <td>IP6K2</td>
       <td>chr3:48693776:-</td>
       <td>0.35901</td>
-      <td>0.48237</td>
-      <td>0.12336</td>
-      <td>0.000212</td>
+      <td>0.48236</td>
+      <td>0.12335</td>
+      <td>0.000201</td>
     </tr>
     <tr>
       <td>VGLL4</td>
       <td>chr3:11557979:-</td>
-      <td>0.02651</td>
-      <td>0.14114</td>
-      <td>0.11463</td>
-      <td>0.000976</td>
+      <td>0.02653</td>
+      <td>0.14110</td>
+      <td>0.11457</td>
+      <td>0.000942</td>
     </tr>
     <tr>
       <td>C8A</td>
       <td>chr1:56883784:+</td>
-      <td>0.08561</td>
-      <td>0.19254</td>
+      <td>0.08560</td>
+      <td>0.19253</td>
       <td>0.10693</td>
-      <td>0.002180</td>
+      <td>0.002151</td>
     </tr>
     <tr>
       <td>RANBP3</td>
       <td>chr19:5917321:-</td>
-      <td>0.32251</td>
-      <td>0.42711</td>
-      <td>0.10460</td>
-      <td>0.004407</td>
+      <td>0.32257</td>
+      <td>0.42721</td>
+      <td>0.10464</td>
+      <td>0.004228</td>
     </tr>
     <tr>
       <td>RANBP3</td>
       <td>chr19:5916139:-</td>
-      <td>0.61566</td>
-      <td>0.51254</td>
-      <td>-0.10312</td>
-      <td>0.005124</td>
+      <td>0.61560</td>
+      <td>0.51242</td>
+      <td>-0.10318</td>
+      <td>0.004724</td>
     </tr>
     <tr>
       <td>C8A</td>
       <td>chr1:56883684:+</td>
-      <td>0.07384</td>
-      <td>0.17143</td>
-      <td>0.09759</td>
-      <td>0.004407</td>
+      <td>0.07388</td>
+      <td>0.17147</td>
+      <td>0.09758</td>
+      <td>0.004228</td>
     </tr>
     <tr>
       <td>IP6K2</td>
       <td>chr3:48688003:-</td>
-      <td>0.46145</td>
-      <td>0.36821</td>
-      <td>-0.09324</td>
-      <td>0.001898</td>
+      <td>0.46146</td>
+      <td>0.36828</td>
+      <td>-0.09319</td>
+      <td>0.001725</td>
     </tr>
     <tr>
       <td>C8A</td>
       <td>chr1:56918106:+</td>
-      <td>0.33872</td>
-      <td>0.24788</td>
-      <td>-0.09084</td>
-      <td>0.026534</td>
+      <td>0.33870</td>
+      <td>0.24787</td>
+      <td>-0.09083</td>
+      <td>0.026327</td>
     </tr>
     <tr>
       <td>ATG7</td>
       <td>chr3:11557665:+</td>
-      <td>0.10087</td>
-      <td>0.03154</td>
-      <td>-0.06933</td>
-      <td>0.001427</td>
+      <td>0.10084</td>
+      <td>0.03152</td>
+      <td>-0.06932</td>
+      <td>0.001358</td>
     </tr>
   </tbody>
 </table></div><figure class='image-card'><a class='image-link' href='demo14_report_files/fig_0142.png' target='_blank' rel='noopener noreferrer' title='Open full-size image in a new tab'><img src='demo14_report_files/fig_0142.png' alt='Differential APA-site usage top 20' loading='lazy' /><span class='expand-badge' aria-hidden='true'>↗</span></a><figcaption>Top 20 by |effect|. Diamonds = condition means (joined line = the shift); small dots = individual replicates, so overlapping replicate clouds flag a weak/non-significant change.</figcaption></figure></div><div class='subsection'><h3>Differential junction usage — top by effect size</h3><div class='table-wrap'><table class="dataframe datatable">
@@ -5952,161 +5945,161 @@ reference_gtf: /athena/cayuga_0003/scratch/users/thn4005/scripts/projects_v2/mod
       <td>RIOK3</td>
       <td>chr18:23473627-23474947:+</td>
       <td>0.97468</td>
-      <td>0.70423</td>
+      <td>0.70424</td>
       <td>-0.27044</td>
-      <td>0.000005</td>
+      <td>0.000004</td>
     </tr>
     <tr>
       <td>RIOK3</td>
       <td>chr18:23473484-23474947:+</td>
       <td>0.02532</td>
-      <td>0.29577</td>
+      <td>0.29576</td>
       <td>0.27044</td>
-      <td>0.000005</td>
+      <td>0.000004</td>
     </tr>
     <tr>
       <td>NHSL1</td>
       <td>chr6:138496372-138499232:-</td>
-      <td>0.02940</td>
-      <td>0.29290</td>
-      <td>0.26350</td>
-      <td>0.000228</td>
+      <td>0.02941</td>
+      <td>0.29286</td>
+      <td>0.26345</td>
+      <td>0.000222</td>
     </tr>
     <tr>
       <td>NHSL1</td>
       <td>chr6:138429844-138430392:-</td>
-      <td>0.97060</td>
-      <td>0.70710</td>
-      <td>-0.26350</td>
-      <td>0.000228</td>
+      <td>0.97059</td>
+      <td>0.70714</td>
+      <td>-0.26345</td>
+      <td>0.000222</td>
     </tr>
     <tr>
       <td>NHSL1</td>
       <td>chr6:138424817-138429710:-</td>
-      <td>0.97060</td>
-      <td>0.70710</td>
-      <td>-0.26350</td>
-      <td>0.000228</td>
+      <td>0.97059</td>
+      <td>0.70714</td>
+      <td>-0.26345</td>
+      <td>0.000222</td>
     </tr>
     <tr>
       <td>C8A</td>
       <td>chr1:56883682-56885926:+</td>
-      <td>0.80525</td>
-      <td>0.58310</td>
-      <td>-0.22215</td>
-      <td>0.000087</td>
-    </tr>
-    <tr>
-      <td>SERAC1</td>
-      <td>chr6:158150590-158155314:-</td>
-      <td>0.66083</td>
-      <td>0.44118</td>
-      <td>-0.21966</td>
-      <td>0.001316</td>
-    </tr>
-    <tr>
-      <td>SERAC1</td>
-      <td>chr6:158155352-158158272:-</td>
-      <td>0.66083</td>
-      <td>0.44118</td>
-      <td>-0.21966</td>
-      <td>0.001316</td>
+      <td>0.80523</td>
+      <td>0.58309</td>
+      <td>-0.22214</td>
+      <td>0.000076</td>
     </tr>
     <tr>
       <td>SERAC1</td>
       <td>chr6:158150590-158158272:-</td>
-      <td>0.33917</td>
+      <td>0.33918</td>
       <td>0.55882</td>
-      <td>0.21966</td>
-      <td>0.001316</td>
+      <td>0.21964</td>
+      <td>0.001283</td>
     </tr>
     <tr>
-      <td>C8A</td>
-      <td>chr1:56906793-56907955:+</td>
-      <td>0.74940</td>
-      <td>0.55395</td>
-      <td>-0.19546</td>
-      <td>0.000202</td>
+      <td>SERAC1</td>
+      <td>chr6:158155352-158158272:-</td>
+      <td>0.66082</td>
+      <td>0.44118</td>
+      <td>-0.21964</td>
+      <td>0.001283</td>
     </tr>
     <tr>
-      <td>C8A</td>
-      <td>chr1:56912626-56917564:+</td>
-      <td>0.74940</td>
-      <td>0.55395</td>
-      <td>-0.19546</td>
-      <td>0.000202</td>
+      <td>SERAC1</td>
+      <td>chr6:158150590-158155314:-</td>
+      <td>0.66082</td>
+      <td>0.44118</td>
+      <td>-0.21964</td>
+      <td>0.001283</td>
     </tr>
     <tr>
       <td>C8A</td>
       <td>chr1:56886168-56906666:+</td>
-      <td>0.74940</td>
-      <td>0.55395</td>
-      <td>-0.19546</td>
-      <td>0.000202</td>
+      <td>0.74941</td>
+      <td>0.55394</td>
+      <td>-0.19547</td>
+      <td>0.000198</td>
     </tr>
     <tr>
       <td>C8A</td>
       <td>chr1:56908114-56912402:+</td>
-      <td>0.74940</td>
-      <td>0.55395</td>
-      <td>-0.19546</td>
-      <td>0.000202</td>
+      <td>0.74941</td>
+      <td>0.55394</td>
+      <td>-0.19547</td>
+      <td>0.000198</td>
     </tr>
     <tr>
-      <td>MXD1</td>
-      <td>chr2:69916221-69921735:+</td>
-      <td>1.00000</td>
-      <td>0.82761</td>
-      <td>-0.17239</td>
-      <td>0.000124</td>
+      <td>C8A</td>
+      <td>chr1:56912626-56917564:+</td>
+      <td>0.74941</td>
+      <td>0.55394</td>
+      <td>-0.19547</td>
+      <td>0.000198</td>
     </tr>
     <tr>
-      <td>MXD1</td>
-      <td>chr2:69921766-69935350:+</td>
-      <td>1.00000</td>
-      <td>0.82761</td>
-      <td>-0.17239</td>
-      <td>0.000124</td>
+      <td>C8A</td>
+      <td>chr1:56906793-56907955:+</td>
+      <td>0.74941</td>
+      <td>0.55394</td>
+      <td>-0.19547</td>
+      <td>0.000198</td>
     </tr>
     <tr>
       <td>MXD1</td>
       <td>chr2:69916221-69935350:+</td>
       <td>0.00000</td>
-      <td>0.17239</td>
-      <td>0.17239</td>
-      <td>0.000124</td>
+      <td>0.17241</td>
+      <td>0.17241</td>
+      <td>0.000117</td>
     </tr>
     <tr>
-      <td>NHSL1</td>
-      <td>chr6:138442115-138447000:-</td>
-      <td>0.29403</td>
-      <td>0.12858</td>
-      <td>-0.16545</td>
-      <td>0.012356</td>
+      <td>MXD1</td>
+      <td>chr2:69921766-69935350:+</td>
+      <td>1.00000</td>
+      <td>0.82759</td>
+      <td>-0.17241</td>
+      <td>0.000117</td>
     </tr>
     <tr>
-      <td>NHSL1</td>
-      <td>chr6:138433681-138441982:-</td>
-      <td>0.29403</td>
-      <td>0.12858</td>
-      <td>-0.16545</td>
-      <td>0.012356</td>
+      <td>MXD1</td>
+      <td>chr2:69916221-69921735:+</td>
+      <td>1.00000</td>
+      <td>0.82759</td>
+      <td>-0.17241</td>
+      <td>0.000117</td>
     </tr>
     <tr>
       <td>NHSL1</td>
       <td>chr6:138496372-138545622:-</td>
-      <td>0.29403</td>
-      <td>0.12858</td>
-      <td>-0.16545</td>
-      <td>0.012356</td>
+      <td>0.29411</td>
+      <td>0.12857</td>
+      <td>-0.16554</td>
+      <td>0.011945</td>
+    </tr>
+    <tr>
+      <td>NHSL1</td>
+      <td>chr6:138433681-138441982:-</td>
+      <td>0.29411</td>
+      <td>0.12857</td>
+      <td>-0.16554</td>
+      <td>0.011945</td>
+    </tr>
+    <tr>
+      <td>NHSL1</td>
+      <td>chr6:138442115-138447000:-</td>
+      <td>0.29411</td>
+      <td>0.12857</td>
+      <td>-0.16554</td>
+      <td>0.011945</td>
     </tr>
     <tr>
       <td>ALCAM</td>
       <td>chr3:105540103-105541632:+</td>
       <td>1.00000</td>
-      <td>0.84984</td>
-      <td>-0.15015</td>
-      <td>0.000005</td>
+      <td>0.84977</td>
+      <td>-0.15023</td>
+      <td>0.000004</td>
     </tr>
   </tbody>
 </table></div><figure class='image-card'><a class='image-link' href='demo14_report_files/fig_0143.png' target='_blank' rel='noopener noreferrer' title='Open full-size image in a new tab'><img src='demo14_report_files/fig_0143.png' alt='Differential junction usage top 20' loading='lazy' /><span class='expand-badge' aria-hidden='true'>↗</span></a><figcaption>Top 20 by |effect|. Diamonds = condition means (joined line = the shift); small dots = individual replicates, so overlapping replicate clouds flag a weak/non-significant change.</figcaption></figure></div><div class='subsection'><h3>Differential poly(A) tail length — top by effect size</h3><figure class='image-card'><a class='image-link' href='demo14_report_files/fig_0144.png' target='_blank' rel='noopener noreferrer' title='Open full-size image in a new tab'><img src='demo14_report_files/fig_0144.png' alt='Differential poly(A) tail length top 20' loading='lazy' /><span class='expand-badge' aria-hidden='true'>↗</span></a><figcaption>Top 20 by |effect|. Diamonds = condition means (joined line = the shift); small dots = individual replicates, so overlapping replicate clouds flag a weak/non-significant change.</figcaption></figure></div></div></div></details></section><section id='sec-segregating-cis-snp-candidates'><details class='report-section' open><summary><h2>Segregating cis SNP Candidates</h2></summary><div class='section-body'><p class='section-intro'>Read-supported non-reference loci discovered in the cleaned tagged BAMs.</p><details class='definitions'><summary>Column definitions</summary><dl><dt>snp_id</dt><dd>Canonical SNP identifier in `chrom:pos:ref&gt;alt` format.</dd><dt>gene_names</dt><dd>Gene labels associated with the reported SNP or molecule row.</dd><dt>metagene_indices</dt><dd>Metagene labels associated with the reported SNP or molecule row.</dd><dt>total_cov</dt><dd>Total coverage accumulated across samples at the reported SNP or mod site.</dd><dt>ref_count</dt><dd>Reference-base support across all reads for the candidate SNP locus.</dd><dt>alt_count</dt><dd>Alternative-base support across all reads for the candidate SNP locus.</dd><dt>alt_frac</dt><dd>Alternative-allele fraction across all supporting reads at the candidate SNP locus.</dd><dt>samples_with_alt</dt><dd>Samples contributing at least one alternative-allele read at the candidate SNP locus.</dd></dl></details><div class='table-wrap'><table class="dataframe datatable">
@@ -6344,9 +6337,9 @@ reference_gtf: /athena/cayuga_0003/scratch/users/thn4005/scripts/projects_v2/mod
       <td>6</td>
       <td>88</td>
       <td>5</td>
-      <td>0.022717</td>
-      <td>0.204456</td>
-      <td>0.083256</td>
+      <td>0.038713</td>
+      <td>0.221040</td>
+      <td>0.070141</td>
     </tr>
     <tr>
       <td>chr3:105576617:G&gt;A</td>
@@ -6354,39 +6347,9 @@ reference_gtf: /athena/cayuga_0003/scratch/users/thn4005/scripts/projects_v2/mod
       <td>10</td>
       <td>558</td>
       <td>2</td>
-      <td>0.046617</td>
-      <td>0.209776</td>
-      <td>0.047354</td>
-    </tr>
-    <tr>
-      <td>chr6:158111155:A&gt;G</td>
-      <td>SERAC1</td>
-      <td>14</td>
-      <td>277</td>
-      <td>5</td>
-      <td>0.153497</td>
-      <td>0.354881</td>
-      <td>0.083921</td>
-    </tr>
-    <tr>
-      <td>chr3:105575690:A&gt;G</td>
-      <td>ALCAM</td>
-      <td>10</td>
-      <td>644</td>
-      <td>4</td>
-      <td>0.157725</td>
-      <td>0.354881</td>
-      <td>0.045533</td>
-    </tr>
-    <tr>
-      <td>chr3:105547430:T&gt;C</td>
-      <td>ALCAM</td>
-      <td>10</td>
-      <td>535</td>
-      <td>4</td>
-      <td>0.321328</td>
-      <td>0.578390</td>
-      <td>0.044701</td>
+      <td>0.049120</td>
+      <td>0.221040</td>
+      <td>0.045990</td>
     </tr>
     <tr>
       <td>chr17:7115293:A&gt;G</td>
@@ -6394,29 +6357,39 @@ reference_gtf: /athena/cayuga_0003/scratch/users/thn4005/scripts/projects_v2/mod
       <td>4</td>
       <td>19</td>
       <td>4</td>
-      <td>0.402791</td>
-      <td>0.587350</td>
-      <td>0.177945</td>
+      <td>0.264808</td>
+      <td>0.476654</td>
+      <td>0.186760</td>
     </tr>
     <tr>
-      <td>chr17:7173496:A&gt;G</td>
-      <td>ASGR1</td>
+      <td>chr6:158111155:A&gt;G</td>
+      <td>SERAC1</td>
+      <td>14</td>
+      <td>277</td>
       <td>5</td>
-      <td>212</td>
-      <td>11</td>
-      <td>0.456828</td>
-      <td>0.587350</td>
-      <td>0.045930</td>
+      <td>0.222684</td>
+      <td>0.476654</td>
+      <td>0.079628</td>
     </tr>
     <tr>
-      <td>chr17:7102089:C&gt;G</td>
-      <td>ASGR2</td>
+      <td>chr3:105575690:A&gt;G</td>
+      <td>ALCAM</td>
+      <td>10</td>
+      <td>644</td>
       <td>4</td>
-      <td>7</td>
-      <td>2</td>
-      <td>0.559441</td>
-      <td>0.629371</td>
-      <td>0.261905</td>
+      <td>0.174473</td>
+      <td>0.476654</td>
+      <td>0.045453</td>
+    </tr>
+    <tr>
+      <td>chr3:105547430:T&gt;C</td>
+      <td>ALCAM</td>
+      <td>10</td>
+      <td>535</td>
+      <td>4</td>
+      <td>0.328505</td>
+      <td>0.492758</td>
+      <td>0.044671</td>
     </tr>
     <tr>
       <td>chr6:138432037:T&gt;C</td>
@@ -6424,12 +6397,32 @@ reference_gtf: /athena/cayuga_0003/scratch/users/thn4005/scripts/projects_v2/mod
       <td>13</td>
       <td>35</td>
       <td>3</td>
-      <td>0.692125</td>
-      <td>0.692125</td>
-      <td>0.073052</td>
+      <td>0.561584</td>
+      <td>0.654152</td>
+      <td>0.081712</td>
+    </tr>
+    <tr>
+      <td>chr17:7173496:A&gt;G</td>
+      <td>ASGR1</td>
+      <td>5</td>
+      <td>212</td>
+      <td>11</td>
+      <td>0.581468</td>
+      <td>0.654152</td>
+      <td>0.043864</td>
+    </tr>
+    <tr>
+      <td>chr17:7102089:C&gt;G</td>
+      <td>ASGR2</td>
+      <td>4</td>
+      <td>7</td>
+      <td>2</td>
+      <td>0.818546</td>
+      <td>0.818546</td>
+      <td>0.096774</td>
     </tr>
   </tbody>
-</table></div><details class='definitions' open><summary>Top 9 SNP→transcript example(s)</summary><div class='gallery compact'><figure class='image-card'><a class='image-link' href='demo14_report_files/fig_0145.png' target='_blank' rel='noopener noreferrer' title='Open full-size image in a new tab'><img src='demo14_report_files/fig_0145.png' alt='chr18:23481503:C&gt;T RIOK3 (allele→transcript)' /><span class='expand-badge' aria-hidden='true'>↗</span></a><figcaption>chr18:23481503:C&gt;T RIOK3 (allele→transcript)</figcaption></figure><figure class='image-card'><a class='image-link' href='demo14_report_files/fig_0146.png' target='_blank' rel='noopener noreferrer' title='Open full-size image in a new tab'><img src='demo14_report_files/fig_0146.png' alt='chr3:105576617:G&gt;A ALCAM (allele→transcript)' /><span class='expand-badge' aria-hidden='true'>↗</span></a><figcaption>chr3:105576617:G&gt;A ALCAM (allele→transcript)</figcaption></figure><figure class='image-card'><a class='image-link' href='demo14_report_files/fig_0147.png' target='_blank' rel='noopener noreferrer' title='Open full-size image in a new tab'><img src='demo14_report_files/fig_0147.png' alt='chr6:158111155:A&gt;G SERAC1 (allele→transcript)' /><span class='expand-badge' aria-hidden='true'>↗</span></a><figcaption>chr6:158111155:A&gt;G SERAC1 (allele→transcript)</figcaption></figure><figure class='image-card'><a class='image-link' href='demo14_report_files/fig_0148.png' target='_blank' rel='noopener noreferrer' title='Open full-size image in a new tab'><img src='demo14_report_files/fig_0148.png' alt='chr3:105575690:A&gt;G ALCAM (allele→transcript)' /><span class='expand-badge' aria-hidden='true'>↗</span></a><figcaption>chr3:105575690:A&gt;G ALCAM (allele→transcript)</figcaption></figure><figure class='image-card'><a class='image-link' href='demo14_report_files/fig_0149.png' target='_blank' rel='noopener noreferrer' title='Open full-size image in a new tab'><img src='demo14_report_files/fig_0149.png' alt='chr3:105547430:T&gt;C ALCAM (allele→transcript)' /><span class='expand-badge' aria-hidden='true'>↗</span></a><figcaption>chr3:105547430:T&gt;C ALCAM (allele→transcript)</figcaption></figure><figure class='image-card'><a class='image-link' href='demo14_report_files/fig_0150.png' target='_blank' rel='noopener noreferrer' title='Open full-size image in a new tab'><img src='demo14_report_files/fig_0150.png' alt='chr17:7115293:A&gt;G ASGR2 (allele→transcript)' /><span class='expand-badge' aria-hidden='true'>↗</span></a><figcaption>chr17:7115293:A&gt;G ASGR2 (allele→transcript)</figcaption></figure><figure class='image-card'><a class='image-link' href='demo14_report_files/fig_0151.png' target='_blank' rel='noopener noreferrer' title='Open full-size image in a new tab'><img src='demo14_report_files/fig_0151.png' alt='chr17:7173496:A&gt;G ASGR1 (allele→transcript)' /><span class='expand-badge' aria-hidden='true'>↗</span></a><figcaption>chr17:7173496:A&gt;G ASGR1 (allele→transcript)</figcaption></figure><figure class='image-card'><a class='image-link' href='demo14_report_files/fig_0152.png' target='_blank' rel='noopener noreferrer' title='Open full-size image in a new tab'><img src='demo14_report_files/fig_0152.png' alt='chr17:7102089:C&gt;G ASGR2 (allele→transcript)' /><span class='expand-badge' aria-hidden='true'>↗</span></a><figcaption>chr17:7102089:C&gt;G ASGR2 (allele→transcript)</figcaption></figure><figure class='image-card'><a class='image-link' href='demo14_report_files/fig_0153.png' target='_blank' rel='noopener noreferrer' title='Open full-size image in a new tab'><img src='demo14_report_files/fig_0153.png' alt='chr6:138432037:T&gt;C NHSL1 (allele→transcript)' /><span class='expand-badge' aria-hidden='true'>↗</span></a><figcaption>chr6:138432037:T&gt;C NHSL1 (allele→transcript)</figcaption></figure></div></details></div></details></section><section id='sec-cis-snp-to-modification-stoichiometry-association'><details class='report-section' open><summary><h2>cis SNP to Modification Stoichiometry Association</h2></summary><div class='section-body'><p class='section-intro'>Associations between segregating SNP alleles and target modification states on the same molecules.</p><details class='definitions'><summary>Column definitions</summary><dl><dt>snp_id</dt><dd>Canonical SNP identifier in `chrom:pos:ref&gt;alt` format.</dd><dt>mod_site_id</dt><dd>Canonical modification-site identifier in `chrom:start-end:strand:mod` format.</dd><dt>target_mod_code</dt><dd>Modification code tested at the reported site.</dd><dt>gene_names</dt><dd>Gene labels associated with the reported SNP or molecule row.</dd><dt>n_alt_reads</dt><dd>Number of reads carrying the alternative allele in the tested contingency table.</dd><dt>n_modified</dt><dd>Reads classified as modified for the target mod code.</dd><dt>p_value</dt><dd>Nominal p-value from the reported hypothesis test.</dd><dt>p_adj_bh</dt><dd>Benjamini-Hochberg false-discovery-rate adjusted p-value.</dd><dt>effect_abs_delta_mod_frac</dt><dd>Absolute difference in modified-site rate between the tested allele groups.</dd></dl></details><div class='table-wrap'><table class="dataframe datatable">
+</table></div><details class='definitions' open><summary>Top 9 SNP→transcript example(s)</summary><div class='gallery compact'><figure class='image-card'><a class='image-link' href='demo14_report_files/fig_0145.png' target='_blank' rel='noopener noreferrer' title='Open full-size image in a new tab'><img src='demo14_report_files/fig_0145.png' alt='chr18:23481503:C&gt;T RIOK3 (allele→transcript)' /><span class='expand-badge' aria-hidden='true'>↗</span></a><figcaption>chr18:23481503:C&gt;T RIOK3 (allele→transcript)</figcaption></figure><figure class='image-card'><a class='image-link' href='demo14_report_files/fig_0146.png' target='_blank' rel='noopener noreferrer' title='Open full-size image in a new tab'><img src='demo14_report_files/fig_0146.png' alt='chr3:105576617:G&gt;A ALCAM (allele→transcript)' /><span class='expand-badge' aria-hidden='true'>↗</span></a><figcaption>chr3:105576617:G&gt;A ALCAM (allele→transcript)</figcaption></figure><figure class='image-card'><a class='image-link' href='demo14_report_files/fig_0147.png' target='_blank' rel='noopener noreferrer' title='Open full-size image in a new tab'><img src='demo14_report_files/fig_0147.png' alt='chr17:7115293:A&gt;G ASGR2 (allele→transcript)' /><span class='expand-badge' aria-hidden='true'>↗</span></a><figcaption>chr17:7115293:A&gt;G ASGR2 (allele→transcript)</figcaption></figure><figure class='image-card'><a class='image-link' href='demo14_report_files/fig_0148.png' target='_blank' rel='noopener noreferrer' title='Open full-size image in a new tab'><img src='demo14_report_files/fig_0148.png' alt='chr6:158111155:A&gt;G SERAC1 (allele→transcript)' /><span class='expand-badge' aria-hidden='true'>↗</span></a><figcaption>chr6:158111155:A&gt;G SERAC1 (allele→transcript)</figcaption></figure><figure class='image-card'><a class='image-link' href='demo14_report_files/fig_0149.png' target='_blank' rel='noopener noreferrer' title='Open full-size image in a new tab'><img src='demo14_report_files/fig_0149.png' alt='chr3:105575690:A&gt;G ALCAM (allele→transcript)' /><span class='expand-badge' aria-hidden='true'>↗</span></a><figcaption>chr3:105575690:A&gt;G ALCAM (allele→transcript)</figcaption></figure><figure class='image-card'><a class='image-link' href='demo14_report_files/fig_0150.png' target='_blank' rel='noopener noreferrer' title='Open full-size image in a new tab'><img src='demo14_report_files/fig_0150.png' alt='chr3:105547430:T&gt;C ALCAM (allele→transcript)' /><span class='expand-badge' aria-hidden='true'>↗</span></a><figcaption>chr3:105547430:T&gt;C ALCAM (allele→transcript)</figcaption></figure><figure class='image-card'><a class='image-link' href='demo14_report_files/fig_0151.png' target='_blank' rel='noopener noreferrer' title='Open full-size image in a new tab'><img src='demo14_report_files/fig_0151.png' alt='chr6:138432037:T&gt;C NHSL1 (allele→transcript)' /><span class='expand-badge' aria-hidden='true'>↗</span></a><figcaption>chr6:138432037:T&gt;C NHSL1 (allele→transcript)</figcaption></figure><figure class='image-card'><a class='image-link' href='demo14_report_files/fig_0152.png' target='_blank' rel='noopener noreferrer' title='Open full-size image in a new tab'><img src='demo14_report_files/fig_0152.png' alt='chr17:7173496:A&gt;G ASGR1 (allele→transcript)' /><span class='expand-badge' aria-hidden='true'>↗</span></a><figcaption>chr17:7173496:A&gt;G ASGR1 (allele→transcript)</figcaption></figure><figure class='image-card'><a class='image-link' href='demo14_report_files/fig_0153.png' target='_blank' rel='noopener noreferrer' title='Open full-size image in a new tab'><img src='demo14_report_files/fig_0153.png' alt='chr17:7102089:C&gt;G ASGR2 (allele→transcript)' /><span class='expand-badge' aria-hidden='true'>↗</span></a><figcaption>chr17:7102089:C&gt;G ASGR2 (allele→transcript)</figcaption></figure></div></details></div></details></section><section id='sec-cis-snp-to-modification-stoichiometry-association'><details class='report-section' open><summary><h2>cis SNP to Modification Stoichiometry Association</h2></summary><div class='section-body'><p class='section-intro'>Associations between segregating SNP alleles and target modification states on the same molecules.</p><details class='definitions'><summary>Column definitions</summary><dl><dt>snp_id</dt><dd>Canonical SNP identifier in `chrom:pos:ref&gt;alt` format.</dd><dt>mod_site_id</dt><dd>Canonical modification-site identifier in `chrom:start-end:strand:mod` format.</dd><dt>target_mod_code</dt><dd>Modification code tested at the reported site.</dd><dt>gene_names</dt><dd>Gene labels associated with the reported SNP or molecule row.</dd><dt>n_alt_reads</dt><dd>Number of reads carrying the alternative allele in the tested contingency table.</dd><dt>n_modified</dt><dd>Reads classified as modified for the target mod code.</dd><dt>p_value</dt><dd>Nominal p-value from the reported hypothesis test.</dd><dt>p_adj_bh</dt><dd>Benjamini-Hochberg false-discovery-rate adjusted p-value.</dd><dt>effect_abs_delta_mod_frac</dt><dd>Absolute difference in modified-site rate between the tested allele groups.</dd></dl></details><div class='table-wrap'><table class="dataframe datatable">
   <thead>
     <tr style="text-align: right;">
       <th>snp_id</th>
@@ -6691,7 +6684,7 @@ reference_gtf: /athena/cayuga_0003/scratch/users/thn4005/scripts/projects_v2/mod
       <td>1</td>
     </tr>
   </tbody>
-</table></div></div></div></details></section><section id='sec-single-molecule-cis-co-localized-modifications'><details class='report-section' open><summary><h2>Single-Molecule cis Co-Localized Modifications</h2></summary><div class='section-body'><p class='section-intro'>For every pair of nearby modification sites seen on the SAME reads, does the state of one predict the state of the other? The 2x2 is tested conditional on reads covering both sites, and enrichment is judged against the expected co-occurrence given each site's own marginal stoichiometry — so a concordant call means the two are modified together MORE than their individual rates alone would predict, not merely that both are often modified. effect_abs_delta_mod_frac is |P(B modified | A modified) - P(B modified | A unmodified)|; jaccard_both is co-modified reads / reads modified at either.</p><details class='definitions'><summary>Column definitions</summary><dl><dt>chrom</dt><dd>Reference chromosome or contig containing the reported feature.</dd><dt>strand</dt><dd>Genomic strand of the reported feature.</dd><dt>context_key</dt><dd>Gene- or metagene-aware context key used to restrict genotype and modification joins to the same local feature family.</dd><dt>gene_names</dt><dd>Gene labels associated with the reported SNP or molecule row.</dd><dt>n_reads</dt><dd>Total reads contributing to the reported test.</dd><dt>test_name</dt><dd>Statistical test used: Mann-Whitney U (2 groups) or Kruskal-Wallis (&gt;2 groups).</dd><dt>p_value</dt><dd>Nominal p-value from the reported hypothesis test.</dd><dt>effect_abs_delta_mod_frac</dt><dd>Absolute difference in modified-site rate between the tested allele groups.</dd><dt>p_adj_bh</dt><dd>Benjamini-Hochberg false-discovery-rate adjusted p-value.</dd></dl></details><p><b>35,848</b> co-localized mod-site pairs tested; <b>138</b> significant at BH-FDR &lt; 0.05.</p><p>direction: <b>27,048</b> concordant · <b>4,402</b> mutually exclusive · <b>4,398</b> independent</p><p class='muted' style='font-size:12.5px'>modification codes: <code>17596</code> = inosine · <code>17802</code> = pseudoU · <code>19227</code> = Um · <code>19228</code> = Cm · <code>19229</code> = Gm · <code>69426</code> = Am · <code>a</code> = m6A · <code>m</code> = 5mC</p><figure class='hero-figure'><a class='image-link' href='demo14_report_files/fig_0179.png' target='_blank' rel='noopener noreferrer' title='Open full-size image in a new tab'><img src='demo14_report_files/fig_0179.png' alt='Co-localized modification 2x2 concordance panels' loading='lazy' /><span class='expand-badge' aria-hidden='true'>↗</span></a><figcaption>Top pairs by FDR. Each 2x2 is observed count (expected under independence); red = enriched. A concordant pair reddens the diagonal (both-modified / both-unmodified).</figcaption></figure><div class='table-wrap'><table class="dataframe datatable">
+</table></div></div></div></details></section><section id='sec-single-molecule-cis-co-localized-modifications'><details class='report-section' open><summary><h2>Single-Molecule cis Co-Localized Modifications</h2></summary><div class='section-body'><p class='section-intro'>For every pair of nearby modification sites seen on the SAME reads, does the state of one predict the state of the other? The 2x2 is tested conditional on reads covering both sites, and enrichment is judged against the expected co-occurrence given each site's own marginal stoichiometry — so a concordant call means the two are modified together MORE than their individual rates alone would predict, not merely that both are often modified. effect_abs_delta_mod_frac is |P(B modified | A modified) - P(B modified | A unmodified)|; jaccard_both is co-modified reads / reads modified at either.</p><details class='definitions'><summary>Column definitions</summary><dl><dt>chrom</dt><dd>Reference chromosome or contig containing the reported feature.</dd><dt>strand</dt><dd>Genomic strand of the reported feature.</dd><dt>context_key</dt><dd>Gene- or metagene-aware context key used to restrict genotype and modification joins to the same local feature family.</dd><dt>gene_names</dt><dd>Gene labels associated with the reported SNP or molecule row.</dd><dt>n_reads</dt><dd>Total reads contributing to the reported test.</dd><dt>n_strata_informative</dt><dd>Number of (sample, fragmentform) strata that carried BOTH modification states and so contributed to the sample-stratified van Elteren test (the primary p-value).</dd><dt>test_name</dt><dd>Statistical test used: Mann-Whitney U (2 groups) or Kruskal-Wallis (&gt;2 groups).</dd><dt>p_value</dt><dd>Nominal p-value from the reported hypothesis test.</dd><dt>effect_abs_delta_mod_frac</dt><dd>Absolute difference in modified-site rate between the tested allele groups.</dd><dt>p_value_pooled</dt><dd>The OLD pooled Mann-Whitney p-value (mod vs unmod reads pooled across all fragmentforms and samples). Retained for transparency; the primary p_value is the sample-stratified van Elteren test.</dd><dt>p_adj_bh</dt><dd>Benjamini-Hochberg false-discovery-rate adjusted p-value.</dd></dl></details><p><b>35,848</b> co-localized mod-site pairs tested; <b>1,188</b> significant at BH-FDR &lt; 0.05.</p><p>direction: <b>27,048</b> concordant · <b>4,402</b> mutually exclusive · <b>4,398</b> independent</p><p class='muted' style='font-size:12.5px'>modification codes: <code>17596</code> = inosine · <code>17802</code> = pseudoU · <code>19227</code> = Um · <code>19228</code> = Cm · <code>19229</code> = Gm · <code>69426</code> = Am · <code>a</code> = m6A · <code>m</code> = 5mC</p><figure class='hero-figure'><a class='image-link' href='demo14_report_files/fig_0179.png' target='_blank' rel='noopener noreferrer' title='Open full-size image in a new tab'><img src='demo14_report_files/fig_0179.png' alt='Co-localized modification 2x2 concordance panels' loading='lazy' /><span class='expand-badge' aria-hidden='true'>↗</span></a><figcaption>Top pairs by FDR. Each 2x2 is observed count (expected under independence); red = enriched. A concordant pair reddens the diagonal (both-modified / both-unmodified).</figcaption></figure><div class='table-wrap'><table class="dataframe datatable">
   <thead>
     <tr style="text-align: right;">
       <th>mod_site_id_a</th>
@@ -6721,11 +6714,16 @@ reference_gtf: /athena/cayuga_0003/scratch/users/thn4005/scripts/projects_v2/mod
       <th>concordant_frac_exp</th>
       <th>concordance_log2_ratio</th>
       <th>direction</th>
+      <th>n_strata_informative</th>
       <th>test_name</th>
       <th>stat_name</th>
       <th>stat_value</th>
       <th>p_value</th>
       <th>effect_abs_delta_mod_frac</th>
+      <th>test_name_pooled</th>
+      <th>stat_value_pooled</th>
+      <th>p_value_pooled</th>
+      <th>effect_abs_delta_mod_frac_pooled</th>
       <th>jaccard_both</th>
       <th>per_state_json</th>
       <th>p_adj_bh</th>
@@ -6760,88 +6758,19 @@ reference_gtf: /athena/cayuga_0003/scratch/users/thn4005/scripts/projects_v2/mod
       <td>0.6209</td>
       <td>0.3522</td>
       <td>CONCORDANT</td>
+      <td>6</td>
+      <td>cmh_2x2</td>
+      <td>cmh_chi2</td>
+      <td>449.742782</td>
+      <td>8.205278e-100</td>
+      <td>0.645084</td>
       <td>fisher_exact_2x2</td>
-      <td>fisher_odds</td>
       <td>22.711000</td>
       <td>1.361334e-96</td>
       <td>0.644609</td>
       <td>0.397727</td>
       <td>{"both_modified":245,"a_only":38,"b_only":333,"neither":1173}</td>
-      <td>4.486549e-92</td>
-    </tr>
-    <tr>
-      <td>chr17:7173688-7173689:-:m</td>
-      <td>chr17:7173689-7173690:-:a</td>
-      <td>chr17</td>
-      <td>7173688</td>
-      <td>7173689</td>
-      <td>1</td>
-      <td>-</td>
-      <td>m</td>
-      <td>a</td>
-      <td>MG:5</td>
-      <td>ASGR1</td>
-      <td>1807</td>
-      <td>431</td>
-      <td>1376</td>
-      <td>177</td>
-      <td>132</td>
-      <td>299</td>
-      <td>45</td>
-      <td>1331</td>
-      <td>42.22</td>
-      <td>1241.22</td>
-      <td>12.9464</td>
-      <td>3.6945</td>
-      <td>0.8096</td>
-      <td>0.7103</td>
-      <td>0.1889</td>
-      <td>CONCORDANT</td>
-      <td>fisher_exact_2x2</td>
-      <td>fisher_odds</td>
-      <td>13.057748</td>
-      <td>5.634945e-52</td>
-      <td>0.273561</td>
-      <td>0.277311</td>
-      <td>{"both_modified":132,"a_only":299,"b_only":45,"neither":1331}</td>
-      <td>9.285544e-48</td>
-    </tr>
-    <tr>
-      <td>chr17:7173616-7173617:-:17802</td>
-      <td>chr17:7173617-7173618:-:a</td>
-      <td>chr17</td>
-      <td>7173616</td>
-      <td>7173617</td>
-      <td>1</td>
-      <td>-</td>
-      <td>17802</td>
-      <td>a</td>
-      <td>MG:5</td>
-      <td>ASGR1</td>
-      <td>1812</td>
-      <td>35</td>
-      <td>1777</td>
-      <td>89</td>
-      <td>24</td>
-      <td>11</td>
-      <td>65</td>
-      <td>1712</td>
-      <td>1.72</td>
-      <td>1689.72</td>
-      <td>55.7003</td>
-      <td>5.7996</td>
-      <td>0.9581</td>
-      <td>0.9335</td>
-      <td>0.0375</td>
-      <td>CONCORDANT</td>
-      <td>fisher_exact_2x2</td>
-      <td>fisher_odds</td>
-      <td>57.465734</td>
-      <td>4.190448e-25</td>
-      <td>0.649136</td>
-      <td>0.240000</td>
-      <td>{"both_modified":24,"a_only":11,"b_only":65,"neither":1712}</td>
-      <td>4.603486e-21</td>
+      <td>2.656541e-95</td>
     </tr>
     <tr>
       <td>chr17:7173611-7173612:-:a</td>
@@ -6871,236 +6800,61 @@ reference_gtf: /athena/cayuga_0003/scratch/users/thn4005/scripts/projects_v2/mod
       <td>0.9708</td>
       <td>0.0225</td>
       <td>CONCORDANT</td>
+      <td>6</td>
+      <td>cmh_2x2</td>
+      <td>cmh_chi2</td>
+      <td>448.144306</td>
+      <td>1.827964e-99</td>
+      <td>0.626369</td>
       <td>fisher_exact_2x2</td>
-      <td>fisher_odds</td>
       <td>179.838235</td>
       <td>2.154423e-21</td>
       <td>0.626726</td>
       <td>0.358974</td>
       <td>{"both_modified":14,"a_only":8,"b_only":17,"neither":1747}</td>
-      <td>1.775083e-17</td>
+      <td>2.959108e-95</td>
     </tr>
     <tr>
-      <td>chr13:113178132-113178133:-:a</td>
-      <td>chr13:113179008-113179009:-:a</td>
-      <td>chr13</td>
-      <td>113178132</td>
-      <td>113179008</td>
-      <td>876</td>
-      <td>-</td>
-      <td>a</td>
-      <td>a</td>
-      <td>MG:3</td>
-      <td>PCID2</td>
-      <td>856</td>
-      <td>52</td>
-      <td>804</td>
-      <td>41</td>
-      <td>22</td>
-      <td>30</td>
-      <td>19</td>
-      <td>785</td>
-      <td>2.49</td>
-      <td>765.49</td>
-      <td>29.7163</td>
-      <td>4.8932</td>
-      <td>0.9428</td>
-      <td>0.8972</td>
-      <td>0.0715</td>
-      <td>CONCORDANT</td>
-      <td>fisher_exact_2x2</td>
-      <td>fisher_odds</td>
-      <td>30.298246</td>
-      <td>1.525877e-18</td>
-      <td>0.399445</td>
-      <td>0.309859</td>
-      <td>{"both_modified":22,"a_only":30,"b_only":19,"neither":785}</td>
-      <td>1.005767e-14</td>
-    </tr>
-    <tr>
-      <td>chr13:113178284-113178285:-:a</td>
-      <td>chr13:113179008-113179009:-:a</td>
-      <td>chr13</td>
-      <td>113178284</td>
-      <td>113179008</td>
-      <td>724</td>
-      <td>-</td>
-      <td>a</td>
-      <td>a</td>
-      <td>MG:3</td>
-      <td>PCID2</td>
-      <td>1818</td>
-      <td>62</td>
-      <td>1756</td>
-      <td>66</td>
-      <td>22</td>
-      <td>40</td>
-      <td>44</td>
-      <td>1712</td>
-      <td>2.25</td>
-      <td>1692.25</td>
-      <td>21.3795</td>
-      <td>4.4182</td>
-      <td>0.9538</td>
-      <td>0.9321</td>
-      <td>0.0332</td>
-      <td>CONCORDANT</td>
-      <td>fisher_exact_2x2</td>
-      <td>fisher_odds</td>
-      <td>21.400000</td>
-      <td>5.958861e-18</td>
-      <td>0.329782</td>
-      <td>0.207547</td>
-      <td>{"both_modified":22,"a_only":40,"b_only":44,"neither":1712}</td>
-      <td>3.273103e-14</td>
-    </tr>
-    <tr>
-      <td>chr13:113178132-113178133:-:a</td>
-      <td>chr13:113178284-113178285:-:a</td>
-      <td>chr13</td>
-      <td>113178132</td>
-      <td>113178284</td>
-      <td>152</td>
-      <td>-</td>
-      <td>a</td>
-      <td>a</td>
-      <td>MG:3</td>
-      <td>PCID2</td>
-      <td>861</td>
-      <td>52</td>
-      <td>809</td>
-      <td>46</td>
-      <td>20</td>
-      <td>32</td>
-      <td>26</td>
-      <td>783</td>
-      <td>2.78</td>
-      <td>765.78</td>
-      <td>18.6493</td>
-      <td>4.2211</td>
-      <td>0.9326</td>
-      <td>0.8926</td>
-      <td>0.0632</td>
-      <td>CONCORDANT</td>
-      <td>fisher_exact_2x2</td>
-      <td>fisher_odds</td>
-      <td>18.822115</td>
-      <td>1.619501e-14</td>
-      <td>0.352477</td>
-      <td>0.256410</td>
-      <td>{"both_modified":20,"a_only":32,"b_only":26,"neither":783}</td>
-      <td>7.624843e-11</td>
-    </tr>
-    <tr>
-      <td>chr17:7173689-7173690:-:a</td>
-      <td>chr17:7173987-7173988:-:a</td>
+      <td>chr17:7173616-7173617:-:17802</td>
+      <td>chr17:7173617-7173618:-:a</td>
       <td>chr17</td>
-      <td>7173689</td>
-      <td>7173987</td>
-      <td>298</td>
+      <td>7173616</td>
+      <td>7173617</td>
+      <td>1</td>
       <td>-</td>
-      <td>a</td>
+      <td>17802</td>
       <td>a</td>
       <td>MG:5</td>
       <td>ASGR1</td>
-      <td>1797</td>
-      <td>174</td>
-      <td>1623</td>
-      <td>33</td>
-      <td>21</td>
-      <td>153</td>
-      <td>12</td>
-      <td>1611</td>
-      <td>3.20</td>
-      <td>1593.20</td>
-      <td>18.0572</td>
-      <td>4.1745</td>
-      <td>0.9082</td>
-      <td>0.8884</td>
-      <td>0.0318</td>
-      <td>CONCORDANT</td>
-      <td>fisher_exact_2x2</td>
-      <td>fisher_odds</td>
-      <td>18.426471</td>
-      <td>2.055127e-14</td>
-      <td>0.113296</td>
-      <td>0.112903</td>
-      <td>{"both_modified":21,"a_only":153,"b_only":12,"neither":1611}</td>
-      <td>8.466353e-11</td>
-    </tr>
-    <tr>
-      <td>chr17:7173611-7173612:-:a</td>
-      <td>chr17:7173809-7173810:-:a</td>
-      <td>chr17</td>
-      <td>7173611</td>
-      <td>7173809</td>
-      <td>198</td>
-      <td>-</td>
-      <td>a</td>
-      <td>a</td>
-      <td>MG:5</td>
-      <td>ASGR1</td>
-      <td>1799</td>
-      <td>22</td>
+      <td>1812</td>
+      <td>35</td>
       <td>1777</td>
-      <td>51</td>
-      <td>12</td>
-      <td>10</td>
-      <td>39</td>
-      <td>1738</td>
-      <td>0.62</td>
-      <td>1726.62</td>
-      <td>52.3960</td>
-      <td>5.7114</td>
-      <td>0.9728</td>
-      <td>0.9601</td>
-      <td>0.0189</td>
+      <td>89</td>
+      <td>24</td>
+      <td>11</td>
+      <td>65</td>
+      <td>1712</td>
+      <td>1.72</td>
+      <td>1689.72</td>
+      <td>55.7003</td>
+      <td>5.7996</td>
+      <td>0.9581</td>
+      <td>0.9335</td>
+      <td>0.0375</td>
       <td>CONCORDANT</td>
+      <td>6</td>
+      <td>cmh_2x2</td>
+      <td>cmh_chi2</td>
+      <td>302.446744</td>
+      <td>9.654180e-68</td>
+      <td>0.648549</td>
       <td>fisher_exact_2x2</td>
-      <td>fisher_odds</td>
-      <td>53.476923</td>
-      <td>3.620565e-14</td>
-      <td>0.523507</td>
-      <td>0.196721</td>
-      <td>{"both_modified":12,"a_only":10,"b_only":39,"neither":1738}</td>
-      <td>1.325811e-10</td>
-    </tr>
-    <tr>
-      <td>chr17:7173809-7173810:-:a</td>
-      <td>chr17:7173987-7173988:-:a</td>
-      <td>chr17</td>
-      <td>7173809</td>
-      <td>7173987</td>
-      <td>178</td>
-      <td>-</td>
-      <td>a</td>
-      <td>a</td>
-      <td>MG:5</td>
-      <td>ASGR1</td>
-      <td>1806</td>
-      <td>54</td>
-      <td>1752</td>
-      <td>33</td>
-      <td>14</td>
-      <td>40</td>
-      <td>19</td>
-      <td>1733</td>
-      <td>0.99</td>
-      <td>1719.99</td>
-      <td>31.8275</td>
-      <td>4.9922</td>
-      <td>0.9673</td>
-      <td>0.9529</td>
-      <td>0.0217</td>
-      <td>CONCORDANT</td>
-      <td>fisher_exact_2x2</td>
-      <td>fisher_odds</td>
-      <td>31.923684</td>
-      <td>4.152835e-14</td>
-      <td>0.248415</td>
-      <td>0.191781</td>
-      <td>{"both_modified":14,"a_only":40,"b_only":19,"neither":1733}</td>
-      <td>1.368650e-10</td>
+      <td>57.465734</td>
+      <td>4.190448e-25</td>
+      <td>0.649136</td>
+      <td>0.240000</td>
+      <td>{"both_modified":24,"a_only":11,"b_only":65,"neither":1712}</td>
+      <td>7.814094e-64</td>
     </tr>
     <tr>
       <td>chr17:7173507-7173508:-:a</td>
@@ -7130,162 +6884,271 @@ reference_gtf: /athena/cayuga_0003/scratch/users/thn4005/scripts/projects_v2/mod
       <td>0.9746</td>
       <td>0.0144</td>
       <td>CONCORDANT</td>
+      <td>6</td>
+      <td>cmh_2x2</td>
+      <td>cmh_chi2</td>
+      <td>302.824375</td>
+      <td>7.988122e-68</td>
+      <td>0.629734</td>
       <td>fisher_exact_2x2</td>
-      <td>fisher_odds</td>
       <td>137.504348</td>
       <td>1.018871e-13</td>
       <td>0.629936</td>
       <td>0.243243</td>
       <td>{"both_modified":9,"a_only":5,"b_only":23,"neither":1757}</td>
-      <td>3.052631e-10</td>
+      <td>7.814094e-64</td>
     </tr>
     <tr>
-      <td>chr17:7173595-7173596:-:19229</td>
-      <td>chr17:7173596-7173597:-:19229</td>
+      <td>chr17:7173688-7173689:-:m</td>
+      <td>chr17:7173689-7173690:-:a</td>
       <td>chr17</td>
-      <td>7173595</td>
-      <td>7173596</td>
+      <td>7173688</td>
+      <td>7173689</td>
       <td>1</td>
       <td>-</td>
-      <td>19229</td>
-      <td>19229</td>
+      <td>m</td>
+      <td>a</td>
       <td>MG:5</td>
       <td>ASGR1</td>
-      <td>1779</td>
-      <td>49</td>
-      <td>1730</td>
-      <td>47</td>
-      <td>15</td>
-      <td>34</td>
-      <td>32</td>
-      <td>1698</td>
-      <td>1.29</td>
-      <td>1684.29</td>
-      <td>23.4798</td>
-      <td>4.5533</td>
-      <td>0.9629</td>
-      <td>0.9475</td>
-      <td>0.0233</td>
+      <td>1807</td>
+      <td>431</td>
+      <td>1376</td>
+      <td>177</td>
+      <td>132</td>
+      <td>299</td>
+      <td>45</td>
+      <td>1331</td>
+      <td>42.22</td>
+      <td>1241.22</td>
+      <td>12.9464</td>
+      <td>3.6945</td>
+      <td>0.8096</td>
+      <td>0.7103</td>
+      <td>0.1889</td>
       <td>CONCORDANT</td>
+      <td>6</td>
+      <td>cmh_2x2</td>
+      <td>cmh_chi2</td>
+      <td>277.185580</td>
+      <td>3.082605e-62</td>
+      <td>0.273975</td>
       <td>fisher_exact_2x2</td>
-      <td>fisher_odds</td>
-      <td>23.409926</td>
-      <td>1.613411e-13</td>
-      <td>0.287625</td>
-      <td>0.185185</td>
-      <td>{"both_modified":15,"a_only":34,"b_only":32,"neither":1698}</td>
-      <td>4.431099e-10</td>
+      <td>13.057748</td>
+      <td>5.634945e-52</td>
+      <td>0.273561</td>
+      <td>0.277311</td>
+      <td>{"both_modified":132,"a_only":299,"b_only":45,"neither":1331}</td>
+      <td>1.996048e-58</td>
     </tr>
     <tr>
-      <td>chr17:7101641-7101642:-:a</td>
-      <td>chr17:7101642-7101643:-:19229</td>
-      <td>chr17</td>
-      <td>7101641</td>
-      <td>7101642</td>
-      <td>1</td>
+      <td>chr13:113184348-113184349:-:m</td>
+      <td>chr13:113184378-113184379:-:m</td>
+      <td>chr13</td>
+      <td>113184348</td>
+      <td>113184378</td>
+      <td>30</td>
       <td>-</td>
-      <td>a</td>
-      <td>19229</td>
+      <td>m</td>
+      <td>m</td>
+      <td>MG:3</td>
+      <td>PCID2</td>
+      <td>1538</td>
+      <td>18</td>
+      <td>1520</td>
+      <td>1</td>
+      <td>1</td>
+      <td>17</td>
+      <td>0</td>
+      <td>1520</td>
+      <td>0.01</td>
+      <td>1519.01</td>
+      <td>260.6571</td>
+      <td>8.0260</td>
+      <td>0.9889</td>
+      <td>0.9877</td>
+      <td>0.0019</td>
+      <td>CONCORDANT</td>
+      <td>1</td>
+      <td>cmh_2x2</td>
+      <td>cmh_chi2</td>
+      <td>241.000000</td>
+      <td>2.380470e-54</td>
+      <td>0.056100</td>
+      <td>fisher_exact_2x2</td>
+      <td>inf</td>
+      <td>1.170351e-02</td>
+      <td>0.055556</td>
+      <td>0.055556</td>
+      <td>{"both_modified":1,"a_only":17,"b_only":0,"neither":1520}</td>
+      <td>1.284502e-50</td>
+    </tr>
+    <tr>
+      <td>chr17:7107046-7107047:-:m</td>
+      <td>chr17:7107049-7107050:-:19227</td>
+      <td>chr17</td>
+      <td>7107046</td>
+      <td>7107049</td>
+      <td>3</td>
+      <td>-</td>
+      <td>m</td>
+      <td>19227</td>
       <td>MG:4</td>
       <td>ASGR2</td>
-      <td>1274</td>
-      <td>65</td>
-      <td>1209</td>
-      <td>13</td>
-      <td>11</td>
-      <td>54</td>
-      <td>2</td>
-      <td>1207</td>
-      <td>0.66</td>
-      <td>1196.66</td>
-      <td>101.9174</td>
-      <td>6.6713</td>
-      <td>0.9560</td>
-      <td>0.9398</td>
-      <td>0.0247</td>
-      <td>CONCORDANT</td>
-      <td>fisher_exact_2x2</td>
-      <td>fisher_odds</td>
-      <td>122.935185</td>
-      <td>1.872013e-13</td>
-      <td>0.167577</td>
-      <td>0.164179</td>
-      <td>{"both_modified":11,"a_only":54,"b_only":2,"neither":1207}</td>
-      <td>4.745841e-10</td>
-    </tr>
-    <tr>
-      <td>chr17:7173596-7173597:-:19229</td>
-      <td>chr17:7173597-7173598:-:19229</td>
-      <td>chr17</td>
-      <td>7173596</td>
-      <td>7173597</td>
-      <td>1</td>
-      <td>-</td>
-      <td>19229</td>
-      <td>19229</td>
-      <td>MG:5</td>
-      <td>ASGR1</td>
-      <td>1792</td>
-      <td>49</td>
-      <td>1743</td>
-      <td>51</td>
-      <td>15</td>
-      <td>34</td>
-      <td>36</td>
-      <td>1707</td>
-      <td>1.39</td>
-      <td>1693.39</td>
-      <td>21.0175</td>
-      <td>4.3935</td>
-      <td>0.9609</td>
-      <td>0.9458</td>
-      <td>0.0230</td>
-      <td>CONCORDANT</td>
-      <td>fisher_exact_2x2</td>
-      <td>fisher_odds</td>
-      <td>20.919118</td>
-      <td>5.724078e-13</td>
-      <td>0.285468</td>
-      <td>0.176471</td>
-      <td>{"both_modified":15,"a_only":34,"b_only":36,"neither":1707}</td>
-      <td>1.347489e-09</td>
-    </tr>
-    <tr>
-      <td>chr17:7173981-7173982:-:m</td>
-      <td>chr17:7173986-7173987:-:m</td>
-      <td>chr17</td>
-      <td>7173981</td>
-      <td>7173986</td>
+      <td>522</td>
       <td>5</td>
+      <td>517</td>
+      <td>3</td>
+      <td>3</td>
+      <td>2</td>
+      <td>0</td>
+      <td>517</td>
+      <td>0.03</td>
+      <td>514.03</td>
+      <td>1449.0000</td>
+      <td>10.5008</td>
+      <td>0.9962</td>
+      <td>0.9848</td>
+      <td>0.0166</td>
+      <td>CONCORDANT</td>
+      <td>3</td>
+      <td>cmh_2x2</td>
+      <td>cmh_chi2</td>
+      <td>238.545147</td>
+      <td>8.164550e-54</td>
+      <td>0.603072</td>
+      <td>fisher_exact_2x2</td>
+      <td>inf</td>
+      <td>4.242674e-07</td>
+      <td>0.600000</td>
+      <td>0.600000</td>
+      <td>{"both_modified":3,"a_only":2,"b_only":0,"neither":517}</td>
+      <td>3.776221e-50</td>
+    </tr>
+    <tr>
+      <td>chr13:113195084-113195085:-:19229</td>
+      <td>chr13:113195109-113195110:-:19229</td>
+      <td>chr13</td>
+      <td>113195084</td>
+      <td>113195109</td>
+      <td>25</td>
       <td>-</td>
-      <td>m</td>
-      <td>m</td>
+      <td>19229</td>
+      <td>19229</td>
+      <td>MG:3</td>
+      <td>PCID2</td>
+      <td>1326</td>
+      <td>8</td>
+      <td>1318</td>
+      <td>4</td>
+      <td>2</td>
+      <td>6</td>
+      <td>2</td>
+      <td>1316</td>
+      <td>0.02</td>
+      <td>1314.02</td>
+      <td>202.5385</td>
+      <td>7.6621</td>
+      <td>0.9940</td>
+      <td>0.9910</td>
+      <td>0.0043</td>
+      <td>CONCORDANT</td>
+      <td>3</td>
+      <td>cmh_2x2</td>
+      <td>cmh_chi2</td>
+      <td>218.098859</td>
+      <td>2.350060e-49</td>
+      <td>0.249997</td>
+      <td>fisher_exact_2x2</td>
+      <td>219.333333</td>
+      <td>1.900866e-04</td>
+      <td>0.248483</td>
+      <td>0.200000</td>
+      <td>{"both_modified":2,"a_only":6,"b_only":2,"neither":1316}</td>
+      <td>9.510694e-46</td>
+    </tr>
+    <tr>
+      <td>chr17:7173507-7173508:-:a</td>
+      <td>chr17:7173611-7173612:-:a</td>
+      <td>chr17</td>
+      <td>7173507</td>
+      <td>7173611</td>
+      <td>104</td>
+      <td>-</td>
+      <td>a</td>
+      <td>a</td>
       <td>MG:5</td>
       <td>ASGR1</td>
-      <td>1790</td>
-      <td>87</td>
-      <td>1703</td>
-      <td>54</td>
-      <td>19</td>
-      <td>68</td>
-      <td>35</td>
-      <td>1668</td>
-      <td>2.62</td>
-      <td>1651.62</td>
-      <td>13.3796</td>
-      <td>3.7420</td>
-      <td>0.9425</td>
-      <td>0.9242</td>
-      <td>0.0283</td>
+      <td>1788</td>
+      <td>13</td>
+      <td>1775</td>
+      <td>22</td>
+      <td>6</td>
+      <td>7</td>
+      <td>16</td>
+      <td>1759</td>
+      <td>0.16</td>
+      <td>1753.16</td>
+      <td>92.4182</td>
+      <td>6.5301</td>
+      <td>0.9871</td>
+      <td>0.9806</td>
+      <td>0.0096</td>
       <td>CONCORDANT</td>
+      <td>5</td>
+      <td>cmh_2x2</td>
+      <td>cmh_chi2</td>
+      <td>203.296396</td>
+      <td>3.985777e-46</td>
+      <td>0.452478</td>
       <td>fisher_exact_2x2</td>
-      <td>fisher_odds</td>
-      <td>13.315966</td>
-      <td>7.271739e-13</td>
-      <td>0.197839</td>
-      <td>0.155738</td>
-      <td>{"both_modified":19,"a_only":68,"b_only":35,"neither":1668}</td>
-      <td>1.597698e-09</td>
+      <td>94.232143</td>
+      <td>2.695233e-09</td>
+      <td>0.452524</td>
+      <td>0.206897</td>
+      <td>{"both_modified":6,"a_only":7,"b_only":16,"neither":1759}</td>
+      <td>1.433817e-42</td>
+    </tr>
+    <tr>
+      <td>chr17:7173611-7173612:-:a</td>
+      <td>chr17:7173809-7173810:-:a</td>
+      <td>chr17</td>
+      <td>7173611</td>
+      <td>7173809</td>
+      <td>198</td>
+      <td>-</td>
+      <td>a</td>
+      <td>a</td>
+      <td>MG:5</td>
+      <td>ASGR1</td>
+      <td>1799</td>
+      <td>22</td>
+      <td>1777</td>
+      <td>51</td>
+      <td>12</td>
+      <td>10</td>
+      <td>39</td>
+      <td>1738</td>
+      <td>0.62</td>
+      <td>1726.62</td>
+      <td>52.3960</td>
+      <td>5.7114</td>
+      <td>0.9728</td>
+      <td>0.9601</td>
+      <td>0.0189</td>
+      <td>CONCORDANT</td>
+      <td>6</td>
+      <td>cmh_2x2</td>
+      <td>cmh_chi2</td>
+      <td>201.526474</td>
+      <td>9.699009e-46</td>
+      <td>0.522835</td>
+      <td>fisher_exact_2x2</td>
+      <td>53.476923</td>
+      <td>3.620565e-14</td>
+      <td>0.523507</td>
+      <td>0.196721</td>
+      <td>{"both_modified":12,"a_only":10,"b_only":39,"neither":1738}</td>
+      <td>3.140151e-42</td>
     </tr>
     <tr>
       <td>chr17:7173611-7173612:-:a</td>
@@ -7315,51 +7178,103 @@ reference_gtf: /athena/cayuga_0003/scratch/users/thn4005/scripts/projects_v2/mod
       <td>0.9684</td>
       <td>0.0159</td>
       <td>CONCORDANT</td>
+      <td>6</td>
+      <td>cmh_2x2</td>
+      <td>cmh_chi2</td>
+      <td>196.587275</td>
+      <td>1.160369e-44</td>
+      <td>0.439359</td>
       <td>fisher_exact_2x2</td>
-      <td>fisher_odds</td>
       <td>57.733333</td>
       <td>1.191125e-12</td>
       <td>0.440317</td>
       <td>0.212766</td>
       <td>{"both_modified":10,"a_only":12,"b_only":25,"neither":1732}</td>
-      <td>2.453494e-09</td>
+      <td>3.415284e-41</td>
     </tr>
     <tr>
-      <td>chr13:113178015-113178016:-:a</td>
-      <td>chr13:113178132-113178133:-:a</td>
+      <td>chr13:113178284-113178285:-:a</td>
+      <td>chr13:113179008-113179009:-:a</td>
       <td>chr13</td>
-      <td>113178015</td>
-      <td>113178132</td>
-      <td>117</td>
+      <td>113178284</td>
+      <td>113179008</td>
+      <td>724</td>
       <td>-</td>
       <td>a</td>
       <td>a</td>
       <td>MG:3</td>
       <td>PCID2</td>
-      <td>853</td>
-      <td>20</td>
-      <td>833</td>
-      <td>53</td>
-      <td>13</td>
-      <td>7</td>
+      <td>1818</td>
+      <td>62</td>
+      <td>1756</td>
+      <td>66</td>
+      <td>22</td>
       <td>40</td>
-      <td>793</td>
-      <td>1.24</td>
-      <td>781.24</td>
-      <td>35.2667</td>
-      <td>5.1402</td>
-      <td>0.9449</td>
-      <td>0.9173</td>
-      <td>0.0427</td>
+      <td>44</td>
+      <td>1712</td>
+      <td>2.25</td>
+      <td>1692.25</td>
+      <td>21.3795</td>
+      <td>4.4182</td>
+      <td>0.9538</td>
+      <td>0.9321</td>
+      <td>0.0332</td>
       <td>CONCORDANT</td>
+      <td>6</td>
+      <td>cmh_2x2</td>
+      <td>cmh_chi2</td>
+      <td>188.130371</td>
+      <td>8.136565e-43</td>
+      <td>0.331776</td>
       <td>fisher_exact_2x2</td>
-      <td>fisher_odds</td>
-      <td>36.817857</td>
-      <td>2.560998e-12</td>
-      <td>0.601981</td>
-      <td>0.216667</td>
-      <td>{"both_modified":13,"a_only":7,"b_only":40,"neither":793}</td>
-      <td>4.964871e-09</td>
+      <td>21.400000</td>
+      <td>5.958861e-18</td>
+      <td>0.329782</td>
+      <td>0.207547</td>
+      <td>{"both_modified":22,"a_only":40,"b_only":44,"neither":1712}</td>
+      <td>2.195245e-39</td>
+    </tr>
+    <tr>
+      <td>chr17:7173790-7173791:-:19229</td>
+      <td>chr17:7173791-7173792:-:19229</td>
+      <td>chr17</td>
+      <td>7173790</td>
+      <td>7173791</td>
+      <td>1</td>
+      <td>-</td>
+      <td>19229</td>
+      <td>19229</td>
+      <td>MG:5</td>
+      <td>ASGR1</td>
+      <td>1800</td>
+      <td>18</td>
+      <td>1782</td>
+      <td>29</td>
+      <td>8</td>
+      <td>10</td>
+      <td>21</td>
+      <td>1761</td>
+      <td>0.29</td>
+      <td>1753.29</td>
+      <td>66.3245</td>
+      <td>6.0515</td>
+      <td>0.9828</td>
+      <td>0.9742</td>
+      <td>0.0126</td>
+      <td>CONCORDANT</td>
+      <td>5</td>
+      <td>cmh_2x2</td>
+      <td>cmh_chi2</td>
+      <td>185.603970</td>
+      <td>2.896991e-42</td>
+      <td>0.432043</td>
+      <td>fisher_exact_2x2</td>
+      <td>67.085714</td>
+      <td>6.284707e-11</td>
+      <td>0.432660</td>
+      <td>0.205128</td>
+      <td>{"both_modified":8,"a_only":10,"b_only":21,"neither":1761}</td>
+      <td>7.214845e-39</td>
     </tr>
     <tr>
       <td>chr17:7173982-7173983:-:a</td>
@@ -7389,88 +7304,271 @@ reference_gtf: /athena/cayuga_0003/scratch/users/thn4005/scripts/projects_v2/mod
       <td>0.9633</td>
       <td>0.0172</td>
       <td>CONCORDANT</td>
+      <td>6</td>
+      <td>cmh_2x2</td>
+      <td>cmh_chi2</td>
+      <td>182.544280</td>
+      <td>1.348720e-41</td>
+      <td>0.303581</td>
       <td>fisher_exact_2x2</td>
-      <td>fisher_odds</td>
       <td>37.932540</td>
       <td>2.752771e-12</td>
       <td>0.302347</td>
       <td>0.196429</td>
       <td>{"both_modified":11,"a_only":24,"b_only":21,"neither":1738}</td>
-      <td>5.040171e-09</td>
+      <td>3.119012e-38</td>
     </tr>
     <tr>
-      <td>chr17:7173611-7173612:-:a</td>
-      <td>chr17:7173978-7173979:-:a</td>
+      <td>chr17:7173809-7173810:-:a</td>
+      <td>chr17:7173987-7173988:-:a</td>
       <td>chr17</td>
-      <td>7173611</td>
-      <td>7173978</td>
-      <td>367</td>
+      <td>7173809</td>
+      <td>7173987</td>
+      <td>178</td>
       <td>-</td>
       <td>a</td>
       <td>a</td>
       <td>MG:5</td>
       <td>ASGR1</td>
-      <td>1783</td>
-      <td>21</td>
-      <td>1762</td>
-      <td>141</td>
+      <td>1806</td>
+      <td>54</td>
+      <td>1752</td>
+      <td>33</td>
       <td>14</td>
-      <td>7</td>
-      <td>127</td>
-      <td>1635</td>
-      <td>1.66</td>
-      <td>1622.66</td>
-      <td>24.7997</td>
-      <td>4.6323</td>
-      <td>0.9248</td>
-      <td>0.9110</td>
-      <td>0.0218</td>
+      <td>40</td>
+      <td>19</td>
+      <td>1733</td>
+      <td>0.99</td>
+      <td>1719.99</td>
+      <td>31.8275</td>
+      <td>4.9922</td>
+      <td>0.9673</td>
+      <td>0.9529</td>
+      <td>0.0217</td>
       <td>CONCORDANT</td>
+      <td>6</td>
+      <td>cmh_2x2</td>
+      <td>cmh_chi2</td>
+      <td>179.556592</td>
+      <td>6.056684e-41</td>
+      <td>0.248926</td>
       <td>fisher_exact_2x2</td>
-      <td>fisher_odds</td>
-      <td>25.748031</td>
-      <td>1.445463e-11</td>
-      <td>0.594589</td>
-      <td>0.094595</td>
-      <td>{"both_modified":14,"a_only":7,"b_only":127,"neither":1635}</td>
-      <td>2.507269e-08</td>
+      <td>31.923684</td>
+      <td>4.152835e-14</td>
+      <td>0.248415</td>
+      <td>0.191781</td>
+      <td>{"both_modified":14,"a_only":40,"b_only":19,"neither":1733}</td>
+      <td>1.307275e-37</td>
     </tr>
     <tr>
-      <td>chr17:7173594-7173595:-:19229</td>
-      <td>chr17:7173595-7173596:-:19229</td>
+      <td>chr13:113178132-113178133:-:a</td>
+      <td>chr13:113179008-113179009:-:a</td>
+      <td>chr13</td>
+      <td>113178132</td>
+      <td>113179008</td>
+      <td>876</td>
+      <td>-</td>
+      <td>a</td>
+      <td>a</td>
+      <td>MG:3</td>
+      <td>PCID2</td>
+      <td>856</td>
+      <td>52</td>
+      <td>804</td>
+      <td>41</td>
+      <td>22</td>
+      <td>30</td>
+      <td>19</td>
+      <td>785</td>
+      <td>2.49</td>
+      <td>765.49</td>
+      <td>29.7163</td>
+      <td>4.8932</td>
+      <td>0.9428</td>
+      <td>0.8972</td>
+      <td>0.0715</td>
+      <td>CONCORDANT</td>
+      <td>6</td>
+      <td>cmh_2x2</td>
+      <td>cmh_chi2</td>
+      <td>175.932827</td>
+      <td>3.745453e-40</td>
+      <td>0.403213</td>
+      <td>fisher_exact_2x2</td>
+      <td>30.298246</td>
+      <td>1.525877e-18</td>
+      <td>0.399445</td>
+      <td>0.309859</td>
+      <td>{"both_modified":22,"a_only":30,"b_only":19,"neither":785}</td>
+      <td>7.578924e-37</td>
+    </tr>
+    <tr>
+      <td>chr17:7173573-7173574:-:a</td>
+      <td>chr17:7173611-7173612:-:a</td>
       <td>chr17</td>
-      <td>7173594</td>
+      <td>7173573</td>
+      <td>7173611</td>
+      <td>38</td>
+      <td>-</td>
+      <td>a</td>
+      <td>a</td>
+      <td>MG:5</td>
+      <td>ASGR1</td>
+      <td>1794</td>
+      <td>26</td>
+      <td>1768</td>
+      <td>22</td>
+      <td>8</td>
+      <td>18</td>
+      <td>14</td>
+      <td>1754</td>
+      <td>0.32</td>
+      <td>1746.32</td>
+      <td>55.5946</td>
+      <td>5.7969</td>
+      <td>0.9822</td>
+      <td>0.9736</td>
+      <td>0.0126</td>
+      <td>CONCORDANT</td>
+      <td>6</td>
+      <td>cmh_2x2</td>
+      <td>cmh_chi2</td>
+      <td>170.212945</td>
+      <td>6.647483e-39</td>
+      <td>0.299770</td>
+      <td>fisher_exact_2x2</td>
+      <td>55.682540</td>
+      <td>1.680621e-10</td>
+      <td>0.299774</td>
+      <td>0.200000</td>
+      <td>{"both_modified":8,"a_only":18,"b_only":14,"neither":1754}</td>
+      <td>1.265994e-35</td>
+    </tr>
+    <tr>
+      <td>chr17:7101641-7101642:-:a</td>
+      <td>chr17:7101642-7101643:-:19229</td>
+      <td>chr17</td>
+      <td>7101641</td>
+      <td>7101642</td>
+      <td>1</td>
+      <td>-</td>
+      <td>a</td>
+      <td>19229</td>
+      <td>MG:4</td>
+      <td>ASGR2</td>
+      <td>1274</td>
+      <td>65</td>
+      <td>1209</td>
+      <td>13</td>
+      <td>11</td>
+      <td>54</td>
+      <td>2</td>
+      <td>1207</td>
+      <td>0.66</td>
+      <td>1196.66</td>
+      <td>101.9174</td>
+      <td>6.6713</td>
+      <td>0.9560</td>
+      <td>0.9398</td>
+      <td>0.0247</td>
+      <td>CONCORDANT</td>
+      <td>6</td>
+      <td>cmh_2x2</td>
+      <td>cmh_chi2</td>
+      <td>162.456320</td>
+      <td>3.288492e-37</td>
+      <td>0.167683</td>
+      <td>fisher_exact_2x2</td>
+      <td>122.935185</td>
+      <td>1.872013e-13</td>
+      <td>0.167577</td>
+      <td>0.164179</td>
+      <td>{"both_modified":11,"a_only":54,"b_only":2,"neither":1207}</td>
+      <td>5.914901e-34</td>
+    </tr>
+    <tr>
+      <td>chr17:7173595-7173596:-:19229</td>
+      <td>chr17:7173596-7173597:-:19229</td>
+      <td>chr17</td>
       <td>7173595</td>
+      <td>7173596</td>
       <td>1</td>
       <td>-</td>
       <td>19229</td>
       <td>19229</td>
       <td>MG:5</td>
       <td>ASGR1</td>
-      <td>1547</td>
+      <td>1779</td>
+      <td>49</td>
+      <td>1730</td>
       <td>47</td>
-      <td>1500</td>
+      <td>15</td>
+      <td>34</td>
       <td>32</td>
-      <td>12</td>
-      <td>35</td>
-      <td>20</td>
-      <td>1480</td>
-      <td>0.97</td>
-      <td>1468.97</td>
-      <td>25.4294</td>
-      <td>4.6684</td>
-      <td>0.9644</td>
-      <td>0.9502</td>
-      <td>0.0215</td>
+      <td>1698</td>
+      <td>1.29</td>
+      <td>1684.29</td>
+      <td>23.4798</td>
+      <td>4.5533</td>
+      <td>0.9629</td>
+      <td>0.9475</td>
+      <td>0.0233</td>
       <td>CONCORDANT</td>
+      <td>6</td>
+      <td>cmh_2x2</td>
+      <td>cmh_chi2</td>
+      <td>161.999578</td>
+      <td>4.137910e-37</td>
+      <td>0.289539</td>
       <td>fisher_exact_2x2</td>
-      <td>fisher_odds</td>
-      <td>25.371429</td>
-      <td>2.047505e-11</td>
-      <td>0.241986</td>
-      <td>0.179104</td>
-      <td>{"both_modified":12,"a_only":35,"b_only":20,"neither":1480}</td>
-      <td>3.373982e-08</td>
+      <td>23.409926</td>
+      <td>1.613411e-13</td>
+      <td>0.287625</td>
+      <td>0.185185</td>
+      <td>{"both_modified":15,"a_only":34,"b_only":32,"neither":1698}</td>
+      <td>7.050998e-34</td>
+    </tr>
+    <tr>
+      <td>chr17:7101613-7101614:-:19229</td>
+      <td>chr17:7101648-7101649:-:a</td>
+      <td>chr17</td>
+      <td>7101613</td>
+      <td>7101648</td>
+      <td>35</td>
+      <td>-</td>
+      <td>19229</td>
+      <td>a</td>
+      <td>MG:4</td>
+      <td>ASGR2</td>
+      <td>1304</td>
+      <td>17</td>
+      <td>1287</td>
+      <td>6</td>
+      <td>3</td>
+      <td>14</td>
+      <td>3</td>
+      <td>1284</td>
+      <td>0.08</td>
+      <td>1281.08</td>
+      <td>88.5862</td>
+      <td>6.4690</td>
+      <td>0.9870</td>
+      <td>0.9825</td>
+      <td>0.0066</td>
+      <td>CONCORDANT</td>
+      <td>3</td>
+      <td>cmh_2x2</td>
+      <td>cmh_chi2</td>
+      <td>133.132394</td>
+      <td>8.457910e-31</td>
+      <td>0.175294</td>
+      <td>fisher_exact_2x2</td>
+      <td>91.714286</td>
+      <td>3.599967e-05</td>
+      <td>0.174140</td>
+      <td>0.150000</td>
+      <td>{"both_modified":3,"a_only":14,"b_only":3,"neither":1284}</td>
+      <td>1.369166e-27</td>
     </tr>
   </tbody>
 </table></div></div></details></section><section id='sec-association-of-multiple-cis-snps-into-haplotypes'><details class='report-section' open><summary><h2>Association of multiple cis SNPs into Haplotypes</h2></summary><div class='section-body'><p class='section-intro'>Local read-backed SNP blocks (co-occurring cis SNPs phased onto the same reads) retained for haplotype association testing.</p><details class='definitions'><summary>Column definitions</summary><dl><dt>block_id</dt><dd>Identifier for the reported haplotype block.</dd><dt>gene_names</dt><dd>Gene labels associated with the reported SNP or molecule row.</dd><dt>context_key</dt><dd>Gene- or metagene-aware context key used to restrict genotype and modification joins to the same local feature family.</dd><dt>chrom</dt><dd>Reference chromosome or contig containing the reported feature.</dd><dt>region</dt><dd>Genomic span of the haplotype block as chrom:start-end (1-based; first to last SNP position).</dd><dt>span_bp</dt><dd>Distance in base pairs between the first and last SNP in the haplotype block.</dd><dt>n_snps</dt><dd>Number of SNPs represented in the reported haplotype block.</dd><dt>snp_coords</dt><dd>Per-SNP coordinates and alleles in the block (chrom:pos ref&gt;alt), in genomic order.</dd><dt>support_reads</dt><dd>Reads overlapping at least one SNP in the reported haplotype block.</dd><dt>complete_reads</dt><dd>Reads covering every SNP in the reported haplotype block.</dd><dt>haplotypes</dt><dd>Observed allele strings for the retained read-backed haplotypes in the reported block.</dd></dl></details><div class='table-wrap'><table class="dataframe datatable">
@@ -7613,7 +7711,7 @@ reference_gtf: /athena/cayuga_0003/scratch/users/thn4005/scripts/projects_v2/mod
       <td>2</td>
       <td>0.122959</td>
       <td>0.122959</td>
-      <td>0.057264</td>
+      <td>0.058944</td>
     </tr>
   </tbody>
 </table></div><details class='definitions' open><summary>Top 1 haplotype→transcript example(s)</summary><div class='gallery compact'><figure class='image-card'><a class='image-link' href='demo14_report_files/fig_0180.png' target='_blank' rel='noopener noreferrer' title='Open full-size image in a new tab'><img src='demo14_report_files/fig_0180.png' alt='block_HAPBLOCK1' /><span class='expand-badge' aria-hidden='true'>↗</span></a><figcaption>block_HAPBLOCK1</figcaption></figure></div></details></div><div class='subsection'><h3>Haplotype to Modification Stoichiometry</h3><details class='definitions'><summary>Column definitions</summary><dl><dt>block_id</dt><dd>Identifier for the reported haplotype block.</dd><dt>block_region</dt><dd>Genomic coordinates (chrom:start-end) spanned by the haplotype block.</dd><dt>mod_site_id</dt><dd>Canonical modification-site identifier in `chrom:start-end:strand:mod` format.</dd><dt>target_mod_code</dt><dd>Modification code tested at the reported site.</dd><dt>p_value</dt><dd>Nominal p-value from the reported hypothesis test.</dd><dt>p_adj_bh</dt><dd>Benjamini-Hochberg false-discovery-rate adjusted p-value.</dd><dt>effect_max_abs_mod_rate_diff</dt><dd>Maximum absolute difference in target modified fraction across the haplotypes retained in the reported test.</dd></dl></details><div class='table-wrap'><table class="dataframe datatable">
