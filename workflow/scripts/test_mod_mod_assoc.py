@@ -19,8 +19,9 @@ import numpy as np
 import pandas as pd
 from pyroaring import BitMap
 
-from genotype_utils import (benjamini_hochberg, binary_rate_delta, context_key_from_row,
-                            drop_unassigned_reads, run_contingency_test, shard_tsv_by_chrom, tsv_header)
+from genotype_utils import (benjamini_hochberg, binary_rate_delta, cmh_stratified_test,
+                            context_key_from_row, drop_unassigned_reads, mh_stratified_effect,
+                            run_contingency_test, shard_tsv_by_chrom, tsv_header)
 
 # Columns the current test_mod_mod_assoc uses (incl. strand, and gene_name/metagene_index for context_key).
 _MOD_WANT = ["sample", "qname", "mod_site_id", "chrom", "start0", "strand", "target_mod_code",
@@ -35,8 +36,10 @@ OUT_COLS = [
     "exp_both_modified", "exp_neither",
     "odds_ratio", "log2_odds_ratio",
     "concordant_frac_obs", "concordant_frac_exp", "concordance_log2_ratio", "direction",
-    "test_name", "stat_name", "stat_value", "p_value",
-    "effect_abs_delta_mod_frac", "jaccard_both", "per_state_json", "p_adj_bh",
+    "n_strata_informative", "test_name", "stat_name", "stat_value", "p_value",
+    "effect_abs_delta_mod_frac",
+    "test_name_pooled", "stat_value_pooled", "p_value_pooled", "effect_abs_delta_mod_frac_pooled",
+    "jaccard_both", "per_state_json", "p_adj_bh",
 ]
 
 
@@ -57,7 +60,7 @@ def _rk(df):
     return (df["sample"].astype(str) + "\x00" + df["qname"].astype(str))
 
 
-def _pair_row(sid_a, sid_b, counts, site_meta, args):
+def _pair_row(sid_a, sid_b, counts, site_meta, args, strata_counts=None):
     n_both, n_a_only, n_b_only, n_neither = counts
     n_reads = n_both + n_a_only + n_b_only + n_neither
     if n_reads < int(args.min_pair_reads):
@@ -67,8 +70,20 @@ def _pair_row(sid_a, sid_b, counts, site_meta, args):
     if n_a_mod < int(args.min_state_reads) or n_a_unmod < int(args.min_state_reads):
         return None
     tt = [[float(n_both), float(n_a_only)], [float(n_b_only), float(n_neither)]]
-    test_name, stat_name, stat_value, p_value = run_contingency_test(
+    # POOLED test (kept as *_pooled): pools reads across samples in the 2x2, so a co-occurrence driven
+    # by two sites' modification rates BOTH tracking sample is attributed to a site-site dependency.
+    pooled_name, pooled_sn, pooled_stat, pooled_p = run_contingency_test(
         tt, test=args.test, pseudocount=args.pseudocount)
+    pooled_eff = binary_rate_delta(tt)
+    # SAMPLE-STRATIFIED CMH (primary): one 2x2 [[both,a_only],[b_only,neither]] per sample, combined by
+    # Cochran-Mantel-Haenszel. Strata with no within-sample variation are dropped by cmh_stratified_test.
+    if strata_counts:
+        strata = [[[float(cb), float(ca)], [float(cbb), float(cn)]] for (cb, ca, cbb, cn) in strata_counts]
+        test_name, stat_name, stat_value, p_value, n_strata = cmh_stratified_test(strata)
+        eff = mh_stratified_effect(strata)
+    else:
+        test_name, stat_name, stat_value, p_value, n_strata = pooled_name, pooled_sn, pooled_stat, pooled_p, 0
+        eff = pooled_eff
     chrom_a, s0_a, strand_a, code_a, ctx, genes = site_meta[sid_a]
     chrom_b, s0_b, _sb, code_b, _cb, _g = site_meta[sid_b]
     n_b_mod = n_both + n_b_only
@@ -96,8 +111,11 @@ def _pair_row(sid_a, sid_b, counts, site_meta, args):
         "n_reads": n_reads,
         "n_a_modified": n_a_mod, "n_a_unmodified": n_a_unmod, "n_b_modified": n_b_mod,
         "n_both_modified": n_both, "n_a_only": n_a_only, "n_b_only": n_b_only, "n_neither": n_neither,
+        "n_strata_informative": int(n_strata),
         "test_name": test_name, "stat_name": stat_name, "stat_value": stat_value, "p_value": p_value,
-        "effect_abs_delta_mod_frac": binary_rate_delta(tt),
+        "effect_abs_delta_mod_frac": eff,
+        "test_name_pooled": pooled_name, "stat_value_pooled": pooled_stat, "p_value_pooled": pooled_p,
+        "effect_abs_delta_mod_frac_pooled": pooled_eff,
         "jaccard_both": round(n_both / union_mod, 6) if union_mod else 0.0,
         "per_state_json": json.dumps({
             "both_modified": n_both, "a_only": n_a_only,
@@ -151,6 +169,13 @@ def _modmod_for_chrom(mod_path, args):
             site_meta[site] = (f["chrom"], int(f["start0"]), f["strand"], f["target_mod_code"],
                                ck, (f.get(gene_col, "") if gene_col else ""))
 
+        # per-sample read bitmaps over the SAME _ri space, for sample-stratified CMH. Each _ri belongs
+        # to exactly one sample (it is keyed by sample\x00qname). Sorted so strata order is stable.
+        sample_bits = {}
+        if "sample" in mm.columns:
+            for samp, sg in mm.groupby("sample", sort=True):
+                sample_bits[samp] = BitMap(pd.unique(sg["_ri"]).astype(np.uint32))
+
         # genomic-order sweep with a distance window (chrom constant within a metagene)
         order = sorted(site_meta, key=lambda s: (site_meta[s][0], site_meta[s][1], s))
         for i, sa in enumerate(order):
@@ -162,9 +187,15 @@ def _modmod_for_chrom(mod_path, args):
                 if site_meta[sb][1] - s0a > args.max_distance:
                     break
                 mb, ub = site_bits[sb]
-                counts = (ma.intersection_cardinality(mb), ma.intersection_cardinality(ub),
-                          ua.intersection_cardinality(mb), ua.intersection_cardinality(ub))
-                r = _pair_row(sa, sb, counts, site_meta, args)
+                b_both = ma & mb; b_ao = ma & ub; b_bo = ua & mb; b_ne = ua & ub
+                counts = (len(b_both), len(b_ao), len(b_bo), len(b_ne))
+                strata_counts = None
+                if sample_bits:
+                    strata_counts = [
+                        (b_both.intersection_cardinality(sbm), b_ao.intersection_cardinality(sbm),
+                         b_bo.intersection_cardinality(sbm), b_ne.intersection_cardinality(sbm))
+                        for sbm in sample_bits.values()]
+                r = _pair_row(sa, sb, counts, site_meta, args, strata_counts=strata_counts)
                 if r is not None:
                     rows.append(r)
     return rows, n_skipped_dense

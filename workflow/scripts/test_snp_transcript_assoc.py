@@ -4,16 +4,20 @@ import argparse
 import json
 import os
 
+import numpy as np
 import pandas as pd
 
-from genotype_utils import benjamini_hochberg, max_abs_distribution_shift, run_contingency_test, tsv_header
+from genotype_utils import (benjamini_hochberg, cmh_stratified_test, max_abs_distribution_shift,
+                            run_contingency_test, tsv_header)
 
-# Only these columns are used (grouping: snp_id/allele_class/ZT; per-SNP metadata: the rest). The
-# molecule_snps table is ~1.7 GB / 7.5M rows on Huh7 mock, and reading all 21 object-dtype columns
+# Only these columns are used (grouping: sample/snp_id/allele_class/ZT; per-SNP metadata: the rest).
+# The molecule_snps table is ~1.7 GB / 7.5M rows on Huh7 mock, and reading all 21 object-dtype columns
 # is what pushes this to ~5.6 GB; loading just these -- with the repeated string columns as
-# categoricals -- is far lighter and produces identical output.
+# categoricals -- is far lighter and produces identical output. `sample` is loaded so the test can be
+# stratified by sample (see main): pooling reads across replicates lets per-sample allele-rate +
+# transcript-composition imbalance manufacture a Simpson's-paradox SNP->transcript association.
 WANTED_COLS = [
-    "snp_id", "allele_class", "ZT", "chrom", "pos1", "ref", "alt",
+    "sample", "snp_id", "allele_class", "ZT", "chrom", "pos1", "ref", "alt",
     "gene_names", "gene_ids", "metagene_indices",
 ]
 # Categoricals for the repeated low-cardinality columns. allele_class and ZT stay object:
@@ -24,6 +28,28 @@ CATEGORICAL = {
     "snp_id": "category", "chrom": "category", "ref": "category", "alt": "category",
     "gene_names": "category", "gene_ids": "category", "metagene_indices": "category",
 }
+
+
+def _stratified_max_tx_frac_diff(strata, n_tx):
+    """Sample-stratified analogue of max_abs_distribution_shift: per transcript column, the
+    coverage-weighted mean over samples of (ref transcript-fraction - alt transcript-fraction), then
+    the maximum absolute value across transcripts. Rows are [ref, alt]; weight is a sample's total
+    reads. Consistent with cmh_stratified_test (within-sample fractions, not pooled)."""
+    if not strata:
+        return 0.0
+    num = np.zeros(n_tx)
+    den = 0.0
+    for T in strata:
+        ref, alt = T[0], T[1]
+        rt, at = ref.sum(), alt.sum()
+        if rt <= 0 or at <= 0:
+            continue
+        w = rt + at
+        num += w * (ref / rt - alt / at)
+        den += w
+    if den <= 0:
+        return 0.0
+    return round(float(np.max(np.abs(num / den))), 6)
 
 
 def parse_args():
@@ -56,7 +82,7 @@ def main():
         grp = grp[grp["ZT"].isin(keep_tx)].copy()
         table = (
             grp.pivot_table(index="allele_class", columns="ZT", values="size", fill_value=0, aggfunc="sum")
-               .reindex(index=["ref", "alt"], fill_value=0)
+               .reindex(index=["ref", "alt"], columns=keep_tx, fill_value=0)
         )
         allele_totals = table.sum(axis=1)
         if allele_totals.get("ref", 0) < int(args.min_allele_reads):
@@ -64,7 +90,29 @@ def main():
         if allele_totals.get("alt", 0) < int(args.min_allele_reads):
             continue
         tt = table.to_numpy(dtype=float)
-        test_name, stat_name, stat_value, p_value = run_contingency_test(tt, test=args.test, pseudocount=args.pseudocount)
+        # POOLED test (kept as *_pooled): pools reads across samples -> confounded by replicate.
+        pooled_name, pooled_stat_name, pooled_stat, pooled_p = run_contingency_test(
+            tt, test=args.test, pseudocount=args.pseudocount)
+        # SAMPLE-STRATIFIED CMH (primary): one 2 x len(keep_tx) allele x transcript table per sample,
+        # combined by the generalized (Landis-Koch) CMH general-association statistic. Transcript column
+        # order is FIXED (keep_tx) across strata; a sample lacking both alleles or >=2 transcripts is
+        # dropped as uninformative.
+        strata = []
+        if "sample" in sub.columns:
+            sgrp = sub.groupby(["sample", "allele_class", "ZT"], as_index=False, observed=True).size()
+            sgrp = sgrp[sgrp["ZT"].isin(keep_tx)]
+            for _samp, ss in sgrp.groupby("sample", observed=True):
+                st = (ss.pivot_table(index="allele_class", columns="ZT", values="size",
+                                     fill_value=0, aggfunc="sum")
+                        .reindex(index=["ref", "alt"], columns=keep_tx, fill_value=0))
+                strata.append(st.to_numpy(dtype=float))
+        if strata:
+            test_name, stat_name, stat_value, p_value, n_strata = cmh_stratified_test(strata)
+        else:
+            test_name, stat_name, stat_value, p_value, n_strata = pooled_name, pooled_stat_name, pooled_stat, pooled_p, 0
+        # sample-stratified effect: per transcript, coverage-weighted mean over samples of
+        # (ref_frac - alt_frac); report the max |.| . Falls back to the pooled shift if no strata.
+        eff_strat = _stratified_max_tx_frac_diff(strata, len(keep_tx)) if strata else max_abs_distribution_shift(tt)
         per_tx = []
         for tx in table.columns:
             per_tx.append({
@@ -86,11 +134,16 @@ def main():
             "n_ref_reads": int(allele_totals.get("ref", 0)),
             "n_alt_reads": int(allele_totals.get("alt", 0)),
             "n_transcripts_tested": int(tt.shape[1]),
+            "n_strata_informative": int(n_strata),
             "test_name": test_name,
             "stat_name": stat_name,
             "stat_value": stat_value,
             "p_value": p_value,
-            "effect_max_abs_tx_frac_diff": max_abs_distribution_shift(tt),
+            "effect_max_abs_tx_frac_diff": eff_strat,
+            "test_name_pooled": pooled_name,
+            "stat_value_pooled": pooled_stat,
+            "p_value_pooled": pooled_p,
+            "effect_max_abs_tx_frac_diff_pooled": max_abs_distribution_shift(tt),
             "per_transcript_json": json.dumps(per_tx, separators=(",", ":")),
         })
 
@@ -101,8 +154,9 @@ def main():
     else:
         out = pd.DataFrame(columns=[
             "snp_id", "chrom", "pos1", "ref", "alt", "gene_names", "gene_ids", "metagene_indices",
-            "n_reads", "n_ref_reads", "n_alt_reads", "n_transcripts_tested",
+            "n_reads", "n_ref_reads", "n_alt_reads", "n_transcripts_tested", "n_strata_informative",
             "test_name", "stat_name", "stat_value", "p_value", "effect_max_abs_tx_frac_diff",
+            "test_name_pooled", "stat_value_pooled", "p_value_pooled", "effect_max_abs_tx_frac_diff_pooled",
             "per_transcript_json", "p_adj_bh"
         ])
 

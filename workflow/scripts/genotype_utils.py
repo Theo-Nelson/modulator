@@ -9,7 +9,7 @@ from typing import Dict, Iterable, List, Optional, Tuple
 
 import numpy as np
 import pandas as pd
-from scipy.stats import chi2, chi2_contingency, fisher_exact
+from scipy.stats import chi2, chi2_contingency, fisher_exact, rankdata as _rankdata
 
 
 def safe_int(x, default=0) -> int:
@@ -192,6 +192,92 @@ def mh_stratified_effect(strata):
             if den > 0:
                 best = max(best, abs(num / den))
     return best
+
+
+def van_elteren_kw(strata):
+    """Generalized van Elteren stratified rank test (stratified Kruskal-Wallis) for k>=2 groups.
+
+    `strata` is a list of strata; each stratum is a list of 1D arrays, ONE PER GROUP in a FIXED order
+    across every stratum (a group absent from a stratum is an empty array). Within each stratum the
+    observations are midrank-scored and each group's rank-sum deviation from its null expectation is
+    accumulated, weighted across strata by the design-free w_k = 1/(N_k + 1) -- the same weight the
+    2-group van_elteren_stratified uses -- into a Landis-Koch quadratic form ~ chi2_{g-1}.
+
+    This is the k-group, sample-stratified replacement for a sample-POOLED Kruskal/Mann-Whitney on
+    read-level continuous data (e.g. tail length by fragmentform): pooling reads across replicates lets
+    per-sample level + composition imbalance manufacture a Simpson's-paradox difference where the
+    within-sample effect is ~0. A single stratum reduces to the tie-corrected Kruskal-Wallis H; two
+    groups reduce to the 2-group van Elteren (chi2_1 = z^2). A stratum with <2 non-empty groups, <2
+    observations, or no rank variation (all tied) carries no information and is dropped.
+
+    Returns (stat, p_value, n_informative_strata, df); NaN when nothing is informative."""
+    strata = [st for st in strata if st]
+    if not strata:
+        return float("nan"), float("nan"), 0, 0
+    g = len(strata[0])
+    if g < 2 or any(len(st) != g for st in strata):
+        return float("nan"), float("nan"), 0, 0
+    A = np.zeros(g)
+    V = np.zeros((g, g))
+    present = np.zeros(g, dtype=bool)
+    used = 0
+    for st in strata:
+        arrs = [np.asarray(a, dtype=float).ravel() for a in st]
+        ns = np.array([a.size for a in arrs], dtype=float)
+        N = int(ns.sum())
+        if N < 2 or int((ns > 0).sum()) < 2:
+            continue
+        allv = np.concatenate([a for a in arrs if a.size])
+        ranks = _rankdata(allv)
+        rbar = (N + 1) / 2.0
+        sigma2 = float(((ranks - rbar) ** 2).sum()) / N   # population variance of midranks
+        if sigma2 <= 0:                                    # every value tied -> no rank information
+            continue
+        w = 1.0 / (N + 1)
+        Rk = np.zeros(g)
+        off = 0
+        for i, a in enumerate(arrs):
+            if a.size:
+                Rk[i] = float(ranks[off:off + a.size].sum())
+                off += a.size
+        Ek = ns * rbar
+        cov = sigma2 / (N - 1) * (N * np.diag(ns) - np.outer(ns, ns))
+        A += w * (Rk - Ek)
+        V += w * w * cov
+        present |= ns > 0
+        used += 1
+    if used == 0:
+        return float("nan"), float("nan"), 0, 0
+    idx = np.where(present)[0]
+    if idx.size < 2:
+        return float("nan"), float("nan"), used, 0
+    keep = idx[:-1]                                        # drop one group (rows are linearly dependent)
+    Ar = A[keep]
+    Vr = V[np.ix_(keep, keep)]
+    try:
+        Q = float(Ar @ np.linalg.solve(Vr, Ar))
+    except np.linalg.LinAlgError:
+        Q = float(Ar @ np.linalg.pinv(Vr) @ Ar)
+    df = int(keep.size)
+    if not np.isfinite(Q) or Q < 0:
+        return float("nan"), float("nan"), used, df
+    return Q, float(chi2.sf(Q, df)), used, df
+
+
+def weighted_within_stratum_median_range(strata):
+    """Effect size consistent with van_elteren_kw: within each stratum the range (max-min) of the
+    per-group medians, averaged over informative strata weighted by stratum size. `strata` has the same
+    shape as van_elteren_kw's argument."""
+    num = den = 0.0
+    for st in strata:
+        arrs = [np.asarray(a, dtype=float).ravel() for a in st]
+        meds = [float(np.median(a)) for a in arrs if a.size]
+        if len(meds) < 2:
+            continue
+        w = float(sum(a.size for a in arrs))
+        num += w * (max(meds) - min(meds))
+        den += w
+    return num / den if den > 0 else 0.0
 
 
 def robust_load_summary(path: str) -> pd.DataFrame:

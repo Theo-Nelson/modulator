@@ -35,15 +35,16 @@ import numpy as np
 import pandas as pd
 from pyroaring import BitMap
 
-from genotype_utils import (benjamini_hochberg, run_contingency_test, shard_tsv_by_chrom,
-                            tsv_header)
+from genotype_utils import (benjamini_hochberg, cmh_stratified_test, mh_stratified_effect,
+                            run_contingency_test, shard_tsv_by_chrom, tsv_header)
 
 OUT_COLS = [
     "gene_name", "chrom", "strand", "fragmentform_a", "fragmentform_b",
     "divergence_pos", "divergence_from_3p_nt", "mod_site_id", "site_pos", "site_from_3p_nt",
-    "n_informative", "n_informative_a", "n_informative_b",
+    "n_informative", "n_informative_a", "n_informative_b", "n_strata_informative",
     "a_modified", "a_unmodified", "b_modified", "b_unmodified",
     "frac_modified_a", "frac_modified_b", "delta", "test_name", "stat_value", "p_value",
+    "test_name_pooled", "stat_value_pooled", "p_value_pooled",
     "naive_n_a", "naive_n_b", "naive_frac_a", "naive_frac_b", "naive_delta", "naive_p_value",
     "reads_dropped_as_uninformative", "p_adj_bh",
 ]
@@ -103,15 +104,28 @@ def _covered(intervals, lo, hi):
 
 
 def divergence_point(ex_a, ex_b, strand):
-    """DEEPEST (most 5') position where the two exon structures differ, or None if identical.
+    """3'-MOST INTERNAL position where the two exon structures differ, or None if none exists.
 
-    S5 FIX: a read must reach this position to distinguish A from B. ONT direct-RNA reads sequence
-    3'->5' and truncate on the 5' side, so their 3' end (poly(A)) is essentially always present. The old
-    code returned the 3'-MOST difference, which every read trivially spans -> the informative-read
-    filter was a no-op (measured: 380/467 rows counted reads that never reached the real divergence
-    while reporting reads_dropped_as_uninformative=0). The discriminating position a read must actually
-    reach is the 5'-MOST difference: the lowest coord on '+', the highest on '-'.
+    A read distinguishes A from B only by spanning a position where they make different exon/intron
+    claims, and ONT direct-RNA reads sequence 3'->5' and truncate on the 5' side. Two competing
+    concerns set which differing position to gate on:
+
+      * Returning the DEEPEST (5'-most) difference OVER-FILTERS: it drops every read that stopped short
+        of a distal difference even though a more 3'-proximal difference had already classified it.
+      * Returning the 3'-most difference NAIVELY is a no-op when that difference is a TERMINAL OVERHANG
+        (a region beyond one form's 5'/3' transcript bound): there a non-spanning read is genuinely
+        ambiguous -- it could be the short form or a truncated long form -- and at the 3' end every read
+        trivially spans it (the old measured failure: 380/467 rows reported reads_dropped=0).
+
+    The position that satisfies both is the 3'-MOST difference that is INTERNAL to BOTH forms'
+    transcript extents (so spanning it genuinely discriminates), which keeps the most reads informative:
+    the largest such coord on '+', the smallest on '-'. Pairs whose only differences are terminal
+    overhangs (e.g. pure alt-TSS / alt-TES length) return None and are left to the cheap test_diffs.
     """
+    lo_both = max(ex_a[0][0], ex_b[0][0])          # 5'/3'-clipped region internal to BOTH forms
+    hi_both = min(ex_a[-1][1], ex_b[-1][1])         # (exons are sorted, so [0][0]=min start, [-1][1]=max end)
+    if hi_both <= lo_both:
+        return None
     bounds = sorted({p for iv in (ex_a, ex_b) for se in iv for p in se})
     if len(bounds) < 2:
         return None
@@ -119,12 +133,14 @@ def divergence_point(ex_a, ex_b, strand):
     for lo, hi in zip(bounds[:-1], bounds[1:]):
         if hi <= lo:
             continue
+        if lo < lo_both or hi > hi_both:            # terminal overhang of one form -> not a valid gate
+            continue
         if _covered(ex_a, lo, hi) != _covered(ex_b, lo, hi):
             diffs.append((lo, hi))
     if not diffs:
         return None
-    # 5'-most (deepest) differing position: lowest coord on +, highest on -
-    return min(l for l, _ in diffs) if strand == "+" else max(h for _, h in diffs)
+    # 3'-most internal difference -> the 5' edge a read must reach: largest lo on '+', smallest hi on '-'
+    return max(l for l, _ in diffs) if strand == "+" else min(h for _, h in diffs)
 
 
 def main():
@@ -205,6 +221,10 @@ def _process_chrom(ra, mods, gtf, args):
         rg = rg.assign(_ri=np.arange(len(rg)))
         strand = str(rg["strand"].iloc[0])
         chrom = str(rg["chrom"].iloc[0])
+        # per-sample read bitmaps over the same _ri space, for sample-stratified CMH (sorted for a
+        # stable stratum order). Each _ri is one (sample, qname) read, so samples partition _ri.
+        sample_bm = {s: BitMap(sg["_ri"].to_numpy().astype(np.uint32))
+                     for s, sg in rg.groupby("sample", sort=True)}
 
         zt_counts = rg["gtf_id"].value_counts()
         zts = list(zt_counts.index[:int(args.max_fragmentforms_per_gene)])
@@ -283,7 +303,20 @@ def _process_chrom(ra, mods, gtf, args):
                     if min(am, au, bm_, bu) < args.min_state_reads:
                         continue
                     tab = [[float(am), float(au)], [float(bm_), float(bu)]]
-                    tname, _sn, sval, pval = run_contingency_test(tab, test=args.test, pseudocount=args.pseudocount)
+                    # POOLED test (kept as *_pooled): pools informative reads across samples, so a
+                    # per-sample difference in both modification rate AND a/b composition manufactures a
+                    # fragmentform stoichiometry difference where the within-sample effect is ~0.
+                    ptname, _psn, psval, ppval = run_contingency_test(tab, test=args.test, pseudocount=args.pseudocount)
+                    # SAMPLE-STRATIFIED CMH (primary): one [[am,au],[bm,bu]] per sample among the
+                    # informative reads, combined by Cochran-Mantel-Haenszel.
+                    ia_m = ia & mbm; ia_u = ia & ubm; ib_m = ib & mbm; ib_u = ib & ubm
+                    strata = [[[float(ia_m.intersection_cardinality(sbm)), float(ia_u.intersection_cardinality(sbm))],
+                               [float(ib_m.intersection_cardinality(sbm)), float(ib_u.intersection_cardinality(sbm))]]
+                              for sbm in sample_bm.values()]
+                    if len(sample_bm) > 1:
+                        tname, _sn, sval, pval, n_strata = cmh_stratified_test(strata)
+                    else:
+                        tname, sval, pval, n_strata = ptname, psval, ppval, 0
                     fa = am / (am + au); fb = bm_ / (bm_ + bu)
                     row = {
                         "gene_name": gene, "chrom": chrom, "strand": strand,
@@ -292,10 +325,12 @@ def _process_chrom(ra, mods, gtf, args):
                         "mod_site_id": sid, "site_pos": int(spos), "site_from_3p_nt": int(abs(tes - spos)),
                         "n_informative": int(n_a + n_b),
                         "n_informative_a": int(n_a), "n_informative_b": int(n_b),
+                        "n_strata_informative": int(n_strata),
                         "a_modified": am, "a_unmodified": au, "b_modified": bm_, "b_unmodified": bu,
                         "frac_modified_a": round(fa, 5), "frac_modified_b": round(fb, 5),
                         "delta": round(fb - fa, 5), "test_name": tname,
                         "stat_value": sval, "p_value": pval,
+                        "test_name_pooled": ptname, "stat_value_pooled": psval, "p_value_pooled": ppval,
                     }
                     if args.also_naive:
                         na, nb = zt_bm[a], zt_bm[b]

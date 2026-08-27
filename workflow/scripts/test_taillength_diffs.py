@@ -22,14 +22,16 @@ import numpy as np
 import pandas as pd
 from scipy.stats import kruskal, mannwhitneyu
 
-from genotype_utils import benjamini_hochberg
+from genotype_utils import benjamini_hochberg, van_elteren_kw, weighted_within_stratum_median_range
 from plot_utils import save_figure
 
 FRAG_COLS = ["ZT", "gene_name", "metagene_index", "classification", "n_reads", "n_samples",
              "median_tail", "mean_tail", "std_tail", "q25_tail", "q75_tail", "min_tail", "max_tail"]
-DIFF_COLS = ["metagene_index", "gene_name", "n_fragmentforms_tested", "n_reads", "test_name",
-             "stat_name", "stat_value", "p_value", "effect_median_range_nt",
-             "min_median_tail", "max_median_tail", "per_fragmentform_json", "p_adj_bh"]
+DIFF_COLS = ["metagene_index", "gene_name", "n_fragmentforms_tested", "n_reads", "n_strata_informative",
+             "test_name", "stat_name", "stat_value", "p_value", "effect_median_range_nt",
+             "min_median_tail", "max_median_tail",
+             "test_name_pooled", "p_value_pooled", "effect_median_range_nt_pooled",
+             "per_fragmentform_json", "p_adj_bh"]
 
 
 def parse_args():
@@ -163,6 +165,12 @@ def main():
     frag_df.to_csv(frag_out, sep="\t", index=False)
 
     # ---- between-fragmentform differential tail length, per metagene ----
+    # Sample-stratified: the pooled Mann-Whitney/Kruskal compares fragmentforms' tails across ALL
+    # samples at once, so a difference in overall tail level between replicates combined with a flip
+    # in isoform composition manufactures a between-fragmentform difference where the within-sample
+    # effect is ~0 (a +hundreds-nt "difference" at FDR~0 on data where every sample is internally
+    # flat). van_elteren_kw stratifies by sample (stratified Kruskal-Wallis / generalized van Elteren);
+    # the pooled test is retained as *_pooled so the size of the confound stays measurable.
     diff_rows = []
     for mg, g in df.groupby("metagene_index", sort=False):
         by_zt = {zt: sub["tail_len"].values for zt, sub in g.groupby("ZT", sort=False)}
@@ -172,27 +180,36 @@ def main():
         n_total = int(sum(v.size for v in kept.values()))
         if n_total < int(args.min_total_reads):
             continue
+        kept_zts = list(kept.keys())
+        gk = g[g["ZT"].isin(set(kept_zts))]
+        # strata = one per sample; within a sample, the tail arrays of the kept fragmentforms in a
+        # FIXED (kept_zts) order (absent fragmentform -> empty array).
+        strata = []
+        for _samp, sg in gk.groupby("sample", sort=False):
+            by = {zt: sub["tail_len"].to_numpy(dtype=float) for zt, sub in sg.groupby("ZT", sort=False)}
+            strata.append([by.get(zt, np.empty(0)) for zt in kept_zts])
+        stat, p, n_strata, _dfree = van_elteren_kw(strata)
+        test_name = "van_elteren_stratified_kw" if np.isfinite(p) else "untestable"
+        stat_name = "chi2" if np.isfinite(p) else "none"
+        eff = round(float(weighted_within_stratum_median_range(strata)), 2)
+
+        # pooled reference (the old behaviour), kept for confound size only
         groups = list(kept.values())
         if len(groups) == 2:
             try:
-                stat, p = mannwhitneyu(groups[0], groups[1], alternative="two-sided")
+                pstat, pp = mannwhitneyu(groups[0], groups[1], alternative="two-sided")
             except ValueError:
-                stat, p = float("nan"), float("nan")
-            test_name, stat_name = "mannwhitneyu", "U"
+                pstat, pp = float("nan"), float("nan")
+            ptest = "mannwhitneyu"
         else:
-            # kruskal raises ValueError("All numbers are identical") when every read across all
-            # groups has the same tail length -- guard so a degenerate gene doesn't abort the run.
             try:
-                stat, p = kruskal(*groups)
+                pstat, pp = kruskal(*groups)
             except ValueError:
-                stat, p = float("nan"), float("nan")
-            test_name, stat_name = "kruskal", "H"
-        # scipy >= 1.18 RETURNS nan rather than raising when every read is identical, so the except
-        # above is not enough. A degenerate gene is UNTESTABLE (no tail-length variation), not a
-        # result -- mark it so the nan p is excluded from the BH family instead of being written as a
-        # completed test with an empty p (which shrinks the family the other rows are adjusted against).
-        if not np.isfinite(p):
-            test_name, stat_name, stat, p = "untestable", "none", float("nan"), float("nan")
+                pstat, pp = float("nan"), float("nan")
+            ptest = "kruskal"
+        if not np.isfinite(pp):
+            ptest, pp = "untestable", float("nan")
+
         per_frag = []
         for zt, v in sorted(kept.items(), key=lambda kv: -np.median(kv[1])):
             d = _dist(v)
@@ -205,10 +222,14 @@ def main():
             "metagene_index": mg,
             "gene_name": "+".join(sorted(g["gene_name"].dropna().astype(str).unique())) or "",
             "n_fragmentforms_tested": len(kept), "n_reads": n_total,
+            "n_strata_informative": int(n_strata),
             "test_name": test_name, "stat_name": stat_name,
-            "stat_value": round(float(stat), 4), "p_value": float(p),
-            "effect_median_range_nt": round(float(max(medians) - min(medians)), 2),
+            "stat_value": round(float(stat), 4) if np.isfinite(stat) else float("nan"),
+            "p_value": float(p),
+            "effect_median_range_nt": eff,
             "min_median_tail": float(min(medians)), "max_median_tail": float(max(medians)),
+            "test_name_pooled": ptest, "p_value_pooled": float(pp),
+            "effect_median_range_nt_pooled": round(float(max(medians) - min(medians)), 2),
             "per_fragmentform_json": json.dumps(per_frag, separators=(",", ":")),
         })
 
