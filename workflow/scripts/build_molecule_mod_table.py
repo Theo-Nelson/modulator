@@ -44,13 +44,20 @@ _MM_ENTRY_RE = re.compile(r'^([ACGTUNacgtun])([-+])([a-z]+|[0-9]+)([.?]?)')
 
 
 def parse_mm_groups(read):
-    """Parse the MM/Mm tag into {mod_code: (canonical_base, is_implicit)}.
+    """Parse the MM/Mm tag. Returns (groups, has_listed_deltas):
+      groups            = {(canonical_base, mod_code): is_implicit}
+      has_listed_deltas = True iff ANY group declares >=1 delta (a listed position)
 
     BLOCKER-4: a modBAM in IMPLICIT MM mode (flag '.' or absent) declares that every canonical base of
     a group NOT listed in the deltas is an implicitly-canonical (unmodified) observation. read.modified_bases
     returns ONLY the listed positions, so the pysam backend silently dropped those unmodified calls and
-    inflated every modified fraction. Explicit mode ('?') means unlisted positions carry NO call. This
-    parser recovers the flag so the extractor can emit the implicit-canonical rows modkit already emits."""
+    inflated every modified fraction. Explicit mode ('?') means unlisted positions carry NO call.
+
+    Keyed by (base, code) NOT code alone: a code can appear on two canonical bases (e.g. C+m. and A+m?),
+    and the implicit pass must know the base to emit a canonical call ONLY at that base -- and to reject
+    codes whose base the read does not carry, for ANY code (the old MOD_BASE allowlist could not).
+    has_listed_deltas lets the caller detect an htslib PARSE FAILURE (deltas present but modified_bases
+    empty) and skip the read instead of calling it entirely canonical."""
     mm = None
     for tag in ("MM", "Mm"):
         try:
@@ -59,18 +66,24 @@ def parse_mm_groups(read):
         except KeyError:
             continue
     if not mm:
-        return {}
-    out = {}
+        return {}, False
+    groups = {}
+    has_listed = False
     for entry in str(mm).split(";"):
-        m = _MM_ENTRY_RE.match(entry.strip())
+        entry = entry.strip()
+        if not entry:
+            continue
+        m = _MM_ENTRY_RE.match(entry)
         if not m:
             continue
         base, _strand, mods, flag = m.groups()
         implicit = (flag != "?")   # '.' or absent -> implicit; '?' -> explicit (unlisted = no call)
         base = base.upper()
+        if entry[m.end():].lstrip().startswith(","):   # a delta list follows the header -> listed positions
+            has_listed = True
         for code in re.findall(r'[0-9]+|[a-z]', mods):   # 'mh' -> m,h ; '17802' -> 17802
-            out[code] = (base, implicit)
-    return out
+            groups[(base, code)] = implicit
+    return groups, has_listed
 
 
 def parse_args():
@@ -396,6 +409,7 @@ def extract_rows_pysam(bam, chrom_lookup, chrom, shard_path, chunk_rows, verbose
 
     f32 = np.float32
     total = 0
+    n_mm_parse_fail = 0
     bamf = pysam.AlignmentFile(bam, "rb")
     # A candidate site's contig may be absent from THIS sample's BAM header (multi-sample runs where a
     # contig -- e.g. a viral/alt chrom -- has reads in one sample but not another). fetch() on an
@@ -409,10 +423,19 @@ def extract_rows_pysam(bam, chrom_lookup, chrom, shard_path, chunk_rows, verbose
             continue
         # Parse MM FIRST (not read.modified_bases): a read that is entirely canonical for an implicit
         # group still has MM but an empty modified_bases, and its unmodified observations must be kept.
-        mm_groups = parse_mm_groups(read)
+        mm_groups, mm_has_listed = parse_mm_groups(read)
         if not mm_groups:
             continue  # no MM/Mm tag -> no modification information at all
         mb = read.modified_bases or {}
+        # BLOCKER: an htslib MM PARSE FAILURE (e.g. a low-complexity read missing a canonical base, whose
+        # zero-delta group makes htslib reject the whole tag) returns modified_bases == {} even though the
+        # tag declares LISTED positions. The implicit pass would then read "no listed calls" as "entirely
+        # canonical" and write confident unmodified calls from unparsed data. Detect the mismatch and SKIP
+        # the read (count it) rather than fabricate calls -- these were missing data before the B4 fix, and
+        # must stay missing, not become wrong.
+        if mm_has_listed and not mb:
+            n_mm_parse_fail += 1
+            continue
         seq = read.query_sequence
         if seq is None:
             continue
@@ -529,11 +552,13 @@ def extract_rows_pysam(bam, chrom_lookup, chrom, shard_path, chunk_rows, verbose
                 if site_strand and ref_strand and ref_strand not in {".", "?"} and site_strand != ref_strand:
                     continue
                 target_mod = str(site["mod_code"])
-                grp = mm_groups.get(target_mod)
-                if grp is None or not grp[1]:
-                    continue  # this mod was not assessed on the read, OR is explicit ('?') -> no call
-                if _base_mismatch(target_mod, tb):
-                    continue  # variant at the modified base -> not a canonical observation
+                # MAJOR-1: look the group up by (read-base, code). This IS the base check -- it fires for
+                # ANY code (the old _base_mismatch was gated on an 11-entry allowlist, so an out-of-list
+                # code emitted a canonical row at every base). Emit only if the read has an IMPLICIT group
+                # for this mod ON this read's actual base; a mismatched base / explicit group / unassessed
+                # mod all fall through with no call.
+                if not mm_groups.get((tb, target_mod), False):
+                    continue
                 rows.append({
                     "sample": sample,
                     "qname": qname,
@@ -561,6 +586,10 @@ def extract_rows_pysam(bam, chrom_lookup, chrom, shard_path, chunk_rows, verbose
     _flush()
     if verbose:
         print(f"[info] pysam extract done: {sample} {chrom} rows={total}", file=sys.stderr, flush=True)
+    if n_mm_parse_fail:
+        print(f"[warn] pysam extract: {sample} {chrom}: skipped {n_mm_parse_fail} read(s) whose MM tag "
+              f"declared listed calls but htslib returned none (unparsable MM, e.g. low-complexity reads "
+              f"missing a canonical base) -- NOT called canonical", file=sys.stderr, flush=True)
     return chrom, parts, total
 
 
