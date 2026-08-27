@@ -162,9 +162,10 @@ COLUMN_DEFINITIONS = {
     "n_forms_comparable": "Number of fragmentforms with >=3 reads in BOTH the modified and unmodified state (the forms in which a within-fragmentform tail comparison is possible).",
     "n_forms_concordant": "Of the comparable fragmentforms, how many shift in the SAME direction as (and with at least a third of) the reported within-stratum effect. When this is a minority, the site is flagged tailmod_confounded and excluded from the headline count.",
     "tailmod_confounded": "True when fewer than half of the comparable fragmentforms reproduce the effect within-form — i.e. the modified-vs-unmodified tail gap is likely the modification proxying for a differently-tailed isoform rather than a within-isoform effect. Confounded sites are excluded from the headline significant count.",
-    "n_strata_informative": "Number of (sample, fragmentform) strata that carried BOTH modification states and so contributed to the sample-stratified van Elteren test (the primary p-value).",
+    "strata_effect_reversed": "Heterogeneity flag: TRUE when the per-sample effect REVERSES sign across samples (some samples >= +0.2, others <= -0.2). The primary p-value is a Mantel-Haenszel/CMH COMMON-EFFECT statistic, which averages opposing per-sample effects toward 0 and reports ~null -- correct for a fixed-effect model but blind to sign-reversing effects. This is the mirror image of the sample-pooling confound; when set, inspect the per-sample data rather than trusting the ~null p. (Computed only for the 2-group case when stratified.)",
+    "n_strata_informative": "Number of strata (by sample — by sample x fragmentform for the tail-length tests) that carried enough within-stratum information (both outcome states / >=2 covered rows) to contribute to the sample-stratified test. The primary p-value uses the stratified test only when this is >=2; with fewer strata it falls back to the exact pooled test, because a single-stratum statistic is an anti-conservative asymptotic approximation.",
     "effect_median_diff_nt_pooled": "The OLD pooled median(mod)-median(unmod) over all reads at the site, ignoring sample/fragmentform structure. Retained for transparency; can be badly inflated by the isoform confound — do not rank on it.",
-    "p_value_pooled": "The OLD pooled Mann-Whitney p-value (mod vs unmod reads pooled across all fragmentforms and samples). Retained for transparency; the primary p_value is the sample-stratified van Elteren test.",
+    "p_value_pooled": "The OLD sample-POOLED p-value (all reads pooled into one table, ignoring sample structure). Retained for transparency; it can be Simpson's-paradox inflated, so the primary p_value is sample-stratified. Do not rank on it.",
     "n_unmodified": "Number of reads unmodified at the target site.",
     "sample": "Sample identifier derived from the BAM filename.",
     "chrom": "Reference chromosome or contig containing the reported feature.",
@@ -193,6 +194,8 @@ COLUMN_DEFINITIONS = {
     "effect_max_abs_frac_diff": "Maximum absolute difference in pooled modified fraction across tested fragmentform partitions.",
     "effect_max_abs_tx_frac_diff": "Maximum absolute difference in fragmentform usage or stoichiometry between tested groups.",
     "effect_abs_delta_mod_frac": "Absolute difference in modified-site rate between the tested allele groups.",
+    "odds_ratio": "Sample-adjusted (Mantel-Haenszel common) odds ratio of co-modification between the two sites, combining the per-sample 2x2 tables so it is not inflated by between-sample rate differences: >1 = modified together (concordant), <1 = mutually exclusive, ~1 = independent.",
+    "log2_odds_ratio": "log2 of the sample-adjusted (Mantel-Haenszel) odds_ratio; direction is CONCORDANT/MUTUALLY_EXCLUSIVE when |log2| > 0.32, else INDEPENDENT.",
     "weighted_within_tx_effect": "Coverage-weighted within-fragmentform SNP/mod effect size after fragmentform conditioning.",
     "classification": "How this fragmentform compares to the reference annotation (`reference_gtf`): EXACT (matches "
                       "an annotated transcript's chain + 3' end), NOVEL_APA (annotated chain, novel 3' end / APA site), "
@@ -1081,6 +1084,17 @@ def _derived_column_def(col):
             stat = col[len(pref):]
             if stat in _LEN_STAT:
                 return f"{_LEN_STAT[stat]} of the read-length distribution (nt) over {gdesc}."
+    # Sample-POOLED companion of a stratified primary column (odds_ratio_pooled, delta_pooled,
+    # jaccard_both_pooled, ...): every *_pooled column across the association/stoichiometry tables is
+    # the single-table statistic with reads pooled across samples. Defined generically so none render as
+    # a bare header. (Explicit COLUMN_DEFINITIONS entries, e.g. p_value_pooled, take precedence upstream.)
+    if col.endswith("_pooled"):
+        base = col[: -len("_pooled")]
+        base_desc = COLUMN_DEFINITIONS.get(base)
+        tail = f" ({base_desc.rstrip('.')})" if base_desc else ""
+        return (f"Sample-POOLED companion of `{base}`{tail}: computed on the single table with reads "
+                f"pooled across samples, ignoring sample structure. Retained for transparency but can be "
+                f"Simpson's-paradox inflated, so the primary `{base}` is sample-stratified. Do not rank on it.")
     return None
 
 

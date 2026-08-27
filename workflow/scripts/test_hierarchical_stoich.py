@@ -36,22 +36,24 @@ import pandas as pd
 from pyroaring import BitMap
 
 from genotype_utils import (benjamini_hochberg, cmh_stratified_test, run_contingency_test,
-                            shard_tsv_by_chrom, tsv_header)
+                            shard_tsv_by_chrom, strata_effect_reversed, stratified_primary, tsv_header)
 
 
 def _adjusted_ab(strata):
     """Sample-adjusted (fa, fb, delta=fb-fa) from a list of per-sample [[am,au],[bm,bu]] tables.
-    Each sample's a- and b-arm modified fractions are combined with a COMMON per-sample weight
-    (that sample's informative-read total), over samples where BOTH arms have reads -- so fa, fb and
-    delta stay mutually consistent and are not Simpson's-paradox inflated the way the pooled fractions
-    are. Returns None when no sample covers both arms (caller falls back to the pooled fractions)."""
+    Each sample's a- and b-arm modified fractions are combined with a COMMON per-sample Mantel-Haenszel
+    weight w_k = Ra*Rb/N (the SAME weight mh_stratified_effect / stratified_max_distribution_shift use),
+    over samples where BOTH arms have reads -- so fa, fb and delta stay mutually consistent (|delta| then
+    equals the mh_stratified_effect the sibling tests report, one common estimator) and are not
+    Simpson's-paradox inflated like the pooled fractions. Returns None when no sample covers both arms
+    (caller falls back to the pooled fractions)."""
     num_a = num_b = den = 0.0
     for T in strata:
         (am, au), (bm, bu) = T
         na, nb = am + au, bm + bu
         if na <= 0 or nb <= 0:
             continue
-        w = na + nb
+        w = na * nb / (na + nb)          # Mantel-Haenszel Ra*Rb/N, N = na + nb
         num_a += w * (am / na)
         num_b += w * (bm / nb)
         den += w
@@ -63,7 +65,7 @@ def _adjusted_ab(strata):
 OUT_COLS = [
     "gene_name", "chrom", "strand", "fragmentform_a", "fragmentform_b",
     "divergence_pos", "divergence_from_3p_nt", "mod_site_id", "site_pos", "site_from_3p_nt",
-    "n_informative", "n_informative_a", "n_informative_b", "n_strata_informative",
+    "n_informative", "n_informative_a", "n_informative_b", "n_strata_informative", "strata_effect_reversed",
     "a_modified", "a_unmodified", "b_modified", "b_unmodified",
     "frac_modified_a", "frac_modified_b", "delta", "test_name", "stat_value", "p_value",
     "frac_modified_a_pooled", "frac_modified_b_pooled", "delta_pooled",
@@ -337,16 +339,22 @@ def _process_chrom(ra, mods, gtf, args):
                                [float(ib_m.intersection_cardinality(sbm)), float(ib_u.intersection_cardinality(sbm))]]
                               for sbm in sample_bm.values()]
                     fa_pool = am / (am + au); fb_pool = bm_ / (bm_ + bu)
-                    if len(sample_bm) > 1:
-                        tname, _sn, sval, pval, n_strata = cmh_stratified_test(strata)
+                    # CMH is primary only when >=2 strata are informative (stratified_primary): a single
+                    # informative stratum -- one sample, or many where only one survives filtering -- is an
+                    # anti-conservative asymptotic chi2, so it falls back to the exact pooled test.
+                    cmh = cmh_stratified_test(strata) if len(sample_bm) > 1 else None
+                    tname, _sn, sval, pval, n_strata, _used = stratified_primary(cmh, (ptname, _psn, psval, ppval))
+                    if _used:
                         # reader-facing fractions + delta must be sample-ADJUSTED like the CMH p, else the
                         # browser shows a confounded pooled -45.2% next to FDR 0.96 and the table sorts the
                         # most-confounded rows to the top (it ranks by |delta|).
                         _adj = _adjusted_ab(strata)
                         fa, fb, delta = _adj if _adj is not None else (fa_pool, fb_pool, fb_pool - fa_pool)
                     else:
-                        tname, sval, pval, n_strata = ptname, psval, ppval, 0
                         fa, fb, delta = fa_pool, fb_pool, fb_pool - fa_pool
+                    # heterogeneity: does the a-vs-b stoichiometry gap REVERSE sign across samples? (the
+                    # CMH averages such strata to ~0/p~1 -- mirror of the pooling confound; stratified only)
+                    strata_reversed = strata_effect_reversed(strata) if _used else False
                     row = {
                         "gene_name": gene, "chrom": chrom, "strand": strand,
                         "fragmentform_a": a, "fragmentform_b": b,
@@ -354,7 +362,7 @@ def _process_chrom(ra, mods, gtf, args):
                         "mod_site_id": sid, "site_pos": int(spos), "site_from_3p_nt": int(abs(tes - spos)),
                         "n_informative": int(n_a + n_b),
                         "n_informative_a": int(n_a), "n_informative_b": int(n_b),
-                        "n_strata_informative": int(n_strata),
+                        "n_strata_informative": int(n_strata), "strata_effect_reversed": bool(strata_reversed),
                         "a_modified": am, "a_unmodified": au, "b_modified": bm_, "b_unmodified": bu,
                         "frac_modified_a": round(fa, 5), "frac_modified_b": round(fb, 5),
                         "delta": round(delta, 5), "test_name": tname,

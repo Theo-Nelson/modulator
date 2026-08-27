@@ -7,7 +7,8 @@ import os
 import pandas as pd
 
 from genotype_utils import (benjamini_hochberg, cmh_stratified_test, max_abs_distribution_shift,
-                            run_contingency_test, stratified_max_distribution_shift, tsv_header)
+                            run_contingency_test, stratified_max_distribution_shift, stratified_primary,
+                            tsv_header)
 
 # Only these columns are used (grouping: sample/snp_id/allele_class/ZT; per-SNP metadata: the rest).
 # The molecule_snps table is ~1.7 GB / 7.5M rows on Huh7 mock, and reading all 21 object-dtype columns
@@ -84,13 +85,14 @@ def main():
                                      fill_value=0, aggfunc="sum")
                         .reindex(index=["ref", "alt"], columns=keep_tx, fill_value=0))
                 strata.append(st.to_numpy(dtype=float))
-        if strata:
-            test_name, stat_name, stat_value, p_value, n_strata = cmh_stratified_test(strata)
-        else:
-            test_name, stat_name, stat_value, p_value, n_strata = pooled_name, pooled_stat_name, pooled_stat, pooled_p, 0
+        # CMH is primary only when >=2 strata are informative (stratified_primary) -- a single informative
+        # stratum falls back to the exact pooled test (a single-stratum CMH is anti-conservative).
+        cmh = cmh_stratified_test(strata) if strata else None
+        test_name, stat_name, stat_value, p_value, n_strata, _used = stratified_primary(
+            cmh, (pooled_name, pooled_stat_name, pooled_stat, pooled_p))
         # sample-stratified effect: per transcript, coverage-weighted mean over samples of
-        # (ref_frac - alt_frac); report the max |.| . Falls back to the pooled shift if no strata.
-        eff_strat = stratified_max_distribution_shift(strata) if strata else max_abs_distribution_shift(tt)
+        # (ref_frac - alt_frac); report the max |.| . Falls back to the pooled shift when not stratified.
+        eff_strat = stratified_max_distribution_shift(strata) if _used else max_abs_distribution_shift(tt)
         per_tx = []
         for tx in table.columns:
             per_tx.append({

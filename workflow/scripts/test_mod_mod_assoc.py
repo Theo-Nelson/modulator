@@ -21,7 +21,8 @@ from pyroaring import BitMap
 
 from genotype_utils import (benjamini_hochberg, binary_rate_delta, cmh_stratified_test,
                             context_key_from_row, drop_unassigned_reads, mh_common_odds_ratio,
-                            mh_stratified_effect, run_contingency_test, shard_tsv_by_chrom, tsv_header)
+                            mh_stratified_effect, run_contingency_test, shard_tsv_by_chrom,
+                            strata_effect_reversed, stratified_primary, tsv_header)
 
 # Columns the current test_mod_mod_assoc uses (incl. strand, and gene_name/metagene_index for context_key).
 _MOD_WANT = ["sample", "qname", "mod_site_id", "chrom", "start0", "strand", "target_mod_code",
@@ -34,7 +35,7 @@ OUT_COLS = [
     "n_reads", "n_a_modified", "n_a_unmodified", "n_b_modified",
     "n_both_modified", "n_a_only", "n_b_only", "n_neither",
     "odds_ratio", "log2_odds_ratio", "direction",
-    "n_strata_informative", "test_name", "stat_name", "stat_value", "p_value",
+    "n_strata_informative", "strata_effect_reversed", "test_name", "stat_name", "stat_value", "p_value",
     "effect_abs_delta_mod_frac",
     "test_name_pooled", "stat_value_pooled", "p_value_pooled", "effect_abs_delta_mod_frac_pooled",
     "odds_ratio_pooled", "log2_odds_ratio_pooled", "direction_pooled",
@@ -94,13 +95,17 @@ def _pair_row(sid_a, sid_b, counts, site_meta, args, strata_counts=None):
     direction_pooled = _dir(log2_or_pooled)
 
     # ---- PRIMARY statistics ----
-    # strata_counts is passed ONLY when there is >1 sample (see _modmod_for_chrom): with a single sample
-    # the CMH general-association statistic is an UNCORRECTED asymptotic chi2 that is anti-conservative at
-    # these cell counts (e.g. [[6,1],[1,6]] -> 0.010 vs Fisher's exact 0.029), so a lone sample must use
-    # the exact pooled test -- there is no confound to correct when every read is from one sample.
-    if strata_counts:
-        strata = [[[float(cb), float(ca)], [float(cbb), float(cn)]] for (cb, ca, cbb, cn) in strata_counts]
-        test_name, stat_name, stat_value, p_value, n_strata = cmh_stratified_test(strata)
+    # strata_counts is passed only when >1 sample exists (a cheap short-circuit in _modmod_for_chrom),
+    # but the CMH is adopted as primary ONLY when >=2 strata are INFORMATIVE (stratified_primary): a
+    # single informative stratum -- one sample, OR many samples where only one survives filtering -- is
+    # an uncorrected asymptotic chi2, anti-conservative at these cell counts ([[6,1],[1,6]] -> 0.010 vs
+    # Fisher's exact 0.029), so it falls back to the exact pooled test.
+    strata = [[[float(cb), float(ca)], [float(cbb), float(cn)]]
+              for (cb, ca, cbb, cn) in strata_counts] if strata_counts else []
+    cmh = cmh_stratified_test(strata) if strata else None
+    test_name, stat_name, stat_value, p_value, n_strata, _used = stratified_primary(
+        cmh, (pooled_name, pooled_sn, pooled_stat, pooled_p))
+    if _used:
         eff = mh_stratified_effect(strata)                      # sample-adjusted rate difference
         or_mh = mh_common_odds_ratio(strata)                    # sample-adjusted (Mantel-Haenszel) OR
         if math.isfinite(or_mh) and or_mh > 0:
@@ -109,9 +114,11 @@ def _pair_row(sid_a, sid_b, counts, site_meta, args, strata_counts=None):
             odds_ratio, log2_or = or_pooled, log2_or_pooled
         direction = _dir(log2_or)
     else:
-        test_name, stat_name, stat_value, p_value, n_strata = pooled_name, pooled_sn, pooled_stat, pooled_p, 0
         eff = pooled_eff
         odds_ratio, log2_or, direction = or_pooled, log2_or_pooled, direction_pooled
+    # heterogeneity: does the co-modification effect REVERSE sign across samples? The CMH averages such
+    # strata to ~0/p~1, so flag it (mirror of the pooling confound; only meaningful once stratified).
+    strata_reversed = strata_effect_reversed(strata) if _used else False
     return {
         "odds_ratio": round(odds_ratio, 4), "log2_odds_ratio": round(log2_or, 4), "direction": direction,
         "exp_both_modified_pooled": round(exp_both, 2), "exp_neither_pooled": round(exp_neither, 2),
@@ -127,7 +134,7 @@ def _pair_row(sid_a, sid_b, counts, site_meta, args, strata_counts=None):
         "n_reads": n_reads,
         "n_a_modified": n_a_mod, "n_a_unmodified": n_a_unmod, "n_b_modified": n_b_mod,
         "n_both_modified": n_both, "n_a_only": n_a_only, "n_b_only": n_b_only, "n_neither": n_neither,
-        "n_strata_informative": int(n_strata),
+        "n_strata_informative": int(n_strata), "strata_effect_reversed": bool(strata_reversed),
         "test_name": test_name, "stat_name": stat_name, "stat_value": stat_value, "p_value": p_value,
         "effect_abs_delta_mod_frac": eff,
         "test_name_pooled": pooled_name, "stat_value_pooled": pooled_stat, "p_value_pooled": pooled_p,

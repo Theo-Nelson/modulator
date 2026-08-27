@@ -296,7 +296,17 @@ def summarize_site(df_site, min_cov, which_test, pseudocount, alternative):
         strata.append(T)
     cmh_stat, cmh_p, cmh_df, n_strata = cmh_general_association(strata)
     mh_effect = mh_max_abs_rate_diff(strata)
-    primary_test = "cmh_2x2" if len(tested_zn) == 2 else f"cmh_general_{len(tested_zn)}x2"
+    # Use the stratified CMH as the primary ONLY when >=2 strata are informative. With a single
+    # informative stratum -- one sample, OR many samples where only one survives filtering -- the CMH
+    # general-association statistic is an uncorrected asymptotic chi2 that is anti-conservative at small
+    # counts ([[6,1],[1,6]] -> 0.010 vs Fisher's exact 0.029), so fall back to the exact pooled test.
+    # The correct predicate is n_strata_informative, not the sample count.
+    if int(n_strata) >= 2:
+        primary_test = "cmh_2x2" if len(tested_zn) == 2 else f"cmh_general_{len(tested_zn)}x2"
+        primary_stat_name, primary_stat, primary_p, primary_eff = "cmh_chi2", cmh_stat, cmh_p, mh_effect
+    else:
+        primary_test, primary_stat_name = used_test, stat_name
+        primary_stat, primary_p, primary_eff = stat_value, pval, max_diff_pooled
 
     # serialize per-transcript for convenience
     per_tx = []
@@ -312,13 +322,13 @@ def summarize_site(df_site, min_cov, which_test, pseudocount, alternative):
 
     return {
         "n_tx_tested": int(len(grp_f)),
-        # primary = sample-stratified CMH
+        # primary = sample-stratified CMH when >=2 strata are informative, else the exact pooled test
         "test_name": primary_test,
-        "stat_name": "cmh_chi2",
-        "stat_value": cmh_stat,
-        "p_value": cmh_p,
+        "stat_name": primary_stat_name,
+        "stat_value": primary_stat,
+        "p_value": primary_p,
         "n_strata_informative": int(n_strata),
-        "effect_max_abs_frac_diff": round(mh_effect, 6),
+        "effect_max_abs_frac_diff": round(primary_eff, 6),
         # pooled companions (the OLD sample-pooled statistic -- do not rank on these)
         "test_name_pooled": used_test,
         "stat_value_pooled": stat_value,

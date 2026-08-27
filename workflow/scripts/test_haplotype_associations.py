@@ -18,7 +18,7 @@ from pyroaring import BitMap
 
 from genotype_utils import (benjamini_hochberg, cmh_stratified_test, context_key_from_row,
                             drop_unassigned_reads, max_abs_distribution_shift, mh_stratified_effect,
-                            stratified_max_distribution_shift,
+                            strata_effect_reversed, stratified_max_distribution_shift, stratified_primary,
                             run_contingency_test, shard_tsv_by_chrom, tsv_header)
 
 TX_COLS = [
@@ -29,6 +29,7 @@ TX_COLS = [
 MOD_COLS = [
     "block_id", "mod_site_id", "context_key", "chrom", "target_mod_code", "n_reads",
     "n_haplotypes_tested", "test_name", "stat_name", "stat_value", "p_value", "n_strata_informative",
+    "strata_effect_reversed",
     "effect_max_abs_mod_rate_diff", "test_name_pooled", "p_value_pooled", "per_table_json", "p_adj_bh",
 ]
 _MOD_WANT = ["sample", "qname", "mod_site_id", "chrom", "state_detail", "target_mod_code",
@@ -85,21 +86,19 @@ def _hap_for_one_chrom(hap_path, mod_path, args):
         # PRIMARY: stratify the haplotype x transcript table by SAMPLE, aligning to the same
         # keep_haps x keep_tx grid in each stratum, then generalized CMH (BLOCKER: pooling reads across
         # replicates lets per-sample composition imbalance fake a haplotype-transcript association).
-        # >1 sample only: a single-sample CMH is an uncorrected asymptotic chi2 (anti-conservative),
-        # so a lone sample keeps the exact pooled test.
+        # Adopted as primary only when >=2 strata are informative (stratified_primary); a single
+        # informative stratum keeps the exact pooled test (a single-stratum CMH is anti-conservative).
         strata = []
         if "sample" in sub.columns and sub["sample"].nunique() > 1:
             for _samp, _sg in sub.groupby("sample", sort=False):
                 st = (_sg.groupby(["haplotype", "ZT"]).size()
                           .unstack(fill_value=0).reindex(index=keep_haps, columns=keep_tx, fill_value=0))
                 strata.append(st.to_numpy(dtype=float))
-            test_name, stat_name, stat_value, p_value, n_strata = cmh_stratified_test(strata)
-        else:
-            test_name, stat_name, stat_value, p_value, n_strata = (
-                p_test_name, p_stat_name, p_stat_value, p_pooled, 0)
-        # effect consistent with the PRIMARY test: stratified when the CMH ran, else pooled (MINOR --
-        # a stratified p was previously reported next to a pooled effect).
-        effect_tx = stratified_max_distribution_shift(strata) if strata else max_abs_distribution_shift(tt)
+        cmh = cmh_stratified_test(strata) if strata else None
+        test_name, stat_name, stat_value, p_value, n_strata, _used = stratified_primary(
+            cmh, (p_test_name, p_stat_name, p_stat_value, p_pooled))
+        # effect consistent with the PRIMARY test: stratified when the CMH was adopted, else pooled.
+        effect_tx = stratified_max_distribution_shift(strata) if _used else max_abs_distribution_shift(tt)
         tx_rows.append({
             "block_id": block_id, "context_key": sub.iloc[0].get("context_key", ""),
             "chrom": sub.iloc[0].get("chrom", ""), "n_reads": int(tt.sum()),
@@ -175,25 +174,25 @@ def _hap_for_one_chrom(hap_path, mod_path, args):
                         # pooled (kept as *_pooled companion)
                         p_test_name, p_stat_name, p_stat_value, p_pooled = run_contingency_test(
                             tt, test=args.test, pseudocount=args.pseudocount)
-                        # PRIMARY: sample-stratified generalized CMH over per-sample haplotype x [mod,unmod] tables.
-                        # >1 sample only: a single-sample CMH is an uncorrected asymptotic chi2 (anti-conservative),
-                        # so a lone sample keeps the exact pooled test.
+                        # PRIMARY: sample-stratified generalized CMH over per-sample haplotype x [mod,unmod]
+                        # tables, adopted only when >=2 strata are informative (stratified_primary); a single
+                        # informative stratum keeps the exact pooled test (single-stratum CMH is anti-conservative).
+                        strata = []
                         if len(samp_bits) > 1:
-                            strata = []
                             for _sb in samp_bits.values():
                                 strata.append([[(hbm[h] & mod_bm & _sb).__len__(),
                                                 (hbm[h] & unmod_bm & _sb).__len__()] for h in keep])
-                            test_name, stat_name, stat_value, p_value, n_strata = cmh_stratified_test(strata)
-                            effect = mh_stratified_effect(strata)
-                        else:
-                            test_name, stat_name, stat_value, p_value, n_strata = (
-                                p_test_name, p_stat_name, p_stat_value, p_pooled, 0)
-                            effect = max_abs_distribution_shift(tt)
+                        cmh = cmh_stratified_test(strata) if strata else None
+                        test_name, stat_name, stat_value, p_value, n_strata, _used = stratified_primary(
+                            cmh, (p_test_name, p_stat_name, p_stat_value, p_pooled))
+                        effect = mh_stratified_effect(strata) if _used else max_abs_distribution_shift(tt)
+                        # heterogeneity flag (2-haplotype case): does the effect reverse sign across samples?
+                        strata_reversed = strata_effect_reversed(strata) if _used else False
                         mod_rows.append({
                             "block_id": block, "mod_site_id": site, "context_key": ck_hap, "chrom": chrom_hap,
                             "target_mod_code": code, "n_reads": int(tt.sum()), "n_haplotypes_tested": int(tt.shape[0]),
                             "test_name": test_name, "stat_name": stat_name, "stat_value": stat_value, "p_value": p_value,
-                            "n_strata_informative": int(n_strata),
+                            "n_strata_informative": int(n_strata), "strata_effect_reversed": bool(strata_reversed),
                             "effect_max_abs_mod_rate_diff": effect,
                             "test_name_pooled": p_test_name, "p_value_pooled": p_pooled,
                             "per_table_json": json.dumps({"haplotypes": keep, "states": ["modified", "not_target"],

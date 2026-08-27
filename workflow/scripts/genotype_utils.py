@@ -202,6 +202,51 @@ def cmh_stratified_test(strata):
     return name, "cmh_chi2", Q, float(chi2.sf(Q, d)), used
 
 
+def strata_effect_reversed(strata, min_effect=0.2):
+    """Common-effect HETEROGENEITY flag for a list of 2x2 strata [[a,b],[c,d]] (rows = the two compared
+    groups, col 0 = the 'positive'/modified outcome). Returns True when the per-stratum signed rate
+    differences (row0 positive-fraction - row1 positive-fraction) include BOTH a value >= +min_effect and
+    one <= -min_effect -- i.e. the effect REVERSES sign across samples.
+
+    This is the mirror image of the sample-pooling confound: a Mantel-Haenszel / CMH common-effect
+    estimate averages opposing per-sample effects to ~0 and reports p~1, so a real but sign-reversing
+    per-sample effect is invisible in the primary statistic (it is CORRECT for a common-effect model, but
+    like tail x mod's tailmod_confounded it deserves to be flagged rather than silent). Strata with an
+    empty row are skipped; needs >=2 informative strata to be meaningful."""
+    hi = lo = False
+    for T in strata:
+        T = np.asarray(T, dtype=float)
+        if T.shape != (2, 2):
+            return False
+        r0, r1 = T[0].sum(), T[1].sum()
+        if r0 <= 0 or r1 <= 0:
+            continue
+        d = T[0, 0] / r0 - T[1, 0] / r1
+        if d >= min_effect:
+            hi = True
+        elif d <= -min_effect:
+            lo = True
+    return bool(hi and lo)
+
+
+def stratified_primary(cmh_result, pooled, min_strata=2):
+    """Choose the primary test between a stratified CMH result and the exact POOLED result.
+
+    `cmh_result` is the 5-tuple from cmh_stratified_test (or None when no strata were built); `pooled` is
+    the 4-tuple (name, stat_name, stat, p) from run_contingency_test on the pooled table. The CMH is used
+    ONLY when at least `min_strata` strata are INFORMATIVE. With a single informative stratum -- whether
+    the run has one sample OR many samples but only one stratum survives filtering -- the CMH general-
+    association statistic is an uncorrected asymptotic chi2 that is anti-conservative at small counts
+    (e.g. [[6,1],[1,6]] -> 0.010 vs Fisher's exact 0.029), so the exact pooled test is used instead. The
+    correct predicate is therefore n_strata_informative, NOT the sample count.
+
+    Returns (test_name, stat_name, stat, p_value, n_strata_informative, used_cmh)."""
+    n_strata = int(cmh_result[4]) if cmh_result else 0
+    if cmh_result and n_strata >= min_strata:
+        return (cmh_result[0], cmh_result[1], cmh_result[2], cmh_result[3], n_strata, True)
+    return (pooled[0], pooled[1], pooled[2], pooled[3], n_strata, False)
+
+
 def mh_common_odds_ratio(strata):
     """Mantel-Haenszel common odds ratio across 2x2 strata [[a,b],[c,d]] (one per sample):
     OR_MH = sum(a*d/N_k) / sum(b*c/N_k). This is the stratum-ADJUSTED odds ratio consistent with

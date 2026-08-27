@@ -25,7 +25,8 @@ import pandas as pd
 from genotype_utils import (benjamini_hochberg, binary_rate_delta, cmh_stratified_test,
                             context_key_from_row, context_key_from_snp_row, context_keys_from_snp_row,
                             load_molecule_mods_for_pairing, mh_stratified_effect,
-                            run_contingency_test, shard_tsv_by_chrom, tsv_header)
+                            run_contingency_test, shard_tsv_by_chrom, strata_effect_reversed,
+                            stratified_primary, tsv_header)
 
 SNP_USECOLS = ["sample", "qname", "snp_id", "chrom", "pos1", "start0", "end0",
                "allele_class", "gene_names", "metagene_indices"]
@@ -33,6 +34,7 @@ OUT_COLS = [
     "snp_id", "mod_site_id", "chrom", "pos1", "mod_start0", "mod_end0", "target_mod_code",
     "gene_names", "metagene_indices", "n_reads", "n_ref_reads", "n_alt_reads", "n_modified",
     "n_not_target", "test_name", "stat_name", "stat_value", "p_value", "n_strata_informative",
+    "strata_effect_reversed",
     "effect_abs_delta_mod_frac", "test_name_pooled", "p_value_pooled", "effect_pooled",
     "per_state_json", "p_adj_bh",
 ]
@@ -133,20 +135,22 @@ def _pairs_for_one_chrom(mod_path, snp_path, args):
                 # pooled test (kept as *_pooled companion -- the confounded statistic)
                 p_test_name, p_stat_name, p_stat_value, p_pooled = run_contingency_test(
                     tt, test=args.test, pseudocount=args.pseudocount)
-                # PRIMARY: sample-stratified CMH. Build one 2x2 [[ref_mod,ref_unmod],[alt_mod,alt_unmod]]
-                # per sample and combine; falls back to the pooled table when there is no sample column.
-                if samp_bits:
-                    strata = []
+                # PRIMARY: sample-stratified CMH, but ONLY when >=2 strata are informative (see
+                # stratified_primary) -- a single informative stratum falls back to the exact pooled test,
+                # because a single-stratum CMH is an anti-conservative asymptotic chi2.
+                strata = []
+                if len(samp_bits) > 1:
                     for _sb in samp_bits.values():
                         rm = len(ra & ma & _sb); ru = len(ra & ua & _sb)
                         am = len(aa & ma & _sb); au = len(aa & ua & _sb)
                         strata.append([[rm, ru], [am, au]])
-                    test_name, stat_name, stat_value, p_value, n_strata = cmh_stratified_test(strata)
-                    effect = mh_stratified_effect(strata)
-                else:
-                    test_name, stat_name, stat_value, p_value, n_strata = (
-                        p_test_name, p_stat_name, p_stat_value, p_pooled, 0)
-                    effect = binary_rate_delta(tt)
+                cmh = cmh_stratified_test(strata) if strata else None
+                test_name, stat_name, stat_value, p_value, n_strata, _used = stratified_primary(
+                    cmh, (p_test_name, p_stat_name, p_stat_value, p_pooled))
+                effect = mh_stratified_effect(strata) if _used else binary_rate_delta(tt)
+                # heterogeneity: does the SNP->mod effect REVERSE sign across samples? (CMH averages such
+                # strata to ~0/p~1 -- mirror of the pooling confound; only meaningful once stratified)
+                strata_reversed = strata_effect_reversed(strata) if _used else False
                 rows.append({
                     "snp_id": s, "mod_site_id": m, "chrom": chrom, "pos1": pos1,
                     "mod_start0": s0, "mod_end0": e0, "target_mod_code": code,
@@ -155,6 +159,7 @@ def _pairs_for_one_chrom(mod_path, snp_path, args):
                     "n_modified": ref_mod + alt_mod, "n_not_target": ref_unmod + alt_unmod,
                     "test_name": test_name, "stat_name": stat_name, "stat_value": stat_value,
                     "p_value": p_value, "n_strata_informative": int(n_strata),
+                    "strata_effect_reversed": bool(strata_reversed),
                     "effect_abs_delta_mod_frac": effect,
                     "test_name_pooled": p_test_name, "p_value_pooled": p_pooled,
                     "effect_pooled": binary_rate_delta(tt),
