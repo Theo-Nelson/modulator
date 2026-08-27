@@ -38,3 +38,6 @@ Thumbs.db
 *.egg-info/
 build/
 dist/
+
+# draft manuscript prose -- kept local, not published to the repo
+MANUSCRIPT_METHODS.md
