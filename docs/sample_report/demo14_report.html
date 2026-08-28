@@ -230,7 +230,7 @@
     </header>
     <section id='sec-run-parameters'><details class='run-manifest'><summary>Run inputs &amp; parameters <span class='muted'>(click to expand)</span></summary><pre class='manifest-pre'>modulator run manifest
 ================================================================
-Run date / time : 2026-08-28 08:34:22 EDT
+Run date / time : 2026-08-28 14:24:52 EDT
 Prefix          : demo14
 Project root    : /athena/cayuga_0003/scratch/users/thn4005/scripts/projects_v2/modulator_validation_testing/demo14genes_run
 Command         : /home/fs01/thn4005/.local/share/mamba/envs/modulator/bin/python /athena/cayuga_0003/scratch/users/thn4005/scripts/projects_v2/modulator_validation_testing/demo14genes_run/src/modulator/__main__.py run --config config/config.yaml --workdir /athena/cayuga_0003/scratch/users/thn4005/scripts/projects_v2/modulator_validation_testing/demo14genes_run --jobs 6 --set reference_fa=/athena/cayuga_0003/scratch/users/thn4005/scripts/projects_v2/modulator/modulator_06272026/hg38.fa reference_gtf=/athena/cayuga_0003/scratch/users/thn4005/scripts/projects_v2/modulator/modulator_06272026/hg38.ncbiRefSeq.gtf samplesheet=samples.tsv bams_dir=/athena/cayuga_0003/scratch/users/thn4005/scripts/projects_v2/modulator/modulator_06272026/benchmark/merged_bams bam_glob=*.bam prefix=demo14 threads=8 genotype.enable=true genotype.jobs=6
@@ -7483,7 +7483,7 @@ reference_gtf: /athena/cayuga_0003/scratch/users/thn4005/scripts/projects_v2/mod
       <td>1</td>
     </tr>
   </tbody>
-</table></div></div></div></details></section><section id='sec-single-molecule-cis-co-localized-modifications'><details class='report-section' open><summary><h2>Single-Molecule cis Co-Localized Modifications</h2></summary><div class='section-body'><p class='section-intro'>For every pair of nearby modification sites seen on the SAME reads, does the state of one predict the state of the other? The 2x2 is tested conditional on reads covering both sites, and enrichment is judged against the expected co-occurrence given each site's own marginal stoichiometry — so a concordant call means the two are modified together MORE than their individual rates alone would predict, not merely that both are often modified. Significance, effect_abs_delta_mod_frac (|P(B mod|A mod) − P(B mod|A unmod)|), and odds_ratio/direction are all SAMPLE-STRATIFIED (Cochran–Mantel–Haenszel p, Mantel–Haenszel common odds ratio); the *_pooled columns are the single-2x2 companions and can be Simpson's-paradox inflated. jaccard_both_pooled is co-modified reads / reads modified at either.</p><details class='definitions'><summary>Column definitions</summary><dl><dt>chrom</dt><dd>Reference chromosome or contig containing the reported feature.</dd><dt>strand</dt><dd>Genomic strand of the reported feature.</dd><dt>context_key</dt><dd>Gene- or metagene-aware context key used to restrict genotype and modification joins to the same local feature family.</dd><dt>gene_names</dt><dd>Gene labels associated with the reported SNP or molecule row.</dd><dt>n_reads</dt><dd>Total reads contributing to the reported test.</dd><dt>odds_ratio</dt><dd>Sample-adjusted (Mantel-Haenszel common) odds ratio of co-modification between the two sites, combining the per-sample 2x2 tables so it is not inflated by between-sample rate differences: &gt;1 = modified together (concordant), &lt;1 = mutually exclusive, ~1 = independent.</dd><dt>log2_odds_ratio</dt><dd>log2 of the sample-adjusted (Mantel-Haenszel) odds_ratio; direction is CONCORDANT/MUTUALLY_EXCLUSIVE when |log2| &gt; 0.32, else INDEPENDENT.</dd><dt>n_strata_informative</dt><dd>Number of strata (by sample — by sample x fragmentform for the tail-length tests) that carried enough within-stratum information (both outcome states / &gt;=2 covered rows) to contribute to the sample-stratified test. The primary p-value uses the stratified test only when this is &gt;=2; with fewer strata it falls back to the exact pooled test, because a single-stratum statistic is an anti-conservative asymptotic approximation.</dd><dt>strata_heterogeneous</dt><dd>Heterogeneity flag: TRUE when the per-sample effects are not homogeneous (Cochran-style test, strata_heterogeneity_p &lt; 0.05). The primary p-value is a Mantel-Haenszel/CMH COMMON-EFFECT statistic, which averages opposing per-sample effects toward 0 and reports ~null -- correct for a fixed-effect model but blind to a sign-reversing per-sample effect. When set, inspect the per-sample data rather than trusting the ~null combined p.</dd><dt>strata_heterogeneity_p</dt><dd>Count-aware test that the per-sample effects are HOMOGENEOUS (generalized-CMH decomposition: sum of single-stratum association chi2 minus the common-effect CMH ~ chi2_{(K-1)d}). Small p = the effect differs across samples (e.g. reverses sign), which the common-effect primary p averages away. Unlike a fixed effect-size threshold this scales with each sample&#x27;s read count. NaN when &lt;2 informative strata.</dd><dt>test_name</dt><dd>Statistical test used: Mann-Whitney U (2 groups) or Kruskal-Wallis (&gt;2 groups).</dd><dt>p_value</dt><dd>Nominal p-value from the reported hypothesis test.</dd><dt>effect_abs_delta_mod_frac</dt><dd>Absolute difference in modified-site rate between the tested allele groups.</dd><dt>test_name_pooled</dt><dd>Sample-POOLED companion of `test_name` (Statistical test used: Mann-Whitney U (2 groups) or Kruskal-Wallis (&gt;2 groups)): computed on the single table with reads pooled across samples, ignoring sample structure. Retained for transparency but can be Simpson&#x27;s-paradox inflated, so the primary `test_name` is sample-stratified. Do not rank on it.</dd><dt>stat_value_pooled</dt><dd>Sample-POOLED companion of `stat_value`: computed on the single table with reads pooled across samples, ignoring sample structure. Retained for transparency but can be Simpson&#x27;s-paradox inflated, so the primary `stat_value` is sample-stratified. Do not rank on it.</dd><dt>p_value_pooled</dt><dd>The OLD sample-POOLED p-value (all reads pooled into one table, ignoring sample structure). Retained for transparency; it can be Simpson&#x27;s-paradox inflated, so the primary p_value is sample-stratified. Do not rank on it.</dd><dt>effect_abs_delta_mod_frac_pooled</dt><dd>Sample-POOLED companion of `effect_abs_delta_mod_frac` (Absolute difference in modified-site rate between the tested allele groups): computed on the single table with reads pooled across samples, ignoring sample structure. Retained for transparency but can be Simpson&#x27;s-paradox inflated, so the primary `effect_abs_delta_mod_frac` is sample-stratified. Do not rank on it.</dd><dt>odds_ratio_pooled</dt><dd>Sample-POOLED companion of `odds_ratio` (Sample-adjusted (Mantel-Haenszel common) odds ratio of co-modification between the two sites, combining the per-sample 2x2 tables so it is not inflated by between-sample rate differences: &gt;1 = modified together (concordant), &lt;1 = mutually exclusive, ~1 = independent): computed on the single table with reads pooled across samples, ignoring sample structure. Retained for transparency but can be Simpson&#x27;s-paradox inflated, so the primary `odds_ratio` is sample-stratified. Do not rank on it.</dd><dt>log2_odds_ratio_pooled</dt><dd>Sample-POOLED companion of `log2_odds_ratio` (log2 of the sample-adjusted (Mantel-Haenszel) odds_ratio; direction is CONCORDANT/MUTUALLY_EXCLUSIVE when |log2| &gt; 0.32, else INDEPENDENT): computed on the single table with reads pooled across samples, ignoring sample structure. Retained for transparency but can be Simpson&#x27;s-paradox inflated, so the primary `log2_odds_ratio` is sample-stratified. Do not rank on it.</dd><dt>direction_pooled</dt><dd>Sample-POOLED companion of `direction`: computed on the single table with reads pooled across samples, ignoring sample structure. Retained for transparency but can be Simpson&#x27;s-paradox inflated, so the primary `direction` is sample-stratified. Do not rank on it.</dd><dt>exp_both_modified_pooled</dt><dd>Sample-POOLED companion of `exp_both_modified`: computed on the single table with reads pooled across samples, ignoring sample structure. Retained for transparency but can be Simpson&#x27;s-paradox inflated, so the primary `exp_both_modified` is sample-stratified. Do not rank on it.</dd><dt>exp_neither_pooled</dt><dd>Sample-POOLED companion of `exp_neither`: computed on the single table with reads pooled across samples, ignoring sample structure. Retained for transparency but can be Simpson&#x27;s-paradox inflated, so the primary `exp_neither` is sample-stratified. Do not rank on it.</dd><dt>concordant_frac_obs_pooled</dt><dd>Sample-POOLED companion of `concordant_frac_obs`: computed on the single table with reads pooled across samples, ignoring sample structure. Retained for transparency but can be Simpson&#x27;s-paradox inflated, so the primary `concordant_frac_obs` is sample-stratified. Do not rank on it.</dd><dt>concordant_frac_exp_pooled</dt><dd>Sample-POOLED companion of `concordant_frac_exp`: computed on the single table with reads pooled across samples, ignoring sample structure. Retained for transparency but can be Simpson&#x27;s-paradox inflated, so the primary `concordant_frac_exp` is sample-stratified. Do not rank on it.</dd><dt>concordance_log2_ratio_pooled</dt><dd>Sample-POOLED companion of `concordance_log2_ratio`: computed on the single table with reads pooled across samples, ignoring sample structure. Retained for transparency but can be Simpson&#x27;s-paradox inflated, so the primary `concordance_log2_ratio` is sample-stratified. Do not rank on it.</dd><dt>jaccard_both_pooled</dt><dd>Sample-POOLED companion of `jaccard_both`: computed on the single table with reads pooled across samples, ignoring sample structure. Retained for transparency but can be Simpson&#x27;s-paradox inflated, so the primary `jaccard_both` is sample-stratified. Do not rank on it.</dd><dt>p_adj_bh</dt><dd>Benjamini-Hochberg false-discovery-rate adjusted p-value.</dd></dl></details><p><b>35,848</b> co-localized mod-site pairs tested; <b>1,054</b> significant at BH-FDR &lt; 0.05.</p><p>direction: <b>22,667</b> concordant · <b>5,037</b> mutually exclusive · <b>4,672</b> independent</p><p class='muted' style='font-size:12.5px'>modification codes: <code>17596</code> = inosine · <code>17802</code> = pseudoU · <code>19227</code> = Um · <code>19228</code> = Cm · <code>19229</code> = Gm · <code>69426</code> = Am · <code>a</code> = m6A · <code>m</code> = 5mC</p><figure class='hero-figure'><a class='image-link' href='demo14_report_files/fig_0253.png' target='_blank' rel='noopener noreferrer' title='Open full-size image in a new tab'><img src='demo14_report_files/fig_0253.png' alt='Co-localized modification 2x2 concordance panels' loading='lazy' /><span class='expand-badge' aria-hidden='true'>↗</span></a><figcaption>Top pairs by FDR. Each 2x2 is the POOLED observed count (expected under independence) with the pooled odds ratio in its title; red = enriched. A concordant pair reddens the diagonal (both-modified / both-unmodified). The significance (CMH p) and the odds_ratio/direction that rank and label each pair are sample-stratified — see the table; a panel can look concordant while the stratified verdict is null.</figcaption></figure><div class='table-wrap'><table class="dataframe datatable">
+</table></div></div></div></details></section><section id='sec-single-molecule-cis-co-localized-modifications'><details class='report-section' open><summary><h2>Single-Molecule cis Co-Localized Modifications</h2></summary><div class='section-body'><p class='section-intro'>For every pair of nearby modification sites seen on the SAME reads, does the state of one predict the state of the other? The 2x2 is tested conditional on reads covering both sites, and enrichment is judged against the expected co-occurrence given each site's own marginal stoichiometry — so a concordant call means the two are modified together MORE than their individual rates alone would predict, not merely that both are often modified. Significance, effect_abs_delta_mod_frac (|P(B mod|A mod) − P(B mod|A unmod)|), and odds_ratio/direction are all SAMPLE-STRATIFIED (Cochran–Mantel–Haenszel p, Mantel–Haenszel common odds ratio); the *_pooled columns are the single-2x2 companions and can be Simpson's-paradox inflated. jaccard_both_pooled is co-modified reads / reads modified at either.</p><details class='definitions'><summary>Column definitions</summary><dl><dt>chrom</dt><dd>Reference chromosome or contig containing the reported feature.</dd><dt>strand</dt><dd>Genomic strand of the reported feature.</dd><dt>context_key</dt><dd>Gene- or metagene-aware context key used to restrict genotype and modification joins to the same local feature family.</dd><dt>gene_names</dt><dd>Gene labels associated with the reported SNP or molecule row.</dd><dt>n_reads</dt><dd>Total reads contributing to the reported test.</dd><dt>odds_ratio</dt><dd>Sample-adjusted (Mantel-Haenszel common) odds ratio of co-modification between the two sites, combining the per-sample 2x2 tables so it is not inflated by between-sample rate differences: &gt;1 = modified together (concordant), &lt;1 = mutually exclusive, ~1 = independent.</dd><dt>log2_odds_ratio</dt><dd>log2 of the sample-adjusted (Mantel-Haenszel) odds_ratio; direction is CONCORDANT/MUTUALLY_EXCLUSIVE when |log2| &gt; 0.32, else INDEPENDENT.</dd><dt>n_strata_informative</dt><dd>Number of strata (by sample — by sample x fragmentform for the tail-length tests) that carried enough within-stratum information (both outcome states / &gt;=2 covered rows) to contribute to the sample-stratified test. The primary p-value uses the stratified test only when this is &gt;=2; with fewer strata it falls back to the exact pooled test, because a single-stratum statistic is an anti-conservative asymptotic approximation.</dd><dt>strata_heterogeneous</dt><dd>Heterogeneity flag: TRUE when the per-sample effects are not homogeneous at BH-FDR 0.05 (strata_heterogeneity_p_adj &lt; 0.05). The primary p-value is a Mantel-Haenszel/CMH COMMON-EFFECT statistic, which averages opposing per-sample effects toward 0 and reports ~null -- correct for a fixed-effect model but blind to a per-sample effect that varies or reverses. When set, inspect the per-sample data rather than trusting the ~null combined p.</dd><dt>strata_heterogeneity_p</dt><dd>Cochran&#x27;s Q test that the per-sample effects are HOMOGENEOUS, on the SAME risk-difference scale as the reported effect (not the odds-ratio scale -- an OR-scale test false-flags the common case of a constant risk difference with a varying baseline rate). Row-conditional proportion differences are combined by inverse-variance; small p = the effect genuinely differs across samples, which the common-effect primary p averages away. NaN when &lt;2 informative strata.</dd><dt>strata_heterogeneity_p_adj</dt><dd>Benjamini-Hochberg FDR-adjusted strata_heterogeneity_p across all tested rows (a raw p&lt;0.05 would flag ~5% of perfectly homogeneous rows). strata_heterogeneous is this &lt; 0.05.</dd><dt>test_name</dt><dd>Statistical test used: Mann-Whitney U (2 groups) or Kruskal-Wallis (&gt;2 groups).</dd><dt>p_value</dt><dd>Nominal p-value from the reported hypothesis test.</dd><dt>effect_abs_delta_mod_frac</dt><dd>Absolute difference in modified-site rate between the tested allele groups.</dd><dt>test_name_pooled</dt><dd>Sample-POOLED companion of `test_name` (Statistical test used: Mann-Whitney U (2 groups) or Kruskal-Wallis (&gt;2 groups)): computed on the single table with reads pooled across samples, ignoring sample structure. Retained for transparency but can be Simpson&#x27;s-paradox inflated, so the primary `test_name` is sample-stratified. Do not rank on it.</dd><dt>stat_value_pooled</dt><dd>Sample-POOLED companion of `stat_value`: computed on the single table with reads pooled across samples, ignoring sample structure. Retained for transparency but can be Simpson&#x27;s-paradox inflated, so the primary `stat_value` is sample-stratified. Do not rank on it.</dd><dt>p_value_pooled</dt><dd>The OLD sample-POOLED p-value (all reads pooled into one table, ignoring sample structure). Retained for transparency; it can be Simpson&#x27;s-paradox inflated, so the primary p_value is sample-stratified. Do not rank on it.</dd><dt>effect_abs_delta_mod_frac_pooled</dt><dd>Sample-POOLED companion of `effect_abs_delta_mod_frac` (Absolute difference in modified-site rate between the tested allele groups): computed on the single table with reads pooled across samples, ignoring sample structure. Retained for transparency but can be Simpson&#x27;s-paradox inflated, so the primary `effect_abs_delta_mod_frac` is sample-stratified. Do not rank on it.</dd><dt>odds_ratio_pooled</dt><dd>Sample-POOLED companion of `odds_ratio` (Sample-adjusted (Mantel-Haenszel common) odds ratio of co-modification between the two sites, combining the per-sample 2x2 tables so it is not inflated by between-sample rate differences: &gt;1 = modified together (concordant), &lt;1 = mutually exclusive, ~1 = independent): computed on the single table with reads pooled across samples, ignoring sample structure. Retained for transparency but can be Simpson&#x27;s-paradox inflated, so the primary `odds_ratio` is sample-stratified. Do not rank on it.</dd><dt>log2_odds_ratio_pooled</dt><dd>Sample-POOLED companion of `log2_odds_ratio` (log2 of the sample-adjusted (Mantel-Haenszel) odds_ratio; direction is CONCORDANT/MUTUALLY_EXCLUSIVE when |log2| &gt; 0.32, else INDEPENDENT): computed on the single table with reads pooled across samples, ignoring sample structure. Retained for transparency but can be Simpson&#x27;s-paradox inflated, so the primary `log2_odds_ratio` is sample-stratified. Do not rank on it.</dd><dt>direction_pooled</dt><dd>Sample-POOLED companion of `direction`: computed on the single table with reads pooled across samples, ignoring sample structure. Retained for transparency but can be Simpson&#x27;s-paradox inflated, so the primary `direction` is sample-stratified. Do not rank on it.</dd><dt>exp_both_modified_pooled</dt><dd>Sample-POOLED companion of `exp_both_modified`: computed on the single table with reads pooled across samples, ignoring sample structure. Retained for transparency but can be Simpson&#x27;s-paradox inflated, so the primary `exp_both_modified` is sample-stratified. Do not rank on it.</dd><dt>exp_neither_pooled</dt><dd>Sample-POOLED companion of `exp_neither`: computed on the single table with reads pooled across samples, ignoring sample structure. Retained for transparency but can be Simpson&#x27;s-paradox inflated, so the primary `exp_neither` is sample-stratified. Do not rank on it.</dd><dt>concordant_frac_obs_pooled</dt><dd>Sample-POOLED companion of `concordant_frac_obs`: computed on the single table with reads pooled across samples, ignoring sample structure. Retained for transparency but can be Simpson&#x27;s-paradox inflated, so the primary `concordant_frac_obs` is sample-stratified. Do not rank on it.</dd><dt>concordant_frac_exp_pooled</dt><dd>Sample-POOLED companion of `concordant_frac_exp`: computed on the single table with reads pooled across samples, ignoring sample structure. Retained for transparency but can be Simpson&#x27;s-paradox inflated, so the primary `concordant_frac_exp` is sample-stratified. Do not rank on it.</dd><dt>concordance_log2_ratio_pooled</dt><dd>Sample-POOLED companion of `concordance_log2_ratio`: computed on the single table with reads pooled across samples, ignoring sample structure. Retained for transparency but can be Simpson&#x27;s-paradox inflated, so the primary `concordance_log2_ratio` is sample-stratified. Do not rank on it.</dd><dt>jaccard_both_pooled</dt><dd>Sample-POOLED companion of `jaccard_both`: computed on the single table with reads pooled across samples, ignoring sample structure. Retained for transparency but can be Simpson&#x27;s-paradox inflated, so the primary `jaccard_both` is sample-stratified. Do not rank on it.</dd><dt>p_adj_bh</dt><dd>Benjamini-Hochberg false-discovery-rate adjusted p-value.</dd></dl></details><p><b>35,848</b> co-localized mod-site pairs tested; <b>1,054</b> significant at BH-FDR &lt; 0.05.</p><p>direction: <b>22,667</b> concordant · <b>5,037</b> mutually exclusive · <b>4,672</b> independent</p><p class='muted' style='font-size:12.5px'>modification codes: <code>17596</code> = inosine · <code>17802</code> = pseudoU · <code>19227</code> = Um · <code>19228</code> = Cm · <code>19229</code> = Gm · <code>69426</code> = Am · <code>a</code> = m6A · <code>m</code> = 5mC</p><figure class='hero-figure'><a class='image-link' href='demo14_report_files/fig_0253.png' target='_blank' rel='noopener noreferrer' title='Open full-size image in a new tab'><img src='demo14_report_files/fig_0253.png' alt='Co-localized modification 2x2 concordance panels' loading='lazy' /><span class='expand-badge' aria-hidden='true'>↗</span></a><figcaption>Top pairs by FDR. Each 2x2 is the POOLED observed count (expected under independence) with the pooled odds ratio in its title; red = enriched. A concordant pair reddens the diagonal (both-modified / both-unmodified). The significance (CMH p) and the odds_ratio/direction that rank and label each pair are sample-stratified — see the table; a panel can look concordant while the stratified verdict is null.</figcaption></figure><div class='table-wrap'><table class="dataframe datatable">
   <thead>
     <tr style="text-align: right;">
       <th>mod_site_id_a</th>
@@ -7511,6 +7511,7 @@ reference_gtf: /athena/cayuga_0003/scratch/users/thn4005/scripts/projects_v2/mod
       <th>n_strata_informative</th>
       <th>strata_heterogeneous</th>
       <th>strata_heterogeneity_p</th>
+      <th>strata_heterogeneity_p_adj</th>
       <th>test_name</th>
       <th>stat_name</th>
       <th>stat_value</th>
@@ -7559,7 +7560,8 @@ reference_gtf: /athena/cayuga_0003/scratch/users/thn4005/scripts/projects_v2/mod
       <td>CONCORDANT</td>
       <td>6</td>
       <td>False</td>
-      <td>0.596264</td>
+      <td>0.615713</td>
+      <td>0.999884</td>
       <td>cmh_2x2</td>
       <td>cmh_chi2</td>
       <td>449.742782</td>
@@ -7607,6 +7609,7 @@ reference_gtf: /athena/cayuga_0003/scratch/users/thn4005/scripts/projects_v2/mod
       <td>6</td>
       <td>True</td>
       <td>0.000000</td>
+      <td>0.000000</td>
       <td>cmh_2x2</td>
       <td>cmh_chi2</td>
       <td>448.144306</td>
@@ -7652,8 +7655,9 @@ reference_gtf: /athena/cayuga_0003/scratch/users/thn4005/scripts/projects_v2/mod
       <td>5.8613</td>
       <td>CONCORDANT</td>
       <td>6</td>
-      <td>True</td>
-      <td>0.039447</td>
+      <td>False</td>
+      <td>0.586845</td>
+      <td>0.999884</td>
       <td>cmh_2x2</td>
       <td>cmh_chi2</td>
       <td>302.446744</td>
@@ -7699,8 +7703,9 @@ reference_gtf: /athena/cayuga_0003/scratch/users/thn4005/scripts/projects_v2/mod
       <td>6.9486</td>
       <td>CONCORDANT</td>
       <td>6</td>
-      <td>True</td>
-      <td>0.000000</td>
+      <td>False</td>
+      <td>0.003617</td>
+      <td>0.064776</td>
       <td>cmh_2x2</td>
       <td>cmh_chi2</td>
       <td>302.824375</td>
@@ -7746,8 +7751,9 @@ reference_gtf: /athena/cayuga_0003/scratch/users/thn4005/scripts/projects_v2/mod
       <td>3.6881</td>
       <td>CONCORDANT</td>
       <td>6</td>
-      <td>True</td>
-      <td>0.034153</td>
+      <td>False</td>
+      <td>0.138114</td>
+      <td>0.922689</td>
       <td>cmh_2x2</td>
       <td>cmh_chi2</td>
       <td>277.185580</td>
@@ -7794,7 +7800,8 @@ reference_gtf: /athena/cayuga_0003/scratch/users/thn4005/scripts/projects_v2/mod
       <td>CONCORDANT</td>
       <td>3</td>
       <td>False</td>
-      <td>0.177741</td>
+      <td>1.000000</td>
+      <td>1.000000</td>
       <td>cmh_2x2</td>
       <td>cmh_chi2</td>
       <td>238.545147</td>
@@ -7841,6 +7848,7 @@ reference_gtf: /athena/cayuga_0003/scratch/users/thn4005/scripts/projects_v2/mod
       <td>CONCORDANT</td>
       <td>3</td>
       <td>True</td>
+      <td>0.000000</td>
       <td>0.000000</td>
       <td>cmh_2x2</td>
       <td>cmh_chi2</td>
@@ -7889,6 +7897,7 @@ reference_gtf: /athena/cayuga_0003/scratch/users/thn4005/scripts/projects_v2/mod
       <td>5</td>
       <td>True</td>
       <td>0.000000</td>
+      <td>0.000000</td>
       <td>cmh_2x2</td>
       <td>cmh_chi2</td>
       <td>203.296396</td>
@@ -7935,6 +7944,7 @@ reference_gtf: /athena/cayuga_0003/scratch/users/thn4005/scripts/projects_v2/mod
       <td>CONCORDANT</td>
       <td>6</td>
       <td>True</td>
+      <td>0.000000</td>
       <td>0.000000</td>
       <td>cmh_2x2</td>
       <td>cmh_chi2</td>
@@ -7983,6 +7993,7 @@ reference_gtf: /athena/cayuga_0003/scratch/users/thn4005/scripts/projects_v2/mod
       <td>6</td>
       <td>True</td>
       <td>0.000000</td>
+      <td>0.000000</td>
       <td>cmh_2x2</td>
       <td>cmh_chi2</td>
       <td>196.587275</td>
@@ -8029,7 +8040,8 @@ reference_gtf: /athena/cayuga_0003/scratch/users/thn4005/scripts/projects_v2/mod
       <td>CONCORDANT</td>
       <td>6</td>
       <td>True</td>
-      <td>0.000002</td>
+      <td>0.000000</td>
+      <td>0.000000</td>
       <td>cmh_2x2</td>
       <td>cmh_chi2</td>
       <td>188.130371</td>
@@ -8076,7 +8088,8 @@ reference_gtf: /athena/cayuga_0003/scratch/users/thn4005/scripts/projects_v2/mod
       <td>CONCORDANT</td>
       <td>5</td>
       <td>True</td>
-      <td>0.000000</td>
+      <td>0.000012</td>
+      <td>0.000243</td>
       <td>cmh_2x2</td>
       <td>cmh_chi2</td>
       <td>185.603970</td>
@@ -8122,8 +8135,9 @@ reference_gtf: /athena/cayuga_0003/scratch/users/thn4005/scripts/projects_v2/mod
       <td>5.4270</td>
       <td>CONCORDANT</td>
       <td>6</td>
-      <td>True</td>
-      <td>0.000031</td>
+      <td>False</td>
+      <td>0.003565</td>
+      <td>0.063924</td>
       <td>cmh_2x2</td>
       <td>cmh_chi2</td>
       <td>182.544280</td>
@@ -8170,7 +8184,8 @@ reference_gtf: /athena/cayuga_0003/scratch/users/thn4005/scripts/projects_v2/mod
       <td>CONCORDANT</td>
       <td>6</td>
       <td>True</td>
-      <td>0.000000</td>
+      <td>0.000480</td>
+      <td>0.009227</td>
       <td>cmh_2x2</td>
       <td>cmh_chi2</td>
       <td>179.556592</td>
@@ -8217,7 +8232,8 @@ reference_gtf: /athena/cayuga_0003/scratch/users/thn4005/scripts/projects_v2/mod
       <td>CONCORDANT</td>
       <td>6</td>
       <td>True</td>
-      <td>0.000076</td>
+      <td>0.000000</td>
+      <td>0.000000</td>
       <td>cmh_2x2</td>
       <td>cmh_chi2</td>
       <td>175.932827</td>
@@ -8263,8 +8279,9 @@ reference_gtf: /athena/cayuga_0003/scratch/users/thn4005/scripts/projects_v2/mod
       <td>5.6793</td>
       <td>CONCORDANT</td>
       <td>6</td>
-      <td>True</td>
-      <td>0.000000</td>
+      <td>False</td>
+      <td>0.009942</td>
+      <td>0.163245</td>
       <td>cmh_2x2</td>
       <td>cmh_chi2</td>
       <td>170.212945</td>
@@ -8310,8 +8327,9 @@ reference_gtf: /athena/cayuga_0003/scratch/users/thn4005/scripts/projects_v2/mod
       <td>6.9561</td>
       <td>CONCORDANT</td>
       <td>6</td>
-      <td>True</td>
-      <td>0.006601</td>
+      <td>False</td>
+      <td>0.996283</td>
+      <td>1.000000</td>
       <td>cmh_2x2</td>
       <td>cmh_chi2</td>
       <td>162.456320</td>
@@ -8357,8 +8375,9 @@ reference_gtf: /athena/cayuga_0003/scratch/users/thn4005/scripts/projects_v2/mod
       <td>4.6391</td>
       <td>CONCORDANT</td>
       <td>6</td>
-      <td>True</td>
-      <td>0.000000</td>
+      <td>False</td>
+      <td>0.179062</td>
+      <td>0.976854</td>
       <td>cmh_2x2</td>
       <td>cmh_chi2</td>
       <td>161.999578</td>
@@ -8404,8 +8423,9 @@ reference_gtf: /athena/cayuga_0003/scratch/users/thn4005/scripts/projects_v2/mod
       <td>7.3400</td>
       <td>CONCORDANT</td>
       <td>3</td>
-      <td>True</td>
-      <td>0.000005</td>
+      <td>False</td>
+      <td>0.022377</td>
+      <td>0.327179</td>
       <td>cmh_2x2</td>
       <td>cmh_chi2</td>
       <td>133.132394</td>
@@ -8452,7 +8472,8 @@ reference_gtf: /athena/cayuga_0003/scratch/users/thn4005/scripts/projects_v2/mod
       <td>CONCORDANT</td>
       <td>6</td>
       <td>False</td>
-      <td>0.051977</td>
+      <td>0.662770</td>
+      <td>0.999884</td>
       <td>cmh_2x2</td>
       <td>cmh_chi2</td>
       <td>132.829039</td>
