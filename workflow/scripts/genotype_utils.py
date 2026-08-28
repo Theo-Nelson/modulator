@@ -441,26 +441,26 @@ def van_elteren_kw(strata):
 
 
 def van_elteren_heterogeneity(strata):
-    """Rank-scale test of HOMOGENEITY of the stratified rank effect across strata -- the tail-length
-    analogue of stratum_heterogeneity, built from the SAME per-stratum rank accumulators van_elteren_kw
-    uses (so test_taillength_diffs gets a heterogeneity diagnostic too). Decomposes the total
-    within-stratum rank association (sum of single-stratum Kruskal-Wallis chi2) into the common effect
-    plus a heterogeneity term Q_hetero = sum_k Q_k - Q_combined ~ chi2_{sum(g_k-1) - (g-1)}: it fires when
-    a fragmentform's tail ORDERING differs across samples, which the common van Elteren test averages
-    away. `strata` has van_elteren_kw's shape (list of strata; each a list of per-group 1-D arrays in a
-    fixed group order). Returns (hetero_stat, hetero_p, hetero_df, n_informative)."""
+    """Rank-scale test of HOMOGENEITY of the stratified tail effect across strata -- the tail-length
+    analogue of stratum_heterogeneity, so test_taillength_diffs gets a heterogeneity diagnostic too.
+
+    It is a Cochran's Q on the NONPARAMETRIC RELATIVE EFFECT p_ik = mean-midrank_ik / (N_k + 1) of each
+    fragmentform (dropping one), NOT on the raw rank-sum scores: the raw score scales with stratum size,
+    so a common non-zero effect at UNEQUAL read depths (the normal case -- it is why van Elteren weights
+    strata) makes the scores differ and a score-based Q false-flags (measured: 0.03 at equal size ->
+    0.70+ at 5x). The relative effect is on [0,1] regardless of N -- the rank analog of the count test's
+    risk-difference scale -- so per-stratum p_ik are directly comparable and inverse-variance Cochran's Q
+    stays calibrated (verified flat ~0.03 to 5x depth ratio and k=3) while keeping power (reversed
+    ordering -> 1.0, a +6-vs-+14 nt magnitude difference -> 0.9). Compared over the fragmentforms present
+    in EVERY informative stratum. `strata` has van_elteren_kw's shape. Returns
+    (hetero_stat, hetero_p, hetero_df, n_informative); NaN when <2 informative strata or <2 common groups."""
     strata = [st for st in strata if st]
     if not strata:
         return float("nan"), float("nan"), 0, 0
     g = len(strata[0])
     if g < 2 or any(len(st) != g for st in strata):
         return float("nan"), float("nan"), 0, 0
-    A_tot = np.zeros(g)
-    V_tot = np.zeros((g, g))
-    present_glob = np.zeros(g, dtype=bool)
-    Q_total = 0.0
-    df_total = 0
-    used = 0
+    acc = []                                                  # (A_k, cov_k, ns, N) per informative stratum
     for st in strata:
         arrs = [np.asarray(a, dtype=float).ravel() for a in st]
         ns = np.array([a.size for a in arrs], dtype=float)
@@ -479,31 +479,37 @@ def van_elteren_heterogeneity(strata):
             if a.size:
                 Rk[i] = float(ranks[off:off + a.size].sum())
                 off += a.size
-        A_k = Rk - ns * rbar
         cov = sigma2 / (N - 1) * (N * np.diag(ns) - np.outer(ns, ns))
-        pres = np.where(ns > 0)[0]
-        keepk = pres[:-1]                                     # drop one present group (rows dependent)
-        if keepk.size:
-            Qk = float(A_k[keepk] @ np.linalg.pinv(cov[np.ix_(keepk, keepk)]) @ A_k[keepk])
-            if np.isfinite(Qk) and Qk > 0:
-                Q_total += Qk
-                df_total += keepk.size
-        A_tot += A_k
-        V_tot += cov
-        present_glob |= ns > 0
-        used += 1
-    if used < 2:
-        return float("nan"), float("nan"), 0, used
-    presg = np.where(present_glob)[0]
-    keepg = presg[:-1]
-    if not keepg.size:
-        return float("nan"), float("nan"), 0, used
-    Q_comb = float(A_tot[keepg] @ np.linalg.pinv(V_tot[np.ix_(keepg, keepg)]) @ A_tot[keepg])
-    Q_h = max(0.0, Q_total - Q_comb)
-    df = df_total - keepg.size
+        acc.append((Rk - ns * rbar, cov, ns, N))
+    if len(acc) < 2:
+        return float("nan"), float("nan"), 0, len(acc)
+    common = np.all([a[2] > 0 for a in acc], axis=0)         # groups present in EVERY informative stratum
+    idx = np.where(common)[0]
+    if idx.size < 2:
+        return float("nan"), float("nan"), 0, len(acc)
+    keep = idx[:-1]                                          # drop one (relative effects are dependent)
+    es = []
+    Ws = []
+    for A_k, cov, ns, N in acc:
+        with np.errstate(divide="ignore", invalid="ignore"):
+            rbar_grp = (A_k + ns * (N + 1) / 2.0) / ns       # mean midrank per group = R_i / n_i
+        e = (rbar_grp / (N + 1))[keep]                       # relative effect in (0,1), scale-invariant
+        nn = np.outer(ns, ns)
+        C = (cov / (nn * (N + 1) ** 2))[np.ix_(keep, keep)]  # Cov(e) = Cov(R)/(n_i n_j (N+1)^2)
+        Ws.append(np.linalg.pinv(C))
+        es.append(e)
+    SW = sum(Ws)
+    SWinv = np.linalg.pinv(SW)
+    e_bar = SWinv @ sum(W @ e for W, e in zip(Ws, es))
+    Q = 0.0
+    for W, e in zip(Ws, es):
+        dif = e - e_bar
+        Q += float(dif @ W @ dif)
+    Q = max(0.0, Q)
+    df = (len(es) - 1) * int(keep.size)
     if df < 1:
-        return float("nan"), float("nan"), 0, used
-    return Q_h, float(chi2.sf(Q_h, df)), df, used
+        return float("nan"), float("nan"), 0, len(acc)
+    return Q, float(chi2.sf(Q, df)), df, len(acc)
 
 
 def weighted_within_stratum_median_range(strata):

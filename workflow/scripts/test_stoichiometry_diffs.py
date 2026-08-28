@@ -40,6 +40,16 @@ from matplotlib.ticker import MaxNLocator
 from plot_utils import save_figure
 from genotype_utils import add_heterogeneity_flag, informative_strata, stratum_heterogeneity
 
+# Canonical output schema, so the header is identical whether or not any site was testable (a
+# zero-sites early-exit previously wrote a 14-column header while a real run emitted 21+).
+RESULT_COLS = [
+    "gene_name", "mod_code", "chrom", "start0", "end0", "strand",
+    "n_tx_tested", "test_name", "stat_name", "stat_value", "p_value",
+    "n_strata_informative", "strata_heterogeneous", "strata_heterogeneity_p", "strata_heterogeneity_p_adj",
+    "effect_max_abs_frac_diff", "test_name_pooled", "p_value_pooled", "effect_max_abs_frac_diff_pooled",
+    "per_transcript_json", "p_adj_bh",
+]
+
 
 # ------------------------------ CLI ------------------------------
 
@@ -509,11 +519,7 @@ def main():
     if df.empty:
         out_tsv = f"{args.out_prefix}__ZN_site_diff_results.tsv"
         os.makedirs(os.path.dirname(out_tsv) or ".", exist_ok=True)
-        pd.DataFrame(columns=[
-            "gene_name", "mod_code", "chrom", "start0", "end0", "strand",
-            "n_tx_tested", "test_name", "stat_name", "stat_value", "p_value",
-            "effect_max_abs_frac_diff", "per_transcript_json", "p_adj_bh",
-        ]).to_csv(out_tsv, sep="\t", index=False)
+        pd.DataFrame(columns=RESULT_COLS).to_csv(out_tsv, sep="\t", index=False)
         os.makedirs(f"{args.out_prefix}__figs", exist_ok=True)
         print(f"[info] --in-tsv has no usable data rows; wrote empty {out_tsv} and continuing.")
         return
@@ -569,12 +575,7 @@ def main():
         # genotype/report instead of aborting.
         out_tsv = f"{args.out_prefix}__ZN_site_diff_results.tsv"
         os.makedirs(os.path.dirname(out_tsv) or ".", exist_ok=True)
-        empty_cols = [
-            "gene_name", "mod_code", "chrom", "start0", "end0", "strand",
-            "n_tx_tested", "test_name", "stat_name", "stat_value", "p_value",
-            "effect_max_abs_frac_diff", "per_transcript_json", "p_adj_bh",
-        ]
-        pd.DataFrame(columns=empty_cols).to_csv(out_tsv, sep="\t", index=False)
+        pd.DataFrame(columns=RESULT_COLS).to_csv(out_tsv, sep="\t", index=False)
         os.makedirs(f"{args.out_prefix}__figs", exist_ok=True)
         print("[info] No sites had >=2 transcripts meeting the coverage threshold; "
               f"wrote empty {out_tsv} and continuing (nothing to test).")
@@ -584,6 +585,10 @@ def main():
     res_df["p_adj_bh"] = benjamini_hochberg(res_df["p_value"].values)
     res_df = add_heterogeneity_flag(res_df)        # BH-adjust the heterogeneity flag like every other p
     res_df = res_df.sort_values(["p_adj_bh", "effect_max_abs_frac_diff"], ascending=[True, False]).reset_index(drop=True)
+    for _c in RESULT_COLS:                          # stable schema regardless of what was found
+        if _c not in res_df.columns:
+            res_df[_c] = pd.NA
+    res_df = res_df[RESULT_COLS]
 
     # Write results
     out_tsv = f"{args.out_prefix}__ZN_site_diff_results.tsv"
