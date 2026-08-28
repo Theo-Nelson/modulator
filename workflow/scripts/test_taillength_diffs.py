@@ -22,12 +22,14 @@ import numpy as np
 import pandas as pd
 from scipy.stats import kruskal, mannwhitneyu
 
-from genotype_utils import benjamini_hochberg, van_elteren_kw, weighted_within_stratum_median_range
+from genotype_utils import (add_heterogeneity_flag, benjamini_hochberg, van_elteren_heterogeneity,
+                            van_elteren_kw, weighted_within_stratum_median_range)
 from plot_utils import save_figure
 
 FRAG_COLS = ["ZT", "gene_name", "metagene_index", "classification", "n_reads", "n_samples",
              "median_tail", "mean_tail", "std_tail", "q25_tail", "q75_tail", "min_tail", "max_tail"]
 DIFF_COLS = ["metagene_index", "gene_name", "n_fragmentforms_tested", "n_reads", "n_strata_informative",
+             "strata_heterogeneous", "strata_heterogeneity_p", "strata_heterogeneity_p_adj",
              "test_name", "stat_name", "stat_value", "p_value", "effect_median_range_nt",
              "min_median_tail", "max_median_tail",
              "test_name_pooled", "p_value_pooled", "effect_median_range_nt_pooled",
@@ -192,6 +194,9 @@ def main():
         test_name = "van_elteren_stratified_kw" if np.isfinite(p) else "untestable"
         stat_name = "chi2" if np.isfinite(p) else "none"
         eff = round(float(weighted_within_stratum_median_range(strata)), 2)
+        # rank-scale heterogeneity: does the per-sample tail ordering of the fragmentforms differ across
+        # samples (which the common van Elteren test averages away)? BH-adjusted at finalization.
+        _hstat, het_p, _hdf, _hn = van_elteren_heterogeneity(strata)
 
         # pooled reference (the old behaviour), kept for confound size only
         groups = list(kept.values())
@@ -223,6 +228,7 @@ def main():
             "gene_name": "+".join(sorted(g["gene_name"].dropna().astype(str).unique())) or "",
             "n_fragmentforms_tested": len(kept), "n_reads": n_total,
             "n_strata_informative": int(n_strata),
+            "strata_heterogeneity_p": round(het_p, 6) if np.isfinite(het_p) else float("nan"),
             "test_name": test_name, "stat_name": stat_name,
             "stat_value": round(float(stat), 4) if np.isfinite(stat) else float("nan"),
             "p_value": float(p),
@@ -236,6 +242,7 @@ def main():
     diff_df = pd.DataFrame(diff_rows)
     if not diff_df.empty:
         diff_df["p_adj_bh"] = benjamini_hochberg(diff_df["p_value"].values)
+        diff_df = add_heterogeneity_flag(diff_df)  # BH-adjust the heterogeneity flag like every other p
         diff_df = diff_df.sort_values(["p_adj_bh", "effect_median_range_nt"],
                                       ascending=[True, False]).reset_index(drop=True)
         diff_df = diff_df[DIFF_COLS]

@@ -16,21 +16,21 @@ import numpy as np
 import pandas as pd
 from pyroaring import BitMap
 
-from genotype_utils import (benjamini_hochberg, context_key_from_row, drop_unassigned_reads,
-                            informative_strata, max_abs_distribution_shift, mh_stratified_effect,
+from genotype_utils import (add_heterogeneity_flag, benjamini_hochberg, context_key_from_row,
+                            drop_unassigned_reads, informative_strata, max_abs_distribution_shift, mh_stratified_effect,
                             stratified_max_distribution_shift, stratified_primary, stratum_heterogeneity,
                             run_contingency_test, shard_tsv_by_chrom, tsv_header)
 
 TX_COLS = [
     "block_id", "context_key", "chrom", "n_reads", "n_haplotypes_tested", "n_transcripts_tested",
     "test_name", "stat_name", "stat_value", "p_value", "n_strata_informative",
-    "strata_heterogeneous", "strata_heterogeneity_p",
+    "strata_heterogeneous", "strata_heterogeneity_p", "strata_heterogeneity_p_adj",
     "effect_max_abs_tx_frac_diff", "test_name_pooled", "p_value_pooled", "per_table_json", "p_adj_bh",
 ]
 MOD_COLS = [
     "block_id", "mod_site_id", "context_key", "chrom", "target_mod_code", "n_reads",
     "n_haplotypes_tested", "test_name", "stat_name", "stat_value", "p_value", "n_strata_informative",
-    "strata_heterogeneous", "strata_heterogeneity_p",
+    "strata_heterogeneous", "strata_heterogeneity_p", "strata_heterogeneity_p_adj",
     "effect_max_abs_mod_rate_diff", "test_name_pooled", "p_value_pooled", "per_table_json", "p_adj_bh",
 ]
 _MOD_WANT = ["sample", "qname", "mod_site_id", "chrom", "state_detail", "target_mod_code",
@@ -228,12 +228,14 @@ def main():
     tx_out = pd.DataFrame(tx_rows)
     if not tx_out.empty:
         tx_out["p_adj_bh"] = benjamini_hochberg(tx_out["p_value"].values)
+        tx_out = add_heterogeneity_flag(tx_out)    # BH-adjust the heterogeneity flag like every other p
         tx_out = tx_out.sort_values(["p_adj_bh", "effect_max_abs_tx_frac_diff"], ascending=[True, False]).reset_index(drop=True)
     else:
         tx_out = pd.DataFrame(columns=TX_COLS)
     mod_out = pd.DataFrame(mod_rows)
     if not mod_out.empty:
         mod_out["p_adj_bh"] = benjamini_hochberg(mod_out["p_value"].values)
+        mod_out = add_heterogeneity_flag(mod_out)  # BH-adjust the heterogeneity flag like every other p
         mod_out = mod_out.sort_values(["p_adj_bh", "effect_max_abs_mod_rate_diff", "block_id", "mod_site_id"],
                                       ascending=[True, False, True, True]).reset_index(drop=True)
     else:

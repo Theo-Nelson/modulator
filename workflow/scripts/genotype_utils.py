@@ -246,15 +246,17 @@ def stratified_primary(inf_strata, exact_test, min_strata=2):
 
 
 def stratum_heterogeneity(inf_strata):
-    """Count-aware test of effect HOMOGENEITY across the INFORMATIVE strata (generalized Landis-Koch
-    CMH). Decomposes the total within-stratum association (sum of single-stratum generalized-association
-    chi2) into the common-effect CMH plus a heterogeneity term Q_hetero = Q_total - Q_cmh ~ chi2_{(K-1)d}
-    (K informative strata, d=(r-1)(c-1)). Unlike a fixed effect-size threshold this scales with each
-    stratum's n: a SMALL but well-powered per-sample sign-reversal is caught (each opposing stratum
-    contributes a large single-stratum Q while the CMH cancels to ~0), a LARGE but noisy one is not. It
-    generalizes to r x c, so it is available to the headline stoichiometry test and the SNP/haplotype x
-    transcript tests, not only the 2x2 ones. Returns (hetero_stat, hetero_p, hetero_df, n_informative);
-    NaN p when <2 informative strata (nothing to compare)."""
+    """Cochran's Q test of effect HOMOGENEITY across the INFORMATIVE strata, on the row-conditional
+    PROPORTION (RISK-DIFFERENCE) scale -- the SAME scale as the reported effect (mh_stratified_effect /
+    stratified_max_distribution_shift). Testing homogeneity on the odds-ratio scale (the earlier
+    generalized-CMH decomposition) FALSE-FLAGS the common real case where the risk difference is constant
+    across samples but the baseline rate varies, so the OR moves: a visibly constant effect column would
+    then sit beside "not homogeneous". Here per stratum the row-0-referenced proportion differences
+    theta_k = {pi_ij - pi_0j : i=1..r-1, j=0..c-2}, pi_ij = T_ij / rowsum_i, are combined by
+    inverse-variance (multinomial delta-method covariance) into Q = sum (theta_k - theta_bar)' W_k
+    (theta_k - theta_bar) ~ chi2_{(K-1)(r-1)(c-1)}. For 2x2 this is exactly Cochran's Q on the per-stratum
+    rate differences, so a constant risk difference gives Q=0 regardless of baseline. Returns
+    (hetero_stat, hetero_p, hetero_df, n_informative); NaN when <2 usable strata."""
     inf = [np.asarray(T, dtype=float) for T in inf_strata]
     if len(inf) < 2:
         return float("nan"), float("nan"), 0, len(inf)
@@ -262,34 +264,65 @@ def stratum_heterogeneity(inf_strata):
     d = (r - 1) * (c - 1)
     if d < 1:
         return float("nan"), float("nan"), 0, len(inf)
-    A_tot = np.zeros(d); V_tot = np.zeros((d, d)); Q_total = 0.0; used = 0
+    _EPS = 1e-9
+    thetas = []
+    Ws = []
     for T in inf:
         if T.shape != (r, c):
             continue
-        R = T.sum(axis=1); C = T.sum(axis=0); N = T.sum()
-        Rr, Cc = R[:r - 1], C[:c - 1]
-        obs = T[:r - 1, :c - 1].reshape(-1)
-        m = np.outer(Rr, Cc).reshape(-1) / N
-        Ar = np.diag(Rr) - np.outer(Rr, Rr) / N
-        Ac = np.diag(Cc) - np.outer(Cc, Cc) / N
-        A_k = obs - m
-        V_k = np.kron(Ar, Ac) / (N - 1)
+        R = T.sum(axis=1)
+        if (R <= 0).any():
+            continue
+        pi = T / R[:, None]                                   # row-conditional proportions
+        theta = (pi[1:, :c - 1] - pi[0:1, :c - 1]).reshape(-1)  # (r-1)(c-1) row-0-referenced diffs
+
+        def _rowcov(i):                                       # multinomial cov of row i's first c-1 props
+            p = pi[i, :c - 1]
+            return (np.diag(p) - np.outer(p, p)) / R[i]
+        V0 = _rowcov(0)
+        m = r - 1
+        Cov = np.zeros((m * (c - 1), m * (c - 1)))
+        for a in range(m):
+            Va = _rowcov(a + 1)
+            for b in range(m):
+                blk = V0 + (Va if a == b else 0.0)            # shared row-0 term couples the blocks
+                Cov[a * (c - 1):(a + 1) * (c - 1), b * (c - 1):(b + 1) * (c - 1)] = blk
+        Cov = Cov + _EPS * np.eye(Cov.shape[0])               # ridge: proportions at 0/1 give 0 variance
         try:
-            Qk = float(A_k @ np.linalg.solve(V_k, A_k))
+            W = np.linalg.inv(Cov)
         except np.linalg.LinAlgError:
-            Qk = float(A_k @ np.linalg.pinv(V_k) @ A_k)
-        if np.isfinite(Qk) and Qk > 0:
-            Q_total += Qk
-        A_tot += A_k; V_tot += V_k; used += 1
-    if used < 2:
-        return float("nan"), float("nan"), 0, used
+            W = np.linalg.pinv(Cov)
+        thetas.append(theta)
+        Ws.append(W)
+    if len(thetas) < 2:
+        return float("nan"), float("nan"), 0, len(thetas)
+    SW = sum(Ws)
     try:
-        Q_cmh = float(A_tot @ np.linalg.solve(V_tot, A_tot))
+        SWinv = np.linalg.inv(SW)
     except np.linalg.LinAlgError:
-        Q_cmh = float(A_tot @ np.linalg.pinv(V_tot) @ A_tot)
-    Q_h = max(0.0, Q_total - Q_cmh)
-    df = (used - 1) * d
-    return Q_h, float(chi2.sf(Q_h, df)), df, used
+        SWinv = np.linalg.pinv(SW)
+    theta_bar = SWinv @ sum(W @ th for W, th in zip(Ws, thetas))
+    Q = 0.0
+    for W, th in zip(Ws, thetas):
+        dif = th - theta_bar
+        Q += float(dif @ W @ dif)
+    Q = max(0.0, Q)
+    df = (len(thetas) - 1) * d
+    return Q, float(chi2.sf(Q, df)), df, len(thetas)
+
+
+def add_heterogeneity_flag(out_df, alpha=0.05):
+    """BH-adjust the per-row strata_heterogeneity_p across the whole table and set strata_heterogeneous =
+    (adjusted < alpha). Every other per-row p in these outputs is BH-adjusted; a RAW p<0.05 heterogeneity
+    flag would fire on ~5% of perfectly homogeneous rows (thousands of false flags on a 260k-row table).
+    NaN heterogeneity p (rows with <2 informative strata) is excluded from the family and never flagged.
+    Adds strata_heterogeneity_p_adj and (re)writes strata_heterogeneous. No-op if the column is absent."""
+    if out_df is None or "strata_heterogeneity_p" not in getattr(out_df, "columns", []):
+        return out_df
+    padj = benjamini_hochberg(pd.to_numeric(out_df["strata_heterogeneity_p"], errors="coerce").values)
+    out_df["strata_heterogeneity_p_adj"] = padj
+    out_df["strata_heterogeneous"] = pd.to_numeric(out_df["strata_heterogeneity_p_adj"], errors="coerce") < alpha
+    return out_df
 
 
 def mh_common_odds_ratio(strata):
@@ -405,6 +438,72 @@ def van_elteren_kw(strata):
     if not np.isfinite(Q) or Q < 0:
         return float("nan"), float("nan"), used, df
     return Q, float(chi2.sf(Q, df)), used, df
+
+
+def van_elteren_heterogeneity(strata):
+    """Rank-scale test of HOMOGENEITY of the stratified rank effect across strata -- the tail-length
+    analogue of stratum_heterogeneity, built from the SAME per-stratum rank accumulators van_elteren_kw
+    uses (so test_taillength_diffs gets a heterogeneity diagnostic too). Decomposes the total
+    within-stratum rank association (sum of single-stratum Kruskal-Wallis chi2) into the common effect
+    plus a heterogeneity term Q_hetero = sum_k Q_k - Q_combined ~ chi2_{sum(g_k-1) - (g-1)}: it fires when
+    a fragmentform's tail ORDERING differs across samples, which the common van Elteren test averages
+    away. `strata` has van_elteren_kw's shape (list of strata; each a list of per-group 1-D arrays in a
+    fixed group order). Returns (hetero_stat, hetero_p, hetero_df, n_informative)."""
+    strata = [st for st in strata if st]
+    if not strata:
+        return float("nan"), float("nan"), 0, 0
+    g = len(strata[0])
+    if g < 2 or any(len(st) != g for st in strata):
+        return float("nan"), float("nan"), 0, 0
+    A_tot = np.zeros(g)
+    V_tot = np.zeros((g, g))
+    present_glob = np.zeros(g, dtype=bool)
+    Q_total = 0.0
+    df_total = 0
+    used = 0
+    for st in strata:
+        arrs = [np.asarray(a, dtype=float).ravel() for a in st]
+        ns = np.array([a.size for a in arrs], dtype=float)
+        N = int(ns.sum())
+        if N < 2 or int((ns > 0).sum()) < 2:
+            continue
+        allv = np.concatenate([a for a in arrs if a.size])
+        ranks = _rankdata(allv)
+        rbar = (N + 1) / 2.0
+        sigma2 = float(((ranks - rbar) ** 2).sum()) / N
+        if sigma2 <= 0:
+            continue
+        Rk = np.zeros(g)
+        off = 0
+        for i, a in enumerate(arrs):
+            if a.size:
+                Rk[i] = float(ranks[off:off + a.size].sum())
+                off += a.size
+        A_k = Rk - ns * rbar
+        cov = sigma2 / (N - 1) * (N * np.diag(ns) - np.outer(ns, ns))
+        pres = np.where(ns > 0)[0]
+        keepk = pres[:-1]                                     # drop one present group (rows dependent)
+        if keepk.size:
+            Qk = float(A_k[keepk] @ np.linalg.pinv(cov[np.ix_(keepk, keepk)]) @ A_k[keepk])
+            if np.isfinite(Qk) and Qk > 0:
+                Q_total += Qk
+                df_total += keepk.size
+        A_tot += A_k
+        V_tot += cov
+        present_glob |= ns > 0
+        used += 1
+    if used < 2:
+        return float("nan"), float("nan"), 0, used
+    presg = np.where(present_glob)[0]
+    keepg = presg[:-1]
+    if not keepg.size:
+        return float("nan"), float("nan"), 0, used
+    Q_comb = float(A_tot[keepg] @ np.linalg.pinv(V_tot[np.ix_(keepg, keepg)]) @ A_tot[keepg])
+    Q_h = max(0.0, Q_total - Q_comb)
+    df = df_total - keepg.size
+    if df < 1:
+        return float("nan"), float("nan"), 0, used
+    return Q_h, float(chi2.sf(Q_h, df)), df, used
 
 
 def weighted_within_stratum_median_range(strata):

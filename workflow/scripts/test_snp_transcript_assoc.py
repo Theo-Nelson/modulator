@@ -7,7 +7,7 @@ import os
 import numpy as np
 import pandas as pd
 
-from genotype_utils import (benjamini_hochberg, informative_strata, max_abs_distribution_shift,
+from genotype_utils import (add_heterogeneity_flag, benjamini_hochberg, informative_strata, max_abs_distribution_shift,
                             run_contingency_test, stratified_max_distribution_shift, stratified_primary,
                             stratum_heterogeneity, tsv_header)
 
@@ -135,12 +135,13 @@ def main():
     out = pd.DataFrame(rows)
     if not out.empty:
         out["p_adj_bh"] = benjamini_hochberg(out["p_value"].values)
+        out = add_heterogeneity_flag(out)          # BH-adjust the heterogeneity flag like every other p
         out = out.sort_values(["p_adj_bh", "effect_max_abs_tx_frac_diff"], ascending=[True, False]).reset_index(drop=True)
     else:
         out = pd.DataFrame(columns=[
             "snp_id", "chrom", "pos1", "ref", "alt", "gene_names", "gene_ids", "metagene_indices",
             "n_reads", "n_ref_reads", "n_alt_reads", "n_transcripts_tested", "n_strata_informative",
-            "strata_heterogeneous", "strata_heterogeneity_p",
+            "strata_heterogeneous", "strata_heterogeneity_p", "strata_heterogeneity_p_adj",
             "test_name", "stat_name", "stat_value", "p_value", "effect_max_abs_tx_frac_diff",
             "test_name_pooled", "stat_value_pooled", "p_value_pooled", "effect_max_abs_tx_frac_diff_pooled",
             "per_transcript_json", "p_adj_bh"

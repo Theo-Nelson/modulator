@@ -38,7 +38,7 @@ from scipy.stats import chi2 as _chi2_dist, chi2_contingency, fisher_exact
 import matplotlib.pyplot as plt
 from matplotlib.ticker import MaxNLocator
 from plot_utils import save_figure
-from genotype_utils import informative_strata, stratum_heterogeneity
+from genotype_utils import add_heterogeneity_flag, informative_strata, stratum_heterogeneity
 
 
 # ------------------------------ CLI ------------------------------
@@ -582,6 +582,7 @@ def main():
 
     res_df = pd.DataFrame(results)
     res_df["p_adj_bh"] = benjamini_hochberg(res_df["p_value"].values)
+    res_df = add_heterogeneity_flag(res_df)        # BH-adjust the heterogeneity flag like every other p
     res_df = res_df.sort_values(["p_adj_bh", "effect_max_abs_frac_diff"], ascending=[True, False]).reset_index(drop=True)
 
     # Write results

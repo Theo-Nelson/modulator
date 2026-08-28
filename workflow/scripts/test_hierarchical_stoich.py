@@ -35,8 +35,9 @@ import numpy as np
 import pandas as pd
 from pyroaring import BitMap
 
-from genotype_utils import (benjamini_hochberg, informative_strata, run_contingency_test,
-                            shard_tsv_by_chrom, stratified_primary, stratum_heterogeneity, tsv_header)
+from genotype_utils import (add_heterogeneity_flag, benjamini_hochberg, informative_strata,
+                            run_contingency_test, shard_tsv_by_chrom, stratified_primary,
+                            stratum_heterogeneity, tsv_header)
 
 
 def _adjusted_ab(strata):
@@ -66,7 +67,7 @@ OUT_COLS = [
     "gene_name", "chrom", "strand", "fragmentform_a", "fragmentform_b",
     "divergence_pos", "divergence_from_3p_nt", "mod_site_id", "site_pos", "site_from_3p_nt",
     "n_informative", "n_informative_a", "n_informative_b", "n_strata_informative",
-    "strata_heterogeneous", "strata_heterogeneity_p",
+    "strata_heterogeneous", "strata_heterogeneity_p", "strata_heterogeneity_p_adj",
     "a_modified", "a_unmodified", "b_modified", "b_unmodified",
     "frac_modified_a", "frac_modified_b", "delta", "test_name", "stat_value", "p_value",
     "frac_modified_a_pooled", "frac_modified_b_pooled", "delta_pooled",
@@ -399,6 +400,7 @@ def _finish(rows, args, n_pairs, n_skipped):
         out = pd.DataFrame(columns=OUT_COLS)
     else:
         out["p_adj_bh"] = benjamini_hochberg(out["p_value"].values)
+        out = add_heterogeneity_flag(out)          # BH-adjust the heterogeneity flag like every other p
         out["_a"] = out["delta"].abs()
         out = out.sort_values(["p_adj_bh", "_a"], ascending=[True, False]).drop(columns="_a")
         for c in OUT_COLS:

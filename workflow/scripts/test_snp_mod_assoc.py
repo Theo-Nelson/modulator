@@ -22,7 +22,7 @@ import numpy as np
 from pyroaring import BitMap
 import pandas as pd
 
-from genotype_utils import (benjamini_hochberg, binary_rate_delta, cmh_stratified_test,
+from genotype_utils import (add_heterogeneity_flag, benjamini_hochberg, binary_rate_delta, cmh_stratified_test,
                             context_key_from_row, context_key_from_snp_row, context_keys_from_snp_row,
                             informative_strata, load_molecule_mods_for_pairing, mh_stratified_effect,
                             run_contingency_test, shard_tsv_by_chrom, stratified_primary,
@@ -34,7 +34,7 @@ OUT_COLS = [
     "snp_id", "mod_site_id", "chrom", "pos1", "mod_start0", "mod_end0", "target_mod_code",
     "gene_names", "metagene_indices", "n_reads", "n_ref_reads", "n_alt_reads", "n_modified",
     "n_not_target", "test_name", "stat_name", "stat_value", "p_value", "n_strata_informative",
-    "strata_heterogeneous", "strata_heterogeneity_p",
+    "strata_heterogeneous", "strata_heterogeneity_p", "strata_heterogeneity_p_adj",
     "effect_abs_delta_mod_frac", "test_name_pooled", "p_value_pooled", "effect_pooled",
     "per_state_json", "p_adj_bh",
 ]
@@ -192,6 +192,7 @@ def main():
     out = pd.DataFrame(rows)
     if not out.empty:
         out["p_adj_bh"] = benjamini_hochberg(out["p_value"].values)
+        out = add_heterogeneity_flag(out)          # BH-adjust the heterogeneity flag like every other p
         out = out.sort_values(["p_adj_bh", "effect_abs_delta_mod_frac"],
                               ascending=[True, False]).reset_index(drop=True)
     else:
