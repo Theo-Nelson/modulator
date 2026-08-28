@@ -202,49 +202,94 @@ def cmh_stratified_test(strata):
     return name, "cmh_chi2", Q, float(chi2.sf(Q, d)), used
 
 
-def strata_effect_reversed(strata, min_effect=0.2):
-    """Common-effect HETEROGENEITY flag for a list of 2x2 strata [[a,b],[c,d]] (rows = the two compared
-    groups, col 0 = the 'positive'/modified outcome). Returns True when the per-stratum signed rate
-    differences (row0 positive-fraction - row1 positive-fraction) include BOTH a value >= +min_effect and
-    one <= -min_effect -- i.e. the effect REVERSES sign across samples.
+def _stratum_informative(T) -> bool:
+    """A stratum carries within-stratum information iff N>=2 AND >=2 rows and >=2 columns have reads --
+    exactly the strata cmh_stratified_test keeps (no zero row, no zero column)."""
+    T = np.asarray(T, dtype=float)
+    if T.size == 0:
+        return False
+    R = T.sum(axis=1); C = T.sum(axis=0); N = T.sum()
+    return N >= 2 and int((R > 0).sum()) >= 2 and int((C > 0).sum()) >= 2
 
-    This is the mirror image of the sample-pooling confound: a Mantel-Haenszel / CMH common-effect
-    estimate averages opposing per-sample effects to ~0 and reports p~1, so a real but sign-reversing
-    per-sample effect is invisible in the primary statistic (it is CORRECT for a common-effect model, but
-    like tail x mod's tailmod_confounded it deserves to be flagged rather than silent). Strata with an
-    empty row are skipped; needs >=2 informative strata to be meaningful."""
-    hi = lo = False
-    for T in strata:
-        T = np.asarray(T, dtype=float)
-        if T.shape != (2, 2):
-            return False
-        r0, r1 = T[0].sum(), T[1].sum()
-        if r0 <= 0 or r1 <= 0:
+
+def informative_strata(strata):
+    """The subset of `strata` that carry within-stratum information (see _stratum_informative). Filtering
+    once here lets the caller reuse the SAME informative set for the primary test, the odds ratio, the
+    effect, and the heterogeneity test -- so none of them silently reverts to a table that pools reads
+    back in from the non-informative samples."""
+    return [np.asarray(T, dtype=float) for T in strata if _stratum_informative(T)]
+
+
+def stratified_primary(inf_strata, exact_test, min_strata=2):
+    """Primary test computed from the INFORMATIVE strata only (pre-filter with informative_strata):
+
+    - >= min_strata informative strata -> sample-stratified CMH.
+    - exactly 1 informative stratum -> the EXACT test on THAT stratum alone. NOT a table that pools the
+      dropped (non-informative) samples' reads back in: below 2 informative strata the asymptotic CMH is
+      anti-conservative ([[6,1],[1,6]] -> 0.010 vs Fisher 0.029), but the fully-pooled table is the very
+      Simpson statistic the stratification removed -- one exactly-independent informative sample plus two
+      constant samples pools to Fisher p=5e-81 / OR=78, where the honest answer is p=1.0 / OR=1.0.
+    - 0 informative strata -> NaN, so the row leaves the BH family (like any untestable row).
+
+    `exact_test(table)` returns (name, stat_name, stat, p). The odds ratio / effect the CALLER reports
+    should be computed from inf_strata too (Mantel-Haenszel over the informative strata), so MAJOR-B's
+    'primary is sample-adjusted' guarantee holds on the fallback path as well. Returns
+    (test_name, stat_name, stat, p_value, n_informative, mode) with mode in {cmh, exact_single, none}."""
+    n = len(inf_strata)
+    if n >= min_strata:
+        name, sn, stat, p, _n = cmh_stratified_test(inf_strata)
+        return (name, sn, stat, p, n, "cmh")
+    if n == 1:
+        name, sn, stat, p = exact_test(np.asarray(inf_strata[0], dtype=float))
+        return (name, sn, stat, p, n, "exact_single")
+    return ("untestable", "none", float("nan"), float("nan"), 0, "none")
+
+
+def stratum_heterogeneity(inf_strata):
+    """Count-aware test of effect HOMOGENEITY across the INFORMATIVE strata (generalized Landis-Koch
+    CMH). Decomposes the total within-stratum association (sum of single-stratum generalized-association
+    chi2) into the common-effect CMH plus a heterogeneity term Q_hetero = Q_total - Q_cmh ~ chi2_{(K-1)d}
+    (K informative strata, d=(r-1)(c-1)). Unlike a fixed effect-size threshold this scales with each
+    stratum's n: a SMALL but well-powered per-sample sign-reversal is caught (each opposing stratum
+    contributes a large single-stratum Q while the CMH cancels to ~0), a LARGE but noisy one is not. It
+    generalizes to r x c, so it is available to the headline stoichiometry test and the SNP/haplotype x
+    transcript tests, not only the 2x2 ones. Returns (hetero_stat, hetero_p, hetero_df, n_informative);
+    NaN p when <2 informative strata (nothing to compare)."""
+    inf = [np.asarray(T, dtype=float) for T in inf_strata]
+    if len(inf) < 2:
+        return float("nan"), float("nan"), 0, len(inf)
+    r, c = inf[0].shape
+    d = (r - 1) * (c - 1)
+    if d < 1:
+        return float("nan"), float("nan"), 0, len(inf)
+    A_tot = np.zeros(d); V_tot = np.zeros((d, d)); Q_total = 0.0; used = 0
+    for T in inf:
+        if T.shape != (r, c):
             continue
-        d = T[0, 0] / r0 - T[1, 0] / r1
-        if d >= min_effect:
-            hi = True
-        elif d <= -min_effect:
-            lo = True
-    return bool(hi and lo)
-
-
-def stratified_primary(cmh_result, pooled, min_strata=2):
-    """Choose the primary test between a stratified CMH result and the exact POOLED result.
-
-    `cmh_result` is the 5-tuple from cmh_stratified_test (or None when no strata were built); `pooled` is
-    the 4-tuple (name, stat_name, stat, p) from run_contingency_test on the pooled table. The CMH is used
-    ONLY when at least `min_strata` strata are INFORMATIVE. With a single informative stratum -- whether
-    the run has one sample OR many samples but only one stratum survives filtering -- the CMH general-
-    association statistic is an uncorrected asymptotic chi2 that is anti-conservative at small counts
-    (e.g. [[6,1],[1,6]] -> 0.010 vs Fisher's exact 0.029), so the exact pooled test is used instead. The
-    correct predicate is therefore n_strata_informative, NOT the sample count.
-
-    Returns (test_name, stat_name, stat, p_value, n_strata_informative, used_cmh)."""
-    n_strata = int(cmh_result[4]) if cmh_result else 0
-    if cmh_result and n_strata >= min_strata:
-        return (cmh_result[0], cmh_result[1], cmh_result[2], cmh_result[3], n_strata, True)
-    return (pooled[0], pooled[1], pooled[2], pooled[3], n_strata, False)
+        R = T.sum(axis=1); C = T.sum(axis=0); N = T.sum()
+        Rr, Cc = R[:r - 1], C[:c - 1]
+        obs = T[:r - 1, :c - 1].reshape(-1)
+        m = np.outer(Rr, Cc).reshape(-1) / N
+        Ar = np.diag(Rr) - np.outer(Rr, Rr) / N
+        Ac = np.diag(Cc) - np.outer(Cc, Cc) / N
+        A_k = obs - m
+        V_k = np.kron(Ar, Ac) / (N - 1)
+        try:
+            Qk = float(A_k @ np.linalg.solve(V_k, A_k))
+        except np.linalg.LinAlgError:
+            Qk = float(A_k @ np.linalg.pinv(V_k) @ A_k)
+        if np.isfinite(Qk) and Qk > 0:
+            Q_total += Qk
+        A_tot += A_k; V_tot += V_k; used += 1
+    if used < 2:
+        return float("nan"), float("nan"), 0, used
+    try:
+        Q_cmh = float(A_tot @ np.linalg.solve(V_tot, A_tot))
+    except np.linalg.LinAlgError:
+        Q_cmh = float(A_tot @ np.linalg.pinv(V_tot) @ A_tot)
+    Q_h = max(0.0, Q_total - Q_cmh)
+    df = (used - 1) * d
+    return Q_h, float(chi2.sf(Q_h, df)), df, used
 
 
 def mh_common_odds_ratio(strata):

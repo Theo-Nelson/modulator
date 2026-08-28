@@ -4,11 +4,12 @@ import argparse
 import json
 import os
 
+import numpy as np
 import pandas as pd
 
-from genotype_utils import (benjamini_hochberg, cmh_stratified_test, max_abs_distribution_shift,
+from genotype_utils import (benjamini_hochberg, informative_strata, max_abs_distribution_shift,
                             run_contingency_test, stratified_max_distribution_shift, stratified_primary,
-                            tsv_header)
+                            stratum_heterogeneity, tsv_header)
 
 # Only these columns are used (grouping: sample/snp_id/allele_class/ZT; per-SNP metadata: the rest).
 # The molecule_snps table is ~1.7 GB / 7.5M rows on Huh7 mock, and reading all 21 object-dtype columns
@@ -74,10 +75,9 @@ def main():
         # SAMPLE-STRATIFIED CMH (primary): one 2 x len(keep_tx) allele x transcript table per sample,
         # combined by the generalized (Landis-Koch) CMH general-association statistic. Transcript column
         # order is FIXED (keep_tx) across strata; a sample lacking both alleles or >=2 transcripts is
-        # dropped as uninformative. With only ONE sample the CMH statistic is an uncorrected asymptotic
-        # chi2 (anti-conservative at small counts), so a lone sample keeps the exact pooled test instead.
+        # dropped as uninformative. Build per-sample tables ALWAYS (one sample -> one stratum).
         strata = []
-        if "sample" in sub.columns and sub["sample"].nunique() > 1:
+        if "sample" in sub.columns:
             sgrp = sub.groupby(["sample", "allele_class", "ZT"], as_index=False, observed=True).size()
             sgrp = sgrp[sgrp["ZT"].isin(keep_tx)]
             for _samp, ss in sgrp.groupby("sample", observed=True):
@@ -85,14 +85,17 @@ def main():
                                      fill_value=0, aggfunc="sum")
                         .reindex(index=["ref", "alt"], columns=keep_tx, fill_value=0))
                 strata.append(st.to_numpy(dtype=float))
-        # CMH is primary only when >=2 strata are informative (stratified_primary) -- a single informative
-        # stratum falls back to the exact pooled test (a single-stratum CMH is anti-conservative).
-        cmh = cmh_stratified_test(strata) if strata else None
-        test_name, stat_name, stat_value, p_value, n_strata, _used = stratified_primary(
-            cmh, (pooled_name, pooled_stat_name, pooled_stat, pooled_p))
-        # sample-stratified effect: per transcript, coverage-weighted mean over samples of
-        # (ref_frac - alt_frac); report the max |.| . Falls back to the pooled shift when not stratified.
-        eff_strat = stratified_max_distribution_shift(strata) if _used else max_abs_distribution_shift(tt)
+        # PRIMARY from the INFORMATIVE strata: >=2 -> generalized CMH; exactly 1 -> the exact test on THAT
+        # stratum (never the fully-pooled allele x transcript table, which re-pools non-informative
+        # samples = the Simpson statistic); 0 -> NaN (leaves the BH family).
+        inf = informative_strata(strata)
+        test_name, stat_name, stat_value, p_value, n_strata, _mode = stratified_primary(
+            inf, lambda T: run_contingency_test(T, test=args.test, pseudocount=args.pseudocount))
+        # sample-stratified effect (max over transcripts of the coverage-weighted ref-alt fraction gap),
+        # from the same informative strata; NaN on the untestable path.
+        eff_strat = stratified_max_distribution_shift(inf) if _mode != "none" else float("nan")
+        _hstat, het_p, _hdf, _ = stratum_heterogeneity(inf)
+        strata_heterogeneous = bool(np.isfinite(het_p) and het_p < 0.05)
         per_tx = []
         for tx in table.columns:
             per_tx.append({
@@ -115,6 +118,8 @@ def main():
             "n_alt_reads": int(allele_totals.get("alt", 0)),
             "n_transcripts_tested": int(tt.shape[1]),
             "n_strata_informative": int(n_strata),
+            "strata_heterogeneous": bool(strata_heterogeneous),
+            "strata_heterogeneity_p": round(het_p, 6) if np.isfinite(het_p) else float("nan"),
             "test_name": test_name,
             "stat_name": stat_name,
             "stat_value": stat_value,
@@ -135,6 +140,7 @@ def main():
         out = pd.DataFrame(columns=[
             "snp_id", "chrom", "pos1", "ref", "alt", "gene_names", "gene_ids", "metagene_indices",
             "n_reads", "n_ref_reads", "n_alt_reads", "n_transcripts_tested", "n_strata_informative",
+            "strata_heterogeneous", "strata_heterogeneity_p",
             "test_name", "stat_name", "stat_value", "p_value", "effect_max_abs_tx_frac_diff",
             "test_name_pooled", "stat_value_pooled", "p_value_pooled", "effect_max_abs_tx_frac_diff_pooled",
             "per_transcript_json", "p_adj_bh"

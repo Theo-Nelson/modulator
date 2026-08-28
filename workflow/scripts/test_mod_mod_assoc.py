@@ -19,10 +19,10 @@ import numpy as np
 import pandas as pd
 from pyroaring import BitMap
 
-from genotype_utils import (benjamini_hochberg, binary_rate_delta, cmh_stratified_test,
-                            context_key_from_row, drop_unassigned_reads, mh_common_odds_ratio,
+from genotype_utils import (benjamini_hochberg, binary_rate_delta, context_key_from_row,
+                            drop_unassigned_reads, informative_strata, mh_common_odds_ratio,
                             mh_stratified_effect, run_contingency_test, shard_tsv_by_chrom,
-                            strata_effect_reversed, stratified_primary, tsv_header)
+                            stratified_primary, stratum_heterogeneity, tsv_header)
 
 # Columns the current test_mod_mod_assoc uses (incl. strand, and gene_name/metagene_index for context_key).
 _MOD_WANT = ["sample", "qname", "mod_site_id", "chrom", "start0", "strand", "target_mod_code",
@@ -35,7 +35,8 @@ OUT_COLS = [
     "n_reads", "n_a_modified", "n_a_unmodified", "n_b_modified",
     "n_both_modified", "n_a_only", "n_b_only", "n_neither",
     "odds_ratio", "log2_odds_ratio", "direction",
-    "n_strata_informative", "strata_effect_reversed", "test_name", "stat_name", "stat_value", "p_value",
+    "n_strata_informative", "strata_heterogeneous", "strata_heterogeneity_p",
+    "test_name", "stat_name", "stat_value", "p_value",
     "effect_abs_delta_mod_frac",
     "test_name_pooled", "stat_value_pooled", "p_value_pooled", "effect_abs_delta_mod_frac_pooled",
     "odds_ratio_pooled", "log2_odds_ratio_pooled", "direction_pooled",
@@ -95,30 +96,30 @@ def _pair_row(sid_a, sid_b, counts, site_meta, args, strata_counts=None):
     direction_pooled = _dir(log2_or_pooled)
 
     # ---- PRIMARY statistics ----
-    # strata_counts is passed only when >1 sample exists (a cheap short-circuit in _modmod_for_chrom),
-    # but the CMH is adopted as primary ONLY when >=2 strata are INFORMATIVE (stratified_primary): a
-    # single informative stratum -- one sample, OR many samples where only one survives filtering -- is
-    # an uncorrected asymptotic chi2, anti-conservative at these cell counts ([[6,1],[1,6]] -> 0.010 vs
-    # Fisher's exact 0.029), so it falls back to the exact pooled test.
-    strata = [[[float(cb), float(ca)], [float(cbb), float(cn)]]
+    # Computed from the INFORMATIVE strata only: >=2 -> CMH; exactly 1 -> the exact test on THAT stratum
+    # (never the fully-pooled table, which pools the non-informative samples back in = the Simpson
+    # statistic); 0 -> NaN (row leaves the BH family). odds_ratio/effect are Mantel-Haenszel over the
+    # informative strata on every path, so the sample-adjusted guarantee holds on the fallback too.
+    strata = [np.array([[float(cb), float(ca)], [float(cbb), float(cn)]], dtype=float)
               for (cb, ca, cbb, cn) in strata_counts] if strata_counts else []
-    cmh = cmh_stratified_test(strata) if strata else None
-    test_name, stat_name, stat_value, p_value, n_strata, _used = stratified_primary(
-        cmh, (pooled_name, pooled_sn, pooled_stat, pooled_p))
-    if _used:
-        eff = mh_stratified_effect(strata)                      # sample-adjusted rate difference
-        or_mh = mh_common_odds_ratio(strata)                    # sample-adjusted (Mantel-Haenszel) OR
+    inf = informative_strata(strata)
+    test_name, stat_name, stat_value, p_value, n_strata, _mode = stratified_primary(
+        inf, lambda T: run_contingency_test(T, test=args.test, pseudocount=args.pseudocount))
+    if _mode != "none":
+        eff = mh_stratified_effect(inf)                         # sample-adjusted rate difference
+        or_mh = mh_common_odds_ratio(inf)                       # sample-adjusted (Mantel-Haenszel) OR
         if math.isfinite(or_mh) and or_mh > 0:
             odds_ratio, log2_or = or_mh, math.log2(or_mh)
         else:                                                   # no discordant mass -> fall back to pooled OR
             odds_ratio, log2_or = or_pooled, log2_or_pooled
         direction = _dir(log2_or)
-    else:
-        eff = pooled_eff
-        odds_ratio, log2_or, direction = or_pooled, log2_or_pooled, direction_pooled
-    # heterogeneity: does the co-modification effect REVERSE sign across samples? The CMH averages such
-    # strata to ~0/p~1, so flag it (mirror of the pooling confound; only meaningful once stratified).
-    strata_reversed = strata_effect_reversed(strata) if _used else False
+    else:                                                       # untestable: don't present a pooled OR as primary
+        eff = float("nan")
+        odds_ratio, log2_or, direction = float("nan"), float("nan"), "UNTESTABLE"
+    # count-aware heterogeneity: is the per-sample co-modification effect HOMOGENEOUS, or does it reverse
+    # across samples (which the common-effect CMH averages to ~0/p~1)? p<0.05 flags it.
+    _hstat, het_p, _hdf, _ = stratum_heterogeneity(inf)
+    strata_heterogeneous = bool(math.isfinite(het_p) and het_p < 0.05)
     return {
         "odds_ratio": round(odds_ratio, 4), "log2_odds_ratio": round(log2_or, 4), "direction": direction,
         "exp_both_modified_pooled": round(exp_both, 2), "exp_neither_pooled": round(exp_neither, 2),
@@ -134,7 +135,8 @@ def _pair_row(sid_a, sid_b, counts, site_meta, args, strata_counts=None):
         "n_reads": n_reads,
         "n_a_modified": n_a_mod, "n_a_unmodified": n_a_unmod, "n_b_modified": n_b_mod,
         "n_both_modified": n_both, "n_a_only": n_a_only, "n_b_only": n_b_only, "n_neither": n_neither,
-        "n_strata_informative": int(n_strata), "strata_effect_reversed": bool(strata_reversed),
+        "n_strata_informative": int(n_strata),
+        "strata_heterogeneous": bool(strata_heterogeneous), "strata_heterogeneity_p": round(het_p, 6) if math.isfinite(het_p) else float("nan"),
         "test_name": test_name, "stat_name": stat_name, "stat_value": stat_value, "p_value": p_value,
         "effect_abs_delta_mod_frac": eff,
         "test_name_pooled": pooled_name, "stat_value_pooled": pooled_stat, "p_value_pooled": pooled_p,
@@ -212,12 +214,13 @@ def _modmod_for_chrom(mod_path, args):
                 mb, ub = site_bits[sb]
                 b_both = ma & mb; b_ao = ma & ub; b_bo = ua & mb; b_ne = ua & ub
                 counts = (len(b_both), len(b_ao), len(b_bo), len(b_ne))
-                strata_counts = None
-                if len(sample_bits) > 1:   # single sample -> pooled EXACT test (asymptotic CMH is anti-conservative)
-                    strata_counts = [
-                        (b_both.intersection_cardinality(sbm), b_ao.intersection_cardinality(sbm),
-                         b_bo.intersection_cardinality(sbm), b_ne.intersection_cardinality(sbm))
-                        for sbm in sample_bits.values()]
+                # per-sample strata ALWAYS (one stratum per sample; a single sample -> one stratum, whose
+                # exact test == the pooled test). stratified_primary/heterogeneity work off the informative
+                # subset, so the fallback never pools non-informative samples' reads back in.
+                strata_counts = [
+                    (b_both.intersection_cardinality(sbm), b_ao.intersection_cardinality(sbm),
+                     b_bo.intersection_cardinality(sbm), b_ne.intersection_cardinality(sbm))
+                    for sbm in sample_bits.values()] if sample_bits else None
                 r = _pair_row(sa, sb, counts, site_meta, args, strata_counts=strata_counts)
                 if r is not None:
                     rows.append(r)

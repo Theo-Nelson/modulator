@@ -35,8 +35,8 @@ import numpy as np
 import pandas as pd
 from pyroaring import BitMap
 
-from genotype_utils import (benjamini_hochberg, cmh_stratified_test, run_contingency_test,
-                            shard_tsv_by_chrom, strata_effect_reversed, stratified_primary, tsv_header)
+from genotype_utils import (benjamini_hochberg, informative_strata, run_contingency_test,
+                            shard_tsv_by_chrom, stratified_primary, stratum_heterogeneity, tsv_header)
 
 
 def _adjusted_ab(strata):
@@ -65,7 +65,8 @@ def _adjusted_ab(strata):
 OUT_COLS = [
     "gene_name", "chrom", "strand", "fragmentform_a", "fragmentform_b",
     "divergence_pos", "divergence_from_3p_nt", "mod_site_id", "site_pos", "site_from_3p_nt",
-    "n_informative", "n_informative_a", "n_informative_b", "n_strata_informative", "strata_effect_reversed",
+    "n_informative", "n_informative_a", "n_informative_b", "n_strata_informative",
+    "strata_heterogeneous", "strata_heterogeneity_p",
     "a_modified", "a_unmodified", "b_modified", "b_unmodified",
     "frac_modified_a", "frac_modified_b", "delta", "test_name", "stat_value", "p_value",
     "frac_modified_a_pooled", "frac_modified_b_pooled", "delta_pooled",
@@ -339,22 +340,22 @@ def _process_chrom(ra, mods, gtf, args):
                                [float(ib_m.intersection_cardinality(sbm)), float(ib_u.intersection_cardinality(sbm))]]
                               for sbm in sample_bm.values()]
                     fa_pool = am / (am + au); fb_pool = bm_ / (bm_ + bu)
-                    # CMH is primary only when >=2 strata are informative (stratified_primary): a single
-                    # informative stratum -- one sample, or many where only one survives filtering -- is an
-                    # anti-conservative asymptotic chi2, so it falls back to the exact pooled test.
-                    cmh = cmh_stratified_test(strata) if len(sample_bm) > 1 else None
-                    tname, _sn, sval, pval, n_strata, _used = stratified_primary(cmh, (ptname, _psn, psval, ppval))
-                    if _used:
-                        # reader-facing fractions + delta must be sample-ADJUSTED like the CMH p, else the
-                        # browser shows a confounded pooled -45.2% next to FDR 0.96 and the table sorts the
-                        # most-confounded rows to the top (it ranks by |delta|).
-                        _adj = _adjusted_ab(strata)
+                    # PRIMARY from the INFORMATIVE strata: >=2 -> CMH; exactly 1 -> the exact test on THAT
+                    # stratum (never the fully-pooled table across all samples -- that is the Simpson
+                    # statistic); 0 -> NaN (leaves the BH family). Reader-facing fractions + delta are the
+                    # sample-adjusted MH quantities over the informative strata on every path.
+                    inf = informative_strata(strata)
+                    tname, _sn, sval, pval, n_strata, _mode = stratified_primary(
+                        inf, lambda T: run_contingency_test(T, test=args.test, pseudocount=args.pseudocount))
+                    if _mode != "none":
+                        _adj = _adjusted_ab(inf)
                         fa, fb, delta = _adj if _adj is not None else (fa_pool, fb_pool, fb_pool - fa_pool)
                     else:
                         fa, fb, delta = fa_pool, fb_pool, fb_pool - fa_pool
-                    # heterogeneity: does the a-vs-b stoichiometry gap REVERSE sign across samples? (the
-                    # CMH averages such strata to ~0/p~1 -- mirror of the pooling confound; stratified only)
-                    strata_reversed = strata_effect_reversed(strata) if _used else False
+                    # count-aware heterogeneity of the a-vs-b gap across samples (the common-effect CMH
+                    # averages a sign-reversal to ~0/p~1; p<0.05 flags it).
+                    _hstat, het_p, _hdf, _ = stratum_heterogeneity(inf)
+                    strata_heterogeneous = bool(np.isfinite(het_p) and het_p < 0.05)
                     row = {
                         "gene_name": gene, "chrom": chrom, "strand": strand,
                         "fragmentform_a": a, "fragmentform_b": b,
@@ -362,7 +363,9 @@ def _process_chrom(ra, mods, gtf, args):
                         "mod_site_id": sid, "site_pos": int(spos), "site_from_3p_nt": int(abs(tes - spos)),
                         "n_informative": int(n_a + n_b),
                         "n_informative_a": int(n_a), "n_informative_b": int(n_b),
-                        "n_strata_informative": int(n_strata), "strata_effect_reversed": bool(strata_reversed),
+                        "n_strata_informative": int(n_strata),
+                        "strata_heterogeneous": bool(strata_heterogeneous),
+                        "strata_heterogeneity_p": round(het_p, 6) if np.isfinite(het_p) else float("nan"),
                         "a_modified": am, "a_unmodified": au, "b_modified": bm_, "b_unmodified": bu,
                         "frac_modified_a": round(fa, 5), "frac_modified_b": round(fb, 5),
                         "delta": round(delta, 5), "test_name": tname,
