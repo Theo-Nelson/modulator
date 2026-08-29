@@ -504,11 +504,18 @@ def classify_tree(gene, pos, hiZN, loZN, iso, *, tes_tol, ejc_nt):
         hi_longer = len_hi >= len_lo
         long_exon = ehi if hi_longer else elo
         short_exons = ilo['exons'] if hi_longer else ihi['exons']
-        long_don = don_hi if hi_longer else don_lo
-        long_tes = ht if hi_longer else lt
-        short_tes = lt if hi_longer else ht
-        long_is_last = hi_last if hi_longer else lo_last
         exon_dir = 'LONGER_EXON_HIGHER' if hi_longer else 'LONGER_EXON_LOWER'
+        # IPA candidate = the form whose base-exon DONOR extends 3' PAST the other form's donor (it reads
+        # further into the other form's intron). Chosen by DONOR POSITION, not exon length: a form can
+        # extend 3' while having the SHORTER exon when its acceptor is also more 3'. The old length-based
+        # pick inverted true IPA into ALT_DONOR exactly then (hi PA inside lo's intron, hi exon shorter).
+        ext_is_hi = (don_hi >= don_lo) if strand == '+' else (don_hi <= don_lo)
+        ext_don = don_hi if ext_is_hi else don_lo
+        oth_don = don_lo if ext_is_hi else don_hi
+        ext_tes = ht if ext_is_hi else lt
+        oth_tes = lt if ext_is_hi else ht
+        ext_is_last = hi_last if ext_is_hi else lo_last
+        ext_other_exons = ilo['exons'] if ext_is_hi else ihi['exons']
         acc_diff = (acc_hi != acc_lo) and not (hi_first or lo_first)   # 5' end is the blind spot
         # F1: a first-exon acceptor difference is MASKED above because the 5' model is unreliable. Record
         # it so the site is routed to FIVE_PRIME_UNCERTAIN below instead of silently leaking into (c)/(d)
@@ -521,26 +528,28 @@ def classify_tree(gene, pos, hiZN, loZN, iso, *, tes_tol, ejc_nt):
         both_terminal = hi_last and lo_last
         don_diff = (don_hi != don_lo) and not (both_terminal and abs(don_hi - don_lo) <= tes_tol)
         if acc_diff or don_diff:
-            # IPA_EXTENSION: the longer form's base exon IS its terminal exon and ends at its own
-            # poly(A) site (reads into the intron and terminates there), NOT co-terminal with the other
-            # form. Requiring the base exon to be terminal prevents an internal exon whose splice donor
-            # merely happens to sit within tes_tol of a short downstream terminal exon from being
-            # mislabeled IPA (that is really an ALT_DONOR).
-            not_coterm = long_tes is not None and (short_tes is None or abs(long_tes - short_tes) > tes_tol)
-            # BLOCKER-1: intronic polyadenylation is only meaningful if the OTHER (shorter) form SPLICES
-            # ONWARD past the longer form's poly(A) site -- that is the whole content of the "intronic"
-            # claim (the longer form terminates inside an intron of the shorter form). Without this
-            # conjunct, an alternative/extended LAST EXON (both forms terminal, one simply shorter; no
-            # intron anywhere) was mislabeled IPA_EXTENSION -- 57.7% of the class on real chr21. The
-            # shorter form splices on iff it has exonic sequence 3' of the longer form's terminal donor.
+            # INTRONIC POLYADENYLATION: the extending form's base exon IS its terminal exon and it
+            # polyadenylates at its own donor (ends there, |donor - tes| <= tes_tol), is NOT co-terminal
+            # with the other form, AND the OTHER form SPLICES ONWARD past that poly(A) site -- i.e. the
+            # extending form terminates inside an intron of the other form. Requiring the terminal-at-donor
+            # + other-splices-on conjuncts prevents an alternative/extended LAST EXON (both forms terminal,
+            # no intron anywhere) from being mislabeled IPA.
+            not_coterm = ext_tes is not None and (oth_tes is None or abs(ext_tes - oth_tes) > tes_tol)
+            term_at_donor = ext_tes is not None and abs(ext_don - ext_tes) <= tes_tol
             if strand == '+':
-                short_splices_on = any(e[1] > long_don + tes_tol for e in short_exons)
+                other_splices_on = any(e[1] > ext_don + tes_tol for e in ext_other_exons)
             else:
-                short_splices_on = any(e[0] < long_don - tes_tol for e in short_exons)
-            if (don_diff and long_is_last and long_tes is not None
-                    and abs(long_don - long_tes) <= tes_tol and not_coterm and short_splices_on):
-                info['delta_nt'] = abs(don_hi - don_lo)
-                d = 'EXTENDS_TO_PA_HIGHER' if hi_longer else 'EXTENDS_TO_PA_LOWER'
+                other_splices_on = any(e[0] < ext_don - tes_tol for e in ext_other_exons)
+            if don_diff and ext_is_last and term_at_donor and not_coterm and other_splices_on:
+                extend_nt = abs(ext_don - oth_don)
+                if extend_nt <= tes_tol:
+                    # the terminal form polyadenylates AT ~the other form's splice donor -> no real
+                    # 3' extension into the intron: splicing-vs-cleavage at the same coordinate.
+                    info['delta_nt'] = extend_nt
+                    nd = 'POLYA_FORM_HIGHER' if ext_is_hi else 'SPLICED_FORM_HIGHER'
+                    return 'SHARED_LOCAL', 'IPA_NO_EXTENSION', nd, info
+                info['delta_nt'] = extend_nt
+                d = 'EXTENDS_TO_PA_HIGHER' if ext_is_hi else 'EXTENDS_TO_PA_LOWER'
                 return 'SHARED_LOCAL', 'IPA_EXTENSION', d, info
             # RETAINED_INTRON: the shorter form has a whole intron inside the longer form's base exon.
             if _intron_inside(short_exons, long_exon[0], long_exon[1]):

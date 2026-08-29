@@ -72,6 +72,11 @@ CASES = [
       2: ([(1000, 1200), (2000, 2300), (3000, 3500)], 3500, 100)},
      2100, 1, 2, "SHARED_LOCAL", "IPA_EXTENSION"),
 
+    ("SHARED_LOCAL_IPA_EXTENSION_SHORTER_EXON",  # IPA form's base exon is SHORTER (more-3' acceptor) but its
+     {1: ([(1000, 1200), (2300, 2600)], 2600, 100),  # DONOR extends 3' past lo's donor into lo's intron and
+      2: ([(1000, 1200), (2000, 2400), (3000, 3500)], 3500, 100)},  # it polyadenylates there. Length-based
+     2350, 1, 2, "SHARED_LOCAL", "IPA_EXTENSION"),   # selection inverted this to ALT_DONOR (BLOCKER-3).
+
     ("SHARED_LOCAL_RETAINED_INTRON", # co-terminal; hi retains a 3'UTR intron that lo splices out
      {1: ([(1000, 1200), (2000, 3000)], 3000, 100),
       2: ([(1000, 1200), (2000, 2300), (2600, 3000)], 3000, 100)},
