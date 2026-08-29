@@ -50,6 +50,13 @@ def run_engine(script, out_prefix, filter_on):
             "--min-cov", "0", "--count-diff-factor", "3.0",
             # per-mod k spec: both engines must resolve + apply it identically (parity)
             "--nfail-score-k", "a=0.5,default=1.0", "--emit-raw", "--emit-filtered", "--write-long"]
+    # The pipeline passes --samples to BOTH engines (the BLOCKER-2 stale-sample filter); exercise it
+    # here so a regression where only one engine accepts the flag is caught (aggregation.engine=sort
+    # previously aborted with "unrecognized arguments: --samples"). Listing all present samples keeps
+    # parity (nothing dropped) while still forcing both argparsers through the flag.
+    samples = sorted(p.name for p in MODKIT.iterdir() if p.is_dir())
+    if samples:
+        args += ["--samples", ",".join(samples)]
     if "stream" in script:
         args += ["--jobs", "4"]   # the sort engine has no --jobs flag
     if filter_on:

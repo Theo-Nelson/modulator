@@ -243,6 +243,11 @@ def parse_args():
         description="Aggregate ZN-partitioned modkit outputs per gene/mod with site-level filtering (pure Python external sort)"
     )
     ap.add_argument("--modkit-dir", required=True, help="Parent dir with per-sample subdirs containing numbered ZN .bed files")
+    ap.add_argument("--samples", default="",
+                    help="Comma-separated CURRENT sample names. When given, only these samples' per-ZN "
+                         "beds are aggregated -- a sample dropped from the samplesheet leaves its beds on "
+                         "disk and would otherwise be summed into the new run's results. Mirrors "
+                         "aggregate_zn_stream.py so the stream and sort engines behave identically.")
     ap.add_argument("--gtf", required=True, help="Assembler GTF (with gene coordinates). exon/transcript/gene features used.")
     ap.add_argument("--out-prefix", required=True, help="Prefix for outputs (no extension)")
     ap.add_argument("--min-cov", type=int, default=0, help="Zero frac_modified if Nvalid_cov < MIN_COV (row kept)")
@@ -1476,6 +1481,17 @@ def main():
     beds = iter_numbered_beds(args.modkit_dir)
     if not beds:
         sys.exit(f"No numbered ZN partition files found under {args.modkit_dir}")
+    if args.samples:
+        want = {s for s in args.samples.split(",") if s}
+        n_before = len(beds)
+        beds = [b for b in beds if b[1] in want]          # b = (root, sample_name, path, zn)
+        if args.verbose:
+            dropped = n_before - len(beds)
+            print(f"[sort] --samples filter: kept {len(beds)}/{n_before} beds "
+                  f"({dropped} from samples not in the current samplesheet)", file=sys.stderr, flush=True)
+        if not beds:
+            sys.exit(f"No numbered ZN partition files found under {args.modkit_dir}"
+                     + (f" for samples {args.samples}" if args.samples else ""))
 
     tx_index, gene_index = load_gene_intervals_from_gtf(args.gtf, verbose=args.verbose)
 
