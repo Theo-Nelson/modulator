@@ -320,6 +320,9 @@ def main():
     if not beds:
         raise SystemExit(f"No numbered ZN beds under {args.modkit_dir}"
                          + (f" for samples {args.samples}" if args.samples else ""))
+    beds = agg.filter_stale_zn_beds(beds, args.gtf, "stream", verbose=args.verbose)
+    if not beds:
+        raise SystemExit(f"No ZN beds under {args.modkit_dir} match a partition in {args.gtf}")
     chroms = _chroms_from_beds(beds)
     if args.verbose:
         print(f"[stream] {len(beds)} beds, {len(chroms)} chromosomes, jobs={args.jobs}", file=sys.stderr, flush=True)

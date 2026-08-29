@@ -646,6 +646,42 @@ def iter_numbered_beds(modkit_dir: str) -> List[Tuple[str, str, str, int]]:
     return sorted(out)
 
 
+def valid_zn_from_gtf(gtf_path):
+    """Set of ZN partition indices the CURRENT assembly defines (transcript zn_index in the GTF).
+
+    A numbered modkit bed <N>.bed whose N is NOT in this set is a STALE partition from a previous run
+    (typically one that produced more partitions): the modkit stage's rmtree clears such beds on a
+    normal run, but aggregation entered on its own via --stages would otherwise walk them and sum a
+    partition the current assembler never produced into the new results (BLOCKER-2 residual). Mirrors
+    load_gene_intervals_from_gtf's zn_index (falls back to transcript_index) so the two agree."""
+    valid = set()
+    with open_text(gtf_path) as f:
+        for ln in f:
+            if ln.startswith("#") or "\ttranscript\t" not in ln:
+                continue
+            m = re.search(r'\bzn_index\s+"([^"]*)"', ln) or re.search(r'\btranscript_index\s+"([^"]*)"', ln)
+            if m:
+                valid.add(safe_int(m.group(1)))
+    return valid
+
+
+def filter_stale_zn_beds(beds, gtf_path, engine_tag, verbose=False):
+    """Drop (sample, ZN) beds whose ZN partition the current GTF does not define. No-op (with a
+    warning) if the GTF yields no ZN set, so a malformed/edge GTF never silently drops everything."""
+    valid = valid_zn_from_gtf(gtf_path)
+    if not valid:
+        print(f"[{engine_tag}] stale-ZN filter: GTF defined no ZN partitions; skipping the filter "
+              f"(not dropping any beds)", file=sys.stderr, flush=True)
+        return beds
+    kept = [b for b in beds if b[3] in valid]          # b = (root, sample_name, path, zn)
+    dropped = len(beds) - len(kept)
+    if dropped and (verbose or True):
+        stale = sorted({b[3] for b in beds if b[3] not in valid})
+        print(f"[{engine_tag}] stale-ZN filter: dropped {dropped} bed(s) at ZN partition(s) {stale} "
+              f"not present in the current assembly (stale from a prior run)", file=sys.stderr, flush=True)
+    return kept
+
+
 # ----------------------------- bedMethyl parsing -----------------------------
 
 
@@ -1492,6 +1528,10 @@ def main():
         if not beds:
             sys.exit(f"No numbered ZN partition files found under {args.modkit_dir}"
                      + (f" for samples {args.samples}" if args.samples else ""))
+
+    beds = filter_stale_zn_beds(beds, args.gtf, "sort", verbose=args.verbose)
+    if not beds:
+        sys.exit(f"No ZN partition files under {args.modkit_dir} match a partition in {args.gtf}")
 
     tx_index, gene_index = load_gene_intervals_from_gtf(args.gtf, verbose=args.verbose)
 

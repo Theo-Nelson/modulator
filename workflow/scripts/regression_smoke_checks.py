@@ -136,6 +136,29 @@ chrSynthetic\tReadBacked\texon\t260\t320\t1000\t+\t.\tgene_id "GENEB"; transcrip
         raise AssertionError("Reused ZN=1 should map the non-overlapping right site to GENEB.")
 
 
+def test_stale_zn_filter(module):
+    """BLOCKER-2 residual: aggregation entered via --stages alone must drop numbered beds whose ZN
+    partition the current assembly does not define (stale from a prior, larger run)."""
+    gtf_text = (
+        'chrSynthetic\tReadBacked\ttranscript\t100\t160\t1000\t+\t.\tgene_id "GENEA"; '
+        'transcript_id "GENEA.G1.T1"; zn_index "1";\n'
+        'chrSynthetic\tReadBacked\ttranscript\t140\t220\t1000\t+\t.\tgene_id "GENEB"; '
+        'transcript_id "GENEB.G2.T1"; zn_index "2";\n'
+    )
+    with tempfile.NamedTemporaryFile("w", suffix=".gtf", delete=False) as tmp:
+        tmp.write(gtf_text)
+        gtf_path = tmp.name
+    valid = module.valid_zn_from_gtf(gtf_path)
+    if valid != {1, 2}:
+        raise AssertionError(f"valid_zn_from_gtf should read {{1, 2}} from the GTF, got {valid}")
+    beds = [("root", "M1", "M1/1.bed", 1), ("root", "M1", "M1/2.bed", 2),
+            ("root", "M1", "M1/99.bed", 99)]   # ZN=99 is a stale partition not in the GTF
+    kept = module.filter_stale_zn_beds(beds, gtf_path, "test", verbose=False)
+    kept_zn = sorted(b[3] for b in kept)
+    if kept_zn != [1, 2]:
+        raise AssertionError(f"stale ZN=99 bed must be dropped; kept ZN partitions {kept_zn}")
+
+
 def main():
     assembler = load_assembler_module()
     aggregate = load_aggregate_module()
@@ -143,6 +166,7 @@ def main():
     test_intron_retention_not_truncation(assembler)
     test_metagene_coloring(assembler)
     test_aggregate_partition_mapping(aggregate)
+    test_stale_zn_filter(aggregate)
     print("regression_smoke_checks: OK")
 
 
