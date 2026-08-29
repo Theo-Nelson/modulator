@@ -140,7 +140,10 @@ def _fig_hap(row, plt):
     if not data or "haplotypes" not in data or "counts" not in data:
         return None
     haps = [str(h) for h in data["haplotypes"]]
-    states = [str(s) for s in data.get("states", [])]
+    # The hap->modification writer emits column labels under "states"; the hap->transcript writer
+    # emits them under "transcripts" (the fragmentform ids). Accept either so the usage bars are
+    # labelled with the real fragmentform names instead of positional T1..Tn.
+    states = [str(s) for s in (data.get("states") or data.get("transcripts") or [])]
     counts = np.asarray(data["counts"], dtype=float)
     if counts.ndim != 2 or counts.shape[0] != len(haps):
         return None

@@ -193,7 +193,7 @@ COLUMN_DEFINITIONS = {
     "n_sites": "Number of unique genomic modification sites observed for the gene and modification code.",
     "p_value": "Nominal p-value from the reported hypothesis test.",
     "p_adj_bh": "Benjamini-Hochberg false-discovery-rate adjusted p-value.",
-    "effect_max_abs_frac_diff": "Maximum absolute difference in pooled modified fraction across tested fragmentform partitions.",
+    "effect_max_abs_frac_diff": "Maximum absolute difference in modified fraction across tested fragmentform partitions, Mantel-Haenszel-weighted over the informative sample strata (the sample-stratified effect that matches the primary p-value, NOT the sample-pooled fraction). The old sample-pooled value is kept separately as effect_max_abs_frac_diff_pooled.",
     "effect_max_abs_tx_frac_diff": "Maximum absolute difference in fragmentform usage or stoichiometry between tested groups.",
     "effect_abs_delta_mod_frac": "Absolute difference in modified-site rate between the tested allele groups.",
     "odds_ratio": "Sample-adjusted (Mantel-Haenszel common) odds ratio of co-modification between the two sites, combining the per-sample 2x2 tables so it is not inflated by between-sample rate differences: >1 = modified together (concordant), <1 = mutually exclusive, ~1 = independent.",
@@ -768,13 +768,18 @@ def _save_report_chart(fig, name):
             pass
 
 
-def category_distribution_png(counts, mod_label=None, chart_name="site_classification_distribution"):
+def category_distribution_png(counts, mod_label=None, chart_name="site_classification_distribution",
+                              title=None, xlabel=None):
     """Horizontal bar chart of classified-site counts per category. Returns a
     base64 data URI (or "" if matplotlib/data unavailable). ``mod_label`` names the
     modification in the title/axis (e.g. "m6A"); None -> generic wording. ``chart_name`` is the
     on-disk export stem -- distinct per caller so the three distributions that reuse this helper
     (structural buckets, per-category classes, SNP positional classes) don't overwrite one file
-    (R1/R2: the exported PNG/PDF/SVG collided even though each inline HTML copy was correct)."""
+    (R1/R2: the exported PNG/PDF/SVG collided even though each inline HTML copy was correct).
+    ``title``/``xlabel`` override the wording per caller: the SNP-positional and APA-motif
+    distributions count ALL tested items (not just significant ones) and are not structural
+    categories, so they must not inherit the default "Differential ... by structural category" /
+    "Significant sites" labels (M7)."""
     if not counts:
         return ""
     try:
@@ -794,7 +799,10 @@ def category_distribution_png(counts, mod_label=None, chart_name="site_classific
     bars = ax.barh(list(ypos), values, color="#c98a5e", edgecolor="#7d3c1f", linewidth=0.9)
     ax.set_yticks(list(ypos))
     ax.set_yticklabels(labels, fontsize=9)
-    if mod_label:
+    if title is not None or xlabel is not None:
+        ax.set_xlabel(xlabel if xlabel is not None else "Count")
+        ax.set_title(title if title is not None else "Distribution by class")
+    elif mod_label:
         _ml = str(mod_label).strip()
         ax.set_xlabel(f"Significant {_ml} sites")
         ax.set_title(f"Differential {_ml} sites by structural category")
@@ -1457,7 +1465,9 @@ def build_apa_motif_section(apa_df, top_n):
     counts = apa_df["apa_motif_class"].value_counts().to_dict()
     total = int(sum(counts.values())) or 1
     parts = []
-    fig = category_distribution_png(counts, chart_name="apa_motif_class_distribution")
+    fig = category_distribution_png(counts, chart_name="apa_motif_class_distribution",
+                                    title="APA sites by polyadenylation-signal class",
+                                    xlabel="APA sites (all detected)")
     if fig:
         parts.append(clickable_image_html(fig, "APA PAS class distribution",
                                           caption="Polyadenylation-signal class per APA site."))
@@ -1605,7 +1615,9 @@ def build_snp_mechanism_section(mech_df, top_n):
                        intro="Positional and motif-level explanation of each SNP x modification association.")
     parts = []
     counts = mech_df["positional_class"].value_counts().to_dict()
-    fig = category_distribution_png(counts, chart_name="snp_positional_class_distribution")
+    fig = category_distribution_png(counts, chart_name="snp_positional_class_distribution",
+                                    title="cis-SNP → modification pairs by positional class",
+                                    xlabel="Mod-site pairs (all tested)")
     if fig:
         parts.append(clickable_image_html(fig, "SNP positional class distribution",
                                           caption="Where each SNP sits relative to the modified base."))

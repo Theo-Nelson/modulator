@@ -45,6 +45,28 @@ def test_support_first(module):
         raise AssertionError("Observed suffix chain should remain a valid canonical.")
 
 
+def test_intron_retention_not_truncation(module):
+    """M9: a read that ALIGNS contiguously across an intron the fragmentform splices out has
+    RETAINED that intron and must not be suffix-absorbed as a clean 3' truncation."""
+    f = module.read_retains_any_intron
+    # canonical fragmentform (tx order, 1-based inclusive introns): splices (200,299) then (400,499)
+    canon = ((200, 299), (400, 499))
+    read_chain = ((400, 499),)                     # read only splices the 3'-most intron
+    omitted = canon[: len(canon) - len(read_chain)]  # -> ((200,299),)
+    # clean 3' truncation: read starts 3' of the omitted intron, never touches it
+    clean = [(300, 399), (500, 600)]
+    if f(clean, omitted):
+        raise AssertionError("Clean 3' truncation wrongly flagged as intron retention.")
+    # retention: one contiguous block (150..399) spans the omitted intron (200..299)
+    retained = [(150, 399), (500, 600)]
+    if not f(retained, omitted):
+        raise AssertionError("Intron-retention read must NOT be absorbed as a 3' truncation.")
+    # read whose 5' end lands inside the intron is a partial overlap -> conservatively allowed
+    partial = [(250, 399), (500, 600)]
+    if f(partial, omitted):
+        raise AssertionError("Partial (mid-intron start) read should not be flagged as retention.")
+
+
 def test_metagene_coloring(module):
     base = [
         {
@@ -118,6 +140,7 @@ def main():
     assembler = load_assembler_module()
     aggregate = load_aggregate_module()
     test_support_first(assembler)
+    test_intron_retention_not_truncation(assembler)
     test_metagene_coloring(assembler)
     test_aggregate_partition_mapping(aggregate)
     print("regression_smoke_checks: OK")

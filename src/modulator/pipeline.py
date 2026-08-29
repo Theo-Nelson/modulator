@@ -979,6 +979,11 @@ class ModulatorPipeline:
                 print(f"[modulator] stage: {stage}", flush=True)
             # Per-substep memory is only meaningful for the (sequential) genotype scripts.
             self._substep_mem = [] if stage == "genotype" else None
+            # M4: a stage that early-returns as a no-op because its INPUT is missing/empty leaves any
+            # OLD output on disk. The stage sets this flag so it is NOT checkpointed under the current
+            # config -- otherwise --resume would skip it forever and the manifest would claim the new
+            # parameters (e.g. min_cov=999) beside a table computed under the old ones.
+            self._stage_noop_stale = False
             t0 = time.perf_counter()
             with PeakRSSSampler(os.getpid()) as sampler:  # peak over this process's whole subtree
                 getattr(self, f"stage_{stage}")()
@@ -993,7 +998,7 @@ class ModulatorPipeline:
             # early-returned as a no-op on missing/empty input (e.g. test_diffs with an empty
             # ZN long table) must NOT be marked done, or --resume would skip it forever even
             # after the upstream input appears. Disabled/toggled-off stages report present.
-            if self._outputs_present(stage):
+            if self._outputs_present(stage) and not self._stage_noop_stale:
                 self._mark_stage_done(stage)
         if timings:
             try:
@@ -1424,6 +1429,7 @@ class ModulatorPipeline:
                     f"[modulator] skipping test_diffs because the ZN filtered long table is missing or empty: {self.paths.zn_filtered_long}",
                     flush=True,
                 )
+            self._stage_noop_stale = True  # any old diff table is stale under the current config
             return
         args = [
             "--in-tsv", str(self.paths.zn_filtered_long),
@@ -1455,6 +1461,7 @@ class ModulatorPipeline:
                     f"[modulator] skipping classify_diffs because the ZN diff results table is missing or empty: {self.paths.zn_diff_results}",
                     flush=True,
                 )
+            self._stage_noop_stale = True  # any old classification is stale under the current config
             return
         if not self.paths.out_gtf.exists():
             if self.verbose:
@@ -1462,6 +1469,7 @@ class ModulatorPipeline:
                     f"[modulator] skipping classify_diffs because the assembled GTF is missing: {self.paths.out_gtf}",
                     flush=True,
                 )
+            self._stage_noop_stale = True  # any old classification is stale under the current config
             return
         args = [
             "--diff-tsv", str(self.paths.zn_diff_results),
@@ -2090,6 +2098,9 @@ class ModulatorPipeline:
                     "--level", str(cfg.get("tail_level", "fragmentform")),
                     "--min-reads-per-sample", str(int(cfg.get("min_tail_reads_per_sample", 10))),
                     "--min-samples-per-group", min_grp,
+                    # Use the same tail-length floor as the within-condition polya stage so the two
+                    # analyses draw on the same read set (polya.min_tail, not this script's default of 1).
+                    "--min-tail", str(int(self.config.get("polya", {}).get("min_tail", 1))),
                     *common,
                 ], label=f"condition_tail_diffs:{name}")
 

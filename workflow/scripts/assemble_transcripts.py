@@ -95,6 +95,19 @@ def get_tx_strand(aln):
 def tes_pos1(aln, tx):
     return aln.reference_end if tx=="+" else aln.reference_start+1
 
+def read_retains_any_intron(exons, introns):
+    """True if any of ``introns`` (1-based inclusive genomic (donor, acceptor) spans) is fully
+    covered by a single contiguous read exon block -- i.e. the read ALIGNED across an intron the
+    candidate fragmentform splices out. Such a read RETAINED that intron and is not a clean 3'
+    truncation of the fragmentform, so it must not be suffix-absorbed into it (M9). exons are the
+    read's 1-based inclusive aligned blocks from exon_blocks_from_aln()."""
+    for (ia, ib) in introns:
+        for (bs, be) in exons:
+            if bs <= ia and ib <= be:
+                return True
+    return False
+
+
 def intron_chain_1based(aln):
     chain = []
     ref = aln.reference_start
@@ -739,10 +752,17 @@ def _process_core(core_args):
                         continue
                     if ch != canon and not allow_suffix_absorb:
                         continue
-                    if compatible:
-                        for i in idxlist:
-                            if i not in assigned:
-                                idxs.append(i)
+                    # Introns of `canon` that lie 5' (in tx order) of this read's own chain. A clean 3'
+                    # truncation never reaches them; a read that ALIGNS contiguously across one retained
+                    # it (intron retention) and is a different structure -- do NOT absorb it here, leave
+                    # it for its own chain's canon (M9). Per-read: reads sharing `ch` can differ 5'.
+                    omitted = canon[:len(canon) - len(ch)]
+                    for i in idxlist:
+                        if i in assigned:
+                            continue
+                        if omitted and read_retains_any_intron(members[i]["exons"], omitted):
+                            continue
+                        idxs.append(i)
 
                 if not idxs:
                     continue
