@@ -35,6 +35,7 @@ OUT_COLS = [
     "gene_names", "metagene_indices", "n_reads", "n_ref_reads", "n_alt_reads", "n_modified",
     "n_not_target", "test_name", "stat_name", "stat_value", "p_value", "n_strata_informative",
     "strata_heterogeneous", "strata_heterogeneity_p", "strata_heterogeneity_p_adj",
+    "ref_mod_rate_adj", "alt_mod_rate_adj", "observed_direction",
     "effect_abs_delta_mod_frac", "test_name_pooled", "p_value_pooled", "effect_pooled",
     "per_state_json", "p_adj_bh",
 ]
@@ -152,6 +153,30 @@ def _pairs_for_one_chrom(mod_path, snp_path, args):
                 # common-effect CMH averages to ~0/p~1)? p<0.05 flags it.
                 _hstat, het_p, _hdf, _ = stratum_heterogeneity(inf)
                 strata_heterogeneous = bool(np.isfinite(het_p) and het_p < 0.05)
+                # M3: sample-ADJUSTED ref/alt modified rates + observed direction, on the SAME stratified
+                # scale as p_value/effect, so the downstream mechanism table's observed_direction /
+                # direction_concordance is not read off the Simpson-confoundable POOLED per_state_json (a
+                # pair alt-higher in every sample could otherwise report alt_lower / DISCORDANT).
+                if _mode != "none" and inf:
+                    _nr = _na = _dn = 0.0
+                    for T in inf:
+                        (_rm, _ru), (_am, _au) = T
+                        _rn, _an = _rm + _ru, _am + _au
+                        if _rn <= 0 or _an <= 0:
+                            continue
+                        _w = _rn * _an / (_rn + _an)          # Mantel-Haenszel weight
+                        _nr += _w * (_rm / _rn); _na += _w * (_am / _an); _dn += _w
+                    ref_rate = _nr / _dn if _dn > 0 else float("nan")
+                    alt_rate = _na / _dn if _dn > 0 else float("nan")
+                else:
+                    ref_rate = ref_mod / n_ref if n_ref else float("nan")
+                    alt_rate = alt_mod / n_alt if n_alt else float("nan")
+                if not (np.isfinite(ref_rate) and np.isfinite(alt_rate)):
+                    obs_dir = "UNKNOWN"
+                elif abs(alt_rate - ref_rate) < 1e-9:
+                    obs_dir = "equal"
+                else:
+                    obs_dir = "alt_higher" if alt_rate > ref_rate else "alt_lower"
                 rows.append({
                     "snp_id": s, "mod_site_id": m, "chrom": chrom, "pos1": pos1,
                     "mod_start0": s0, "mod_end0": e0, "target_mod_code": code,
@@ -162,6 +187,9 @@ def _pairs_for_one_chrom(mod_path, snp_path, args):
                     "p_value": p_value, "n_strata_informative": int(n_strata),
                     "strata_heterogeneous": bool(strata_heterogeneous),
                     "strata_heterogeneity_p": round(het_p, 6) if np.isfinite(het_p) else float("nan"),
+                    "ref_mod_rate_adj": round(ref_rate, 4) if np.isfinite(ref_rate) else "",
+                    "alt_mod_rate_adj": round(alt_rate, 4) if np.isfinite(alt_rate) else "",
+                    "observed_direction": obs_dir,
                     "effect_abs_delta_mod_frac": effect,
                     "test_name_pooled": p_test_name, "p_value_pooled": p_pooled,
                     "effect_pooled": binary_rate_delta(tt),

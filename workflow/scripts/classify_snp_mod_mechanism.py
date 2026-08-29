@@ -169,17 +169,32 @@ def main():
                 artifact, ablated = "MOD_BASE_ABLATED", True   # no A on alt -> nothing to methylate
 
         # ---- Axis C: observed direction + concordance ----
+        # M3: prefer the SAMPLE-ADJUSTED rates + direction that test_snp_mod_assoc now emits (same
+        # stratified scale as p_adj_bh / effect_abs_delta_mod_frac). Deriving these from the POOLED
+        # per_state_json while the significance is stratified let a pair alt-higher in every sample read
+        # alt_lower / DISCORDANT (Simpson's paradox). Fall back to per_state_json for pre-M3 inputs.
         ref_rate = alt_rate = None
         observed = "UNKNOWN"
-        try:
-            st = json.loads(r.per_state_json)
-            rm, rn = float(st.get("ref_modified", 0)), float(st.get("ref_not_target", 0))
-            am, an = float(st.get("alt_modified", 0)), float(st.get("alt_not_target", 0))
-            if (rm + rn) > 0 and (am + an) > 0:
-                ref_rate, alt_rate = rm / (rm + rn), am / (am + an)
-                observed = "alt_lower" if alt_rate < ref_rate else ("alt_higher" if alt_rate > ref_rate else "equal")
-        except Exception:
-            pass
+        _obs_strat = str(getattr(r, "observed_direction", "") or "")
+        _rr = getattr(r, "ref_mod_rate_adj", "")
+        _ar = getattr(r, "alt_mod_rate_adj", "")
+        if _obs_strat in ("alt_lower", "alt_higher", "equal", "UNKNOWN"):
+            observed = _obs_strat
+            try:
+                ref_rate = float(_rr) if _rr != "" else None
+                alt_rate = float(_ar) if _ar != "" else None
+            except (TypeError, ValueError):
+                ref_rate = alt_rate = None
+        else:
+            try:
+                st = json.loads(r.per_state_json)
+                rm, rn = float(st.get("ref_modified", 0)), float(st.get("ref_not_target", 0))
+                am, an = float(st.get("alt_modified", 0)), float(st.get("alt_not_target", 0))
+                if (rm + rn) > 0 and (am + an) > 0:
+                    ref_rate, alt_rate = rm / (rm + rn), am / (am + an)
+                    observed = "alt_lower" if alt_rate < ref_rate else ("alt_higher" if alt_rate > ref_rate else "equal")
+            except Exception:
+                pass
         if predicted is None or observed in ("UNKNOWN", "equal"):
             concordance = "NOT_TESTABLE"
         else:
