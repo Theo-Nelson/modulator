@@ -12,7 +12,13 @@ import re
 import sys
 from pathlib import Path
 
+import numpy as np
 import pandas as pd
+
+try:
+    import diffstats   # for design_pfloor: explain an all-non-significant between-condition table
+except Exception:      # pragma: no cover - report still renders without the caveat if unavailable
+    diffstats = None
 
 
 # Display names for modkit/dorado modification codes (ChEBI ids -> friendly names).
@@ -1382,6 +1388,34 @@ def build_between_conditions_section(bc_dir, top_n, top_note=""):
                             "FDR<0.05 & above threshold": int(((padj < 0.05) & (e >= thr)).sum())})
             sig = df[(padj < 0.05)].copy()
             block_parts = []
+            # p-floor caveat: the beta-binomial between-condition tests (everything except tail_diffs,
+            # which is Welch) have a minimum achievable p set by the replicate count alone. When nothing
+            # is significant, say whether that is a DESIGN limit rather than absence of biology, so an
+            # empty result is not misread as "no effect".
+            if (suffix != "tail_diffs" and diffstats is not None and not df.empty
+                    and int((padj < 0.05).sum()) == 0
+                    and {"n_reference", "n_test"} <= set(df.columns)):
+                try:
+                    _nr = pd.to_numeric(df["n_reference"], errors="coerce").dropna()
+                    _nt = pd.to_numeric(df["n_test"], errors="coerce").dropna()
+                    nref = int(_nr.mode().iloc[0]); ntest = int(_nt.mode().iloc[0])
+                    floor = diffstats.design_pfloor(nref, ntest)
+                    m = len(df)
+                    if np.isfinite(floor):
+                        if floor > 0.05:
+                            why = (f"the minimum achievable p at {nref} vs {ntest} replicates is "
+                                   f"{floor:.3g} &gt; 0.05, so <b>no</b> feature can reach FDR&lt;0.05 at this design")
+                        else:
+                            need = int(np.ceil(floor * m / 0.05))
+                            why = (f"the minimum achievable p at {nref} vs {ntest} replicates is {floor:.3g}; "
+                                   f"across {m:,} tests, BH-FDR&lt;0.05 needs &ge; {need:,} features at that "
+                                   f"floor simultaneously")
+                        block_parts.append(
+                            f"<p class='muted'><b>No significant {html.escape(title.lower())}.</b> This can be a "
+                            f"replicate-count limit rather than absence of biology: {why}. More replicates per "
+                            f"condition lower the floor.</p>")
+                except Exception:
+                    pass
             if not sig.empty:
                 sig["_e"] = pd.to_numeric(sig[eff], errors="coerce").abs()
                 sig = sig.sort_values("_e", ascending=False).drop(columns="_e")
