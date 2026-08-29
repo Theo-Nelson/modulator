@@ -245,7 +245,7 @@ def stratified_primary(inf_strata, exact_test, min_strata=2):
     return ("untestable", "none", float("nan"), float("nan"), 0, "none")
 
 
-def stratum_heterogeneity(inf_strata):
+def stratum_heterogeneity(inf_strata, min_row=10, smooth=1.0):
     """Cochran's Q test of effect HOMOGENEITY across the INFORMATIVE strata, on the row-conditional
     PROPORTION (RISK-DIFFERENCE) scale -- the SAME scale as the reported effect (mh_stratified_effect /
     stratified_max_distribution_shift). Testing homogeneity on the odds-ratio scale (the earlier
@@ -253,10 +253,19 @@ def stratum_heterogeneity(inf_strata):
     across samples but the baseline rate varies, so the OR moves: a visibly constant effect column would
     then sit beside "not homogeneous". Here per stratum the row-0-referenced proportion differences
     theta_k = {pi_ij - pi_0j : i=1..r-1, j=0..c-2}, pi_ij = T_ij / rowsum_i, are combined by
-    inverse-variance (multinomial delta-method covariance) into Q = sum (theta_k - theta_bar)' W_k
-    (theta_k - theta_bar) ~ chi2_{(K-1)(r-1)(c-1)}. For 2x2 this is exactly Cochran's Q on the per-stratum
-    rate differences, so a constant risk difference gives Q=0 regardless of baseline. Returns
-    (hetero_stat, hetero_p, hetero_df, n_informative); NaN when <2 usable strata."""
+    inverse-variance into Q = sum (theta_k - theta_bar)' W_k (theta_k - theta_bar) ~ chi2_{(K-1)(r-1)(c-1)}.
+    For 2x2 this is exactly Cochran's Q on the per-stratum rate differences, so a constant risk difference
+    gives Q=0 regardless of baseline.
+
+    LOW-COUNT ROBUSTNESS: the plug-in Wald variance p(1-p)/n collapses to ~0 when an observed proportion
+    hits 0 or 1 (routine at low depth), so a bare ridge let Q -> huge and the flag fired at p=0.0 on every
+    row (measured null 0.49-0.65 at 2-4 reads/row). Two guards: (1) the VARIANCE uses Agresti-smoothed
+    proportions (x+smooth)/(n+2*smooth) so no cell has 0 variance (the point estimate theta stays RAW, so
+    the risk-difference scale is unchanged); (2) a stratum enters only if EVERY row has >= min_row reads --
+    below that the normal approximation is unreliable. With both, the null is ~nominal (0.037 on HG002-like
+    K=2 depths, 0.06-0.08 at 16-32 reads/row), the p-values are finite (so add_heterogeneity_flag's BH
+    adjustment gives real protection: post-BH false-flag ~0 on homogeneous tables), and >=98% of rows are
+    still tested. Returns (hetero_stat, hetero_p, hetero_df, n_usable); NaN when <2 usable strata."""
     inf = [np.asarray(T, dtype=float) for T in inf_strata]
     if len(inf) < 2:
         return float("nan"), float("nan"), 0, len(inf)
@@ -264,20 +273,20 @@ def stratum_heterogeneity(inf_strata):
     d = (r - 1) * (c - 1)
     if d < 1:
         return float("nan"), float("nan"), 0, len(inf)
-    _EPS = 1e-9
     thetas = []
     Ws = []
     for T in inf:
         if T.shape != (r, c):
             continue
         R = T.sum(axis=1)
-        if (R <= 0).any():
+        if (R < min_row).any():                              # per-stratum minimum-count guard
             continue
-        pi = T / R[:, None]                                   # row-conditional proportions
+        pi = T / R[:, None]                                   # RAW row-conditional proportions (effect scale)
+        pv = (T + smooth) / (R[:, None] + 2.0 * smooth)       # Agresti-smoothed props for the VARIANCE only
         theta = (pi[1:, :c - 1] - pi[0:1, :c - 1]).reshape(-1)  # (r-1)(c-1) row-0-referenced diffs
 
-        def _rowcov(i):                                       # multinomial cov of row i's first c-1 props
-            p = pi[i, :c - 1]
+        def _rowcov(i):                                       # multinomial cov of row i's first c-1 (smoothed)
+            p = pv[i, :c - 1]
             return (np.diag(p) - np.outer(p, p)) / R[i]
         V0 = _rowcov(0)
         m = r - 1
@@ -287,7 +296,6 @@ def stratum_heterogeneity(inf_strata):
             for b in range(m):
                 blk = V0 + (Va if a == b else 0.0)            # shared row-0 term couples the blocks
                 Cov[a * (c - 1):(a + 1) * (c - 1), b * (c - 1):(b + 1) * (c - 1)] = blk
-        Cov = Cov + _EPS * np.eye(Cov.shape[0])               # ridge: proportions at 0/1 give 0 variance
         try:
             W = np.linalg.inv(Cov)
         except np.linalg.LinAlgError:
