@@ -496,9 +496,17 @@ def extract_rows_pysam(bam, chrom_lookup, chrom, shard_path, chunk_rows, verbose
                 if site_strand and ref_strand and ref_strand not in {".", "?"} and site_strand != ref_strand:
                     continue
                 target_mod = str(site["mod_code"])
-                # base-mismatch guard (parity with the modkit path): the read's base at this site cannot
-                # carry target_mod -> it is a variant, not a usable unmodified observation. Skip it.
-                if _base_mismatch(target_mod, base):
+                # BLOCKER-5: emit a row for target_mod ONLY if the read actually ASSESSED target_mod at
+                # this position -- either it LISTED target_mod here (target_mod in mods), or it declared an
+                # IMPLICIT group for target_mod on this base (so an unlisted position is a real canonical
+                # observation, mm_groups[(base,target_mod)] is True). A read that declared only A+a. must
+                # NOT get a fabricated 17596 "canonical" row at an A it never assessed for inosine -- the
+                # implicit pass already rejects that per (base,code), and the listed pass was guarding only
+                # with the 11-entry _base_mismatch allowlist, fabricating unmodified observations for every
+                # sibling code that shares the base (a/17596/69426, m/19228, 17802/19227). This subsumes
+                # _base_mismatch (a declared group implies the base carries the mod); an explicit-but-
+                # unlisted or entirely-undeclared mod gets no call.
+                if target_mod not in mods and not mm_groups.get((base.upper(), target_mod), False):
                     continue
                 if call_code == target_mod:
                     state_detail = "modified"
