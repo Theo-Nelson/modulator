@@ -86,9 +86,24 @@ def main():
     feat_col = "ZT" if args.level == "fragmentform" else "gene_name"
     df = df[df[feat_col].astype(str).ne("")]
 
-    # One summary per (feature, replicate): the median tail. The replicate is the unit of analysis.
-    per = df.groupby([feat_col, "sample"], sort=False)["tail_len"].agg(["median", "size"]).reset_index()
-    per = per[per["size"] >= args.min_reads_per_sample]
+    # One summary per (feature, replicate); the replicate is the unit of analysis.
+    if args.level == "fragmentform":
+        per = df.groupby([feat_col, "sample"], sort=False)["tail_len"].agg(["median", "size"]).reset_index()
+        per = per[per["size"] >= args.min_reads_per_sample]
+    else:
+        # GENE level: a replicate's summary is the mean of its per-FRAGMENTFORM median tails (each
+        # fragmentform weighted EQUALLY), NOT the pooled-read median. Pooling reads weights each
+        # fragmentform by its usage, so a condition-linked isoform-usage shift moves the gene median even
+        # when no isoform's tail changes -- reporting e.g. -35.5 nt "significant" on a gene whose isoforms
+        # are individually flat. The fragmentform-averaged summary is usage-invariant: a pure usage shift
+        # leaves each fragmentform's own median unchanged, so the gene delta is ~0; a real gene-wide tail
+        # shift (all isoforms move) is preserved. Only fragmentforms with >= min_reads in a replicate
+        # count toward that replicate's mean.
+        _dff = df[df["ZT"].astype(str).ne("")] if "ZT" in df.columns else df.iloc[0:0]
+        ff = _dff.groupby(["gene_name", "ZT", "sample"], sort=False)["tail_len"].agg(["median", "size"]).reset_index()
+        ff = ff[ff["size"] >= args.min_reads_per_sample]
+        per = (ff.groupby(["gene_name", "sample"], sort=False)
+                 .agg(median=("median", "mean"), size=("size", "sum")).reset_index())
     gene_of = (df.groupby(feat_col, sort=False)["gene_name"].first()
                if "gene_name" in df.columns and args.level == "fragmentform" else None)
 
