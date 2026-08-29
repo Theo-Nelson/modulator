@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import glob
 import os
+import shutil
 import sys
 import time
 from dataclasses import dataclass
@@ -1297,6 +1298,15 @@ class ModulatorPipeline:
         modkit_cfg = self.config.get("modkit", {})
         common = modkit_cfg.get("common", {})
         output_dir = self.paths.modkit_dir(which, sample)
+        # Clean the sample's per-ZN output dir before modkit writes into it. modkit pileup emits one
+        # <N>.bed per ZN value present in THIS run's BAM but does NOT remove beds a PRIOR run left, so a
+        # re-run after e.g. a changed assembler.min_reads (different ZN partition set) would leave stale
+        # <N>.bed files that aggregate_zn then sums in as phantom partitions. This only runs when the
+        # modkit stage actually executes (a --resume with unchanged config skips the stage entirely, so
+        # current outputs are untouched); a REMOVED sample's dir is never visited here and is instead
+        # filtered out at aggregation by the --samples list.
+        if output_dir.exists():
+            shutil.rmtree(output_dir, ignore_errors=True)
         output_dir.mkdir(parents=True, exist_ok=True)
         input_bam = self._modkit_input_bam(sample)
         self._require_existing_file(input_bam, f"modkit input BAM for sample {sample}")
@@ -1363,6 +1373,10 @@ class ModulatorPipeline:
             _nfk_spec = str(float(_nfk))
         args = [
             "--modkit-dir", str(self.paths.modkit_zn),
+            # Restrict aggregation to the CURRENT sample set: modkit_zn/ is never wiped wholesale, so a
+            # sample dropped from the samplesheet leaves its per-ZN beds on disk and the tree-walking
+            # aggregator would otherwise sum a removed sample's partitions into the new run's results.
+            "--samples", ",".join(self.samples),
             "--gtf", str(self.paths.out_gtf),
             "--out-prefix", str(out_prefix),
             "--min-cov", str(self.config.get("min_cov", 5)),

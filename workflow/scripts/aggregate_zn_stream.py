@@ -257,6 +257,11 @@ def _concat(parts, out_path, header=None):
 def parse_args():
     ap = argparse.ArgumentParser(description="Streaming ZN aggregator (merge pre-sorted, tabix-indexed beds).")
     ap.add_argument("--modkit-dir", required=True)
+    ap.add_argument("--samples", default="",
+                    help="Comma-separated CURRENT sample names. When given, only these samples' per-ZN "
+                         "beds are aggregated -- a sample dropped from the samplesheet leaves its beds on "
+                         "disk (modkit_zn/ is never wiped wholesale), and without this filter they would "
+                         "be summed into the new run's results.")
     ap.add_argument("--gtf", required=True)
     ap.add_argument("--out-prefix", required=True)
     ap.add_argument("--min-cov", type=int, default=0)
@@ -304,8 +309,17 @@ def main():
     agg.ensure_dir(workdir)
 
     beds = agg.iter_numbered_beds(args.modkit_dir)
+    if args.samples:
+        want = {s for s in args.samples.split(",") if s}
+        n_before = len(beds)
+        beds = [b for b in beds if b[1] in want]          # b = (root, sample_name, path, zn)
+        dropped = n_before - len(beds)
+        if dropped and args.verbose:
+            print(f"[stream] --samples filter: kept {len(beds)}/{n_before} beds "
+                  f"({dropped} from samples not in the current samplesheet)", file=sys.stderr, flush=True)
     if not beds:
-        raise SystemExit(f"No numbered ZN beds under {args.modkit_dir}")
+        raise SystemExit(f"No numbered ZN beds under {args.modkit_dir}"
+                         + (f" for samples {args.samples}" if args.samples else ""))
     chroms = _chroms_from_beds(beds)
     if args.verbose:
         print(f"[stream] {len(beds)} beds, {len(chroms)} chromosomes, jobs={args.jobs}", file=sys.stderr, flush=True)
