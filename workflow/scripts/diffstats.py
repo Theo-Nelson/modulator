@@ -269,37 +269,6 @@ def beta_binomial_diff(sites, prior_weight=20.0, min_group_samples=2, ref_df=REF
     return out
 
 
-_PFLOOR_CACHE = {}
-
-
-def design_pfloor(n_ref, n_test, ref_df=REF_DF, prior_weight=20.0, coverage=10000):
-    """Minimum achievable p-value of beta_binomial_diff at a given replicate design -- the STRUCTURAL
-    ceiling on significance set by the replicate count alone, independent of the data.
-
-    Computed from the maximum conceivable effect (0% modified in every reference replicate, 100% in
-    every test replicate) at saturating coverage. This is why a between-condition table can be all-
-    non-significant purely because of small n per group: e.g. ~0.035 at 2v2, ~0.0066 at 4v4, ~0.0007
-    at 8v8. Under Benjamini-Hochberg a p-floor F only yields a rejection when a fraction >= F/alpha of
-    the whole family sits AT the floor, so at 2v2 (F~0.035, alpha 0.05) ~71% of tests must be
-    maximum-effect before ANY call is made. Returns NaN if the design is below the minimum group size.
-    """
-    key = (int(n_ref), int(n_test), int(ref_df), float(prior_weight), int(coverage))
-    if key in _PFLOOR_CACHE:
-        return _PFLOOR_CACHE[key]
-    nr, nt = int(n_ref), int(n_test)
-    if nr < 2 or nt < 2:
-        _PFLOOR_CACHE[key] = float("nan")
-        return float("nan")
-    k = np.array([0.0] * nr + [float(coverage)] * nt, dtype=float)
-    n = np.array([float(coverage)] * (nr + nt), dtype=float)
-    gidx = np.array([0] * nr + [1] * nt, dtype=int)
-    res = beta_binomial_diff([("floor", k, n, gidx)], prior_weight=prior_weight,
-                             min_group_samples=2, ref_df=ref_df, calibrate=False)
-    val = float(res[0]["p_value"]) if res else float("nan")
-    _PFLOOR_CACHE[key] = val
-    return val
-
-
 def continuous_diff(values_a, values_b):
     """Between-condition test for a continuous per-sample summary (e.g. median poly(A) tail).
 

@@ -179,28 +179,9 @@ def main():
     out = out[OUT_COLS].reset_index(drop=True)
     os.makedirs(os.path.dirname(args.out_tsv) or ".", exist_ok=True)
     out.to_csv(args.out_tsv, sep="\t", index=False)
-    sig = int((out["p_adj_bh"] < 0.05).sum())
-    m = len(out)
-    # Structural p-floor of the design (see diffstats.design_pfloor): the beta-binomial engine cannot
-    # return a p below this at the given replicate count. An all-non-significant table can be a DESIGN
-    # limit, not absence of biology -- surface it rather than let it read as "no effect".
-    floor = diffstats.design_pfloor(len(ref_in), len(test_in), ref_df=args.ref_df)
     if args.verbose:
-        fl = f"{floor:.4g}" if np.isfinite(floor) else "n/a"
-        print(f"[condition_usage:{args.feature}] {name}: {m:,} tested, {sig:,} at FDR<0.05 "
-              f"(design p-floor at {len(ref_in)}v{len(test_in)} replicates = {fl}) -> {args.out_tsv}", flush=True)
-    if sig == 0 and m > 0 and np.isfinite(floor):
-        alpha = 0.05
-        if floor > alpha:
-            reason = (f"the minimum achievable p at {len(ref_in)}v{len(test_in)} replicates is {floor:.4g} > {alpha}: "
-                      f"NO feature can reach significance at this design")
-        else:
-            need = int(np.ceil(floor * m / alpha))
-            reason = (f"the minimum achievable p at {len(ref_in)}v{len(test_in)} replicates is {floor:.4g}; across "
-                      f"{m:,} tests, BH-FDR<{alpha} needs >= {need:,} features at that floor simultaneously")
-        print(f"[condition_usage:{args.feature}] WARNING {name}: 0 features significant -- a DESIGN limit, not "
-              f"necessarily absence of biology: {reason}. Add replicates per group to lower the floor.",
-              file=sys.stderr, flush=True)
+        print(f"[condition_usage:{args.feature}] {name}: {len(out):,} tested, "
+              f"{int((out['p_adj_bh'] < 0.05).sum()):,} at FDR<0.05 -> {args.out_tsv}", flush=True)
 
 
 if __name__ == "__main__":

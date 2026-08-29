@@ -193,29 +193,9 @@ def main():
     out = out[out_cols].reset_index(drop=True)
     os.makedirs(os.path.dirname(args.out_tsv) or ".", exist_ok=True)
     out.to_csv(args.out_tsv, sep="\t", index=False)
-    sig = int((out["p_adj_bh"] < 0.05).sum())
-    m = len(out)
-    # Structural p-floor of the design: the beta-binomial test cannot return a p below this at the
-    # given replicate count, no matter how large the effect. An all-non-significant table can be a
-    # DESIGN limit (too few replicates), not absence of biology -- surface it so the user is not left
-    # reading an empty result as "no effect".
-    floor = diffstats.design_pfloor(len(ref_s), len(test_s), ref_df=args.ref_df)
     if args.verbose:
-        fl = f"{floor:.4g}" if np.isfinite(floor) else "n/a"
-        print(f"[condition_mod] {name}: {m:,} sites tested, {sig:,} at FDR<0.05 "
-              f"(design p-floor at {len(ref_s)}v{len(test_s)} replicates = {fl}) -> {args.out_tsv}", flush=True)
-    if sig == 0 and m > 0 and np.isfinite(floor):
-        alpha = 0.05
-        if floor > alpha:
-            reason = (f"the minimum achievable p at {len(ref_s)}v{len(test_s)} replicates is {floor:.4g} > {alpha}: "
-                      f"NO site can reach significance at this design")
-        else:
-            need = int(np.ceil(floor * m / alpha))
-            reason = (f"the minimum achievable p at {len(ref_s)}v{len(test_s)} replicates is {floor:.4g}; across "
-                      f"{m:,} tests, BH-FDR<{alpha} needs >= {need:,} sites at that floor simultaneously")
-        print(f"[condition_mod] WARNING {name}: 0 sites significant -- a DESIGN limit, not necessarily "
-              f"absence of biology: {reason}. Add replicates per group to lower the floor.",
-              file=sys.stderr, flush=True)
+        sig = int((out["p_adj_bh"] < 0.05).sum())
+        print(f"[condition_mod] {name}: {len(out):,} sites tested, {sig:,} at FDR<0.05 -> {args.out_tsv}", flush=True)
 
 
 if __name__ == "__main__":
