@@ -46,7 +46,7 @@ RESULT_COLS = [
     "gene_name", "mod_code", "chrom", "start0", "end0", "strand",
     "n_tx_tested", "test_name", "stat_name", "stat_value", "p_value",
     "n_strata_informative", "strata_heterogeneous", "strata_heterogeneity_p", "strata_heterogeneity_p_adj",
-    "effect_max_abs_frac_diff", "test_name_pooled", "p_value_pooled", "effect_max_abs_frac_diff_pooled",
+    "effect_max_abs_frac_diff", "test_name_pooled", "stat_value_pooled", "p_value_pooled", "effect_max_abs_frac_diff_pooled",
     "per_transcript_json", "p_adj_bh",
 ]
 
@@ -563,6 +563,7 @@ def main():
             "strata_heterogeneity_p": res["strata_heterogeneity_p"],
             "effect_max_abs_frac_diff": res["effect_max_abs_frac_diff"],
             "test_name_pooled": res["test_name_pooled"],
+            "stat_value_pooled": res["stat_value_pooled"],
             "p_value_pooled": res["p_value_pooled"],
             "effect_max_abs_frac_diff_pooled": res["effect_max_abs_frac_diff_pooled"],
             "per_transcript_json": json.dumps(res["per_transcript"], separators=(",", ":")),

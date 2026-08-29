@@ -30,52 +30,31 @@ POSITION STATUS of a genomic site within one isoform:
   intronic         - within the transcript span but spliced out (a gap)
   absent           - outside [first_exon_start, last_exon_end]
 
-CATEGORIES (keyed on the HIGH-m6A isoform's architecture, the site's status in
-the ANCHOR (longest) isoform, the hi/lo APA direction, and distance to the
-nearest spliced junction, EJC_NT=150):
+CLASSIFICATION is a 3-level taxonomy (``classify_tree``), emitted as three columns
+(bucket, event, direction) plus their join ``class_key = bucket__event__direction``.
+It is keyed on the site's model status in the HIGH- vs LOW-stoichiometry fragmentforms
+(exonic-internal / exonic-terminal / intronic / absent), the local 3' geometry, and
+distance to the nearest spliced junction (EJC_NT). Buckets and their events:
 
- -- A is PRIVATE to the high isoform (not in the long mature transcript) --
-  IPA_UNIQUE              hi = IPA isoform; site exonic_TERMINAL in hi but
-                          intronic/absent in the anchor -> the A only exists in
-                          the mature IPA transcript (intron-derived terminal
-                          exon). IPA-private; cleavage-dependent.
-  SPLICED_EXON_UNIQUE     A in an internal/cassette exon present in hi but spliced
-                          out (intronic) / absent in the anchor or low comparator.
-  LAST_EXON_DISTAL_ONLY   A is in the anchor but the low (proximal) isoform's TES
-                          is upstream of it -> distal-3'UTR-private A.
+  PRIVATE        the base is intronic/absent in the low fragmentform's model (present
+                 only in the high one): SKIPPED_EXON, INTRONIC_POLYA,
+                 THREE_PRIME_EXTENSION, ALT_LAST_EXON.
+  SHARED_LOCAL   the base is exonic in both, with a LOCAL splice/APA difference:
+                 ALT_DONOR, ALT_ACCEPTOR, ALT_EXON, ALT_POLYA_SITE, RETAINED_INTRON,
+                 IPA_EXTENSION, IPA_NO_EXTENSION.
+  SHARED_DISTAL  exonic in both, difference is DISTAL to the base (a different 3' end
+                 or a splicing difference elsewhere): DISTAL_APA, DISTAL_SPLICING.
+  UNEXPLAINABLE  no confident structural call: FIVE_PRIME_UNCERTAIN (5' blind spot),
+                 INTRON_READ_ARTIFACT, NO_MODEL, UNRESOLVED.
 
- -- A is SHARED (exonic in hi, lo and anchor); terminalization / EJC --
-  IPA_SHARED_EJC          hi = IPA; A exonic_TERMINAL in hi but exonic_INTERNAL in
-                          the long anchor -> same A in both mature RNAs, gains m6A
-                          in IPA because the downstream EJC is gone (cleavage-dep).
-  SPLICING_EJC            shared A, non-IPA: terminalized, or a junction within
-                          EJC_NT in the low/anchor is removed in hi -> EJC relief.
-
- -- A SHARED in the SAME terminal exon; tandem 3'UTR APA (no cleavage diff) --
-  LAST_EXON_PROXIMAL_APA_FAVORED  same last exon (same acceptor), different TES,
-                          PROXIMAL (shorter 3'UTR) isoform carries more m6A.
-  LAST_EXON_DISTAL_APA_FAVORED    same geometry; DISTAL (longer 3'UTR) favored.
-
- -- A SHARED via an ALTERNATIVE / SEPARATE terminal exon --
-  ALTERNATIVE_LAST_EXON   hi & lo terminal at the site but their terminal exons
-                          start at DIFFERENT (but nearby/overlapping) acceptors.
-
- -- A SHARED with NO local 3' structural difference --
-  SHARED_TERMINAL_EXON    hi & lo share the SAME terminal exon AND the SAME 3'
-                          cleavage (TES); m6A tracks isoform identity, not APA/EJC.
-  SHARED_INTERNAL_EXON    site in a constitutive INTERNAL exon, no junction
-                          asymmetry -> not attributable to 3' architecture.
-
- -- leftover / artifact --
-  UNEXPLAINED_SHARED      rare residual (terminal in hi, internal in lo, no nearby
-                          differential junction).
-  HI_INTRONIC_ARTIFACT    the high-m6A isoform does NOT structurally contain the A
-                          (intronic/absent) -> the "high" stoich is intron-read
-                          noise (NOT a real isoform-specific site).
+``direction`` is the 3'UTR-length polarity of the more-modified fragmentform
+(PROXIMAL_HIGHER / DISTAL_HIGHER / CO_TERMINAL, or a context alias). A separate
+coverage-independent PRIVATE scan (``scan_private_sites``) adds PRIVATE calls the
+differential test never reaches (bases absent from a fragmentform are never tested).
 
 OUTPUT: ``{prefix}__ZN_site_classified.tsv`` = the diff rows that pass the
-significance + effect gate, augmented with hi/lo isoform identity & architecture,
-the site's status in hi/lo/anchor, junction distances, and the category.
+significance + effect gate, augmented with hi/lo fragmentform identity & architecture,
+the site's status in each fragmentform, junction distances, and bucket/event/direction.
 """
 from __future__ import annotations
 
@@ -299,16 +278,6 @@ def _alt_last_dir(hi_tes, lo_tes, strand):
 # modified (direction), how large the gap is (tier), and whether the favored form is itself
 # high- or low-stoichiometry (level). This answers "split by high/low stoichiometry" without
 # multiplying the primary label.
-STRUCTURAL_OF = {
-    'IPA_UNIQUE': 'INTRONIC_POLYADENYLATION', 'IPA_SHARED_EJC': 'INTRONIC_POLYADENYLATION',
-    'SPLICING_EJC': 'EJC_SPLICING', 'SPLICED_EXON_UNIQUE': 'CASSETTE_EXON',
-    'LAST_EXON_PROXIMAL_APA_FAVORED': 'TANDEM_APA', 'LAST_EXON_DISTAL_APA_FAVORED': 'TANDEM_APA',
-    'LAST_EXON_DISTAL_ONLY': 'TANDEM_APA', 'ALTERNATIVE_LAST_EXON': 'ALTERNATIVE_LAST_EXON',
-    'SHARED_TERMINAL_EXON': 'SHARED_TERMINAL_EXON', 'SHARED_INTERNAL_EXON': 'SHARED_INTERNAL_EXON',
-    'UNEXPLAINED_SHARED': 'UNEXPLAINED', 'HI_INTRONIC_ARTIFACT': 'ARTIFACT', 'UNCLASSIFIED': 'UNCLASSIFIED',
-}
-
-
 def stoich_tier(delta):
     d = abs(delta)
     return ('T1_MARGINAL' if d < 0.25 else 'T2_MODERATE' if d < 0.50
@@ -319,37 +288,6 @@ def hi_stoich_level(f):
     """Absolute modification level of the favored (higher) fragmentform -- the 'is the alt last
     exon itself high- or low-stoichiometry' axis."""
     return 'HI_HYPER' if f >= 0.66 else 'HI_INTERMED' if f >= 0.33 else 'HI_HYPO'
-
-
-def stoich_direction(gene, hiZN, loZN, iso, cat, tes_tol):
-    """(direction, context-aware alias). Direction is the universal 3'UTR-length polarity of the
-    MORE-modified fragmentform; the alias renames it per structural mechanism."""
-    ihi = iso.get((gene, hiZN)); ilo = iso.get((gene, loZN))
-    if ihi is None or ilo is None:
-        return '', ''
-    ht, lt = ihi['tes'], ilo['tes']
-    if ht is None or lt is None or abs(ht - lt) <= tes_tol:
-        base = 'CO_TERMINAL'
-    elif is_proximal(ht, lt, ihi['strand']):
-        base = 'PROXIMAL_HIGHER'          # shorter-3'UTR fragmentform carries more modification
-    else:
-        base = 'DISTAL_HIGHER'            # longer-3'UTR fragmentform carries more modification
-    if cat in ('IPA_UNIQUE', 'IPA_SHARED_EJC'):
-        ctx = 'IPA_FORM_HIGHER' if ihi['arch'] == 'IPA' else 'FULLLENGTH_HIGHER'
-    elif cat == 'SPLICED_EXON_UNIQUE':
-        ctx = 'INCLUDED_ISOFORM_HIGHER'   # hi structurally must contain the base
-    elif cat == 'SPLICING_EJC':
-        ctx = 'EJC_REMOVED_HIGHER'
-    else:
-        ctx = base
-    return base, ctx
-
-
-def make_class_key(structural_category, stoich_direction):
-    """The single primary classification key = mechanism + which fragmentform is more modified,
-    e.g. TANDEM_APA__PROXIMAL_HIGHER. This REPLACES the old fused 14-label `category`. Rows with no
-    direction (UNCLASSIFIED, or missing isoform models) key on structural_category alone."""
-    return f"{structural_category}__{stoich_direction}" if stoich_direction else structural_category
 
 
 def same_last_exon_start(th, tl, strand, tol):
@@ -592,16 +530,6 @@ def classify_tree(gene, pos, hiZN, loZN, iso, *, tes_tol, ejc_nt):
     if ht is not None and lt is not None and abs(ht - lt) > tes_tol:
         return 'SHARED_DISTAL', 'DISTAL_APA', polar, info
     return 'SHARED_DISTAL', 'DISTAL_SPLICING', 'SAME_3PRIME_END', info
-
-
-CATEGORY_ORDER = [
-    'IPA_UNIQUE', 'SPLICED_EXON_UNIQUE', 'LAST_EXON_DISTAL_ONLY',
-    'IPA_SHARED_EJC', 'SPLICING_EJC',
-    'LAST_EXON_PROXIMAL_APA_FAVORED', 'LAST_EXON_DISTAL_APA_FAVORED',
-    'ALTERNATIVE_LAST_EXON',
-    'SHARED_TERMINAL_EXON', 'SHARED_INTERNAL_EXON',
-    'UNEXPLAINED_SHARED', 'HI_INTRONIC_ARTIFACT', 'UNCLASSIFIED',
-]
 
 
 def scan_private_sites(zn_long_path, iso, genes, *, min_frac, min_cov, tes_tol=25):

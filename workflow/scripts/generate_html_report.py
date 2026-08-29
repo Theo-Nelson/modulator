@@ -155,7 +155,7 @@ COLUMN_DEFINITIONS = {
     "max_median_tail": "Largest per-fragmentform median tail length (nt) among the gene's fragmentforms.",
     "effect_median_range_nt": "Spread (nt) of per-fragmentform median tail lengths within a gene — how differently its isoforms are tailed.",
     "effect_median_diff_nt": "Median tail of modified reads minus unmodified reads at a site (negative = modification associates with shorter tails).",
-    "test_name": "Statistical test used: Mann-Whitney U (2 groups) or Kruskal-Wallis (>2 groups).",
+    "test_name": "Statistical test used: the sample-stratified van Elteren test (stratified Wilcoxon / Kruskal-Wallis). The sample-pooled Mann-Whitney U / Kruskal-Wallis statistic is retained separately as test_name_pooled / p_value_pooled.",
     "median_tail_modified": "Median tail length (nt) of reads modified at the target site.",
     "median_tail_unmodified": "Median tail length (nt) of reads unmodified at the target site.",
     "per_fragmentform_json": "Per-fragmentform (ZN) breakdown {ZN: {n_mod, n_unmod, median_tail_mod, median_tail_unmod, delta_nt}} — the modified-vs-unmodified tail comparison WITHIN each fragmentform, so a pooled shift can be told apart from the modification tracking a differently-tailed fragmentform. Visualized as the right panel of each per-site figure.",
@@ -768,18 +768,16 @@ def _save_report_chart(fig, name):
             pass
 
 
-def category_distribution_png(counts, mod_label=None, chart_name="site_classification_distribution",
+def category_distribution_png(counts, chart_name="site_classification_distribution",
                               title=None, xlabel=None):
     """Horizontal bar chart of classified-site counts per category. Returns a
-    base64 data URI (or "" if matplotlib/data unavailable). ``mod_label`` names the
-    modification in the title/axis (e.g. "m6A"); None -> generic wording. ``chart_name`` is the
+    base64 data URI (or "" if matplotlib/data unavailable). ``chart_name`` is the
     on-disk export stem -- distinct per caller so the three distributions that reuse this helper
     (structural buckets, per-category classes, SNP positional classes) don't overwrite one file
     (R1/R2: the exported PNG/PDF/SVG collided even though each inline HTML copy was correct).
-    ``title``/``xlabel`` override the wording per caller: the SNP-positional and APA-motif
-    distributions count ALL tested items (not just significant ones) and are not structural
-    categories, so they must not inherit the default "Differential ... by structural category" /
-    "Significant sites" labels (M7)."""
+    Every caller passes its own ``title``/``xlabel``: these distributions count different things
+    (structural buckets vs ALL tested SNP-positional/APA items, not just significant ones), so a
+    shared default title/axis would mislabel two of the three charts (M7)."""
     if not counts:
         return ""
     try:
@@ -799,16 +797,8 @@ def category_distribution_png(counts, mod_label=None, chart_name="site_classific
     bars = ax.barh(list(ypos), values, color="#c98a5e", edgecolor="#7d3c1f", linewidth=0.9)
     ax.set_yticks(list(ypos))
     ax.set_yticklabels(labels, fontsize=9)
-    if title is not None or xlabel is not None:
-        ax.set_xlabel(xlabel if xlabel is not None else "Count")
-        ax.set_title(title if title is not None else "Distribution by class")
-    elif mod_label:
-        _ml = str(mod_label).strip()
-        ax.set_xlabel(f"Significant {_ml} sites")
-        ax.set_title(f"Differential {_ml} sites by structural category")
-    else:
-        ax.set_xlabel("Significant sites")
-        ax.set_title("Differential modification sites by structural category")
+    ax.set_xlabel(xlabel if xlabel is not None else "Sites")
+    ax.set_title(title if title is not None else "Distribution by class")
     pad = max(values) * 0.01 if values else 0.1
     for rect, val in zip(bars, values):
         ax.text(rect.get_width() + pad, rect.get_y() + rect.get_height() / 2.0,
@@ -1398,7 +1388,7 @@ def build_between_conditions_section(bc_dir, top_n, top_note=""):
                 block_parts.append(df_to_html(sig[[c for c in cols if c in sig.columns]], max_rows=top_n))
             # top-10-by-effect figure with per-replicate spread (the whole df, so a figure always shows)
             is_frac = (eff != "delta_nt")
-            xlabel = ("modified fraction per replicate" if suffix == "mod_diffs" else
+            xlabel = ("modified fraction per replicate" if suffix.startswith("mod_diffs") else
                       "median poly(A) tail per replicate (nt)" if suffix == "tail_diffs" else
                       "usage fraction per replicate")
             fig = between_cond_topn_png(df, eff, f"{title} — top {top_n} by effect size", xlabel,
@@ -1558,7 +1548,7 @@ def build_sequence_elements_section(se_df, summ_df, top_n):
         "<ul>"
         f"<li><b>{n_inst:,}</b> element instances across <b>{se_df['element_type'].nunique()}</b> element types</li>"
         f"<li><b>{len(with_mod):,}</b> carry ≥1 modification — mod codes seen: "
-        f"<code>{', '.join(codes) if codes else '—'}</code> (no code is filtered out)</li>"
+        f"<code>{', '.join(html.escape(c) for c in codes) if codes else '—'}</code> (no code is filtered out)</li>"
         "</ul>"
     )
     # per element-type summary (prefer the precomputed summary table)
@@ -1789,7 +1779,7 @@ def build_polya_section(frag_df, diffs_df, mod_df, top_n, diff_figs_dir="", mod_
         definitions=definitions_html([
             ("effect_median_range_nt", "Spread (nt) of per-fragmentform median tail lengths within a gene — how differently its isoforms are tailed."),
             ("effect_median_diff_nt", "Median tail length of modified reads minus unmodified reads at a site (negative = modification associates with shorter tails)."),
-            ("test", "Mann-Whitney U (2 groups) or Kruskal-Wallis (>2) on tail-length distributions; p_adj_bh is BH-FDR."),
+            ("test", "Sample-stratified van Elteren test (stratified Wilcoxon/Kruskal-Wallis) on tail-length distributions; the pooled Mann-Whitney/Kruskal is kept as test_name_pooled/p_value_pooled. p_adj_bh is BH-FDR."),
         ], summary="Column definitions"),
     )
 
@@ -2006,7 +1996,11 @@ def build_classification_section(class_df, private_df, class_figs_dir, arch_figs
                                   "n_sites": n, "pct": f"{100.0 * n / total:.1f}%"})
     grid = pd.DataFrame(grid_rows)
     bucket_counts = {b: count(b) for b in CLASS_BUCKET_ORDER}
-    hero = category_distribution_png(bucket_counts, mod_label=None, chart_name="structural_bucket_distribution")
+    # PRIVATE comes from the coverage-independent scan (no FDR gate), so "Significant sites" would be
+    # wrong for this chart -- use a neutral "Sites" axis (same class as the M7 APA/SNP-positional fix).
+    hero = category_distribution_png(bucket_counts, chart_name="structural_bucket_distribution",
+                                     title="Differential modification sites by structural bucket",
+                                     xlabel="Sites")
     hero_html = clickable_image_html(hero, "Classification by top-level bucket", figure_class="hero-figure",
                                      caption="Sites per top-level bucket.") if hero else ""
     overview = (

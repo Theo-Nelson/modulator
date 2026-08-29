@@ -22,8 +22,8 @@ import numpy as np
 from pyroaring import BitMap
 import pandas as pd
 
-from genotype_utils import (add_heterogeneity_flag, benjamini_hochberg, binary_rate_delta, cmh_stratified_test,
-                            context_key_from_row, context_key_from_snp_row, context_keys_from_snp_row,
+from genotype_utils import (add_heterogeneity_flag, benjamini_hochberg, binary_rate_delta,
+                            context_key_from_row, context_keys_from_snp_row,
                             informative_strata, load_molecule_mods_for_pairing, mh_stratified_effect,
                             run_contingency_test, shard_tsv_by_chrom, stratified_primary,
                             stratum_heterogeneity, tsv_header)

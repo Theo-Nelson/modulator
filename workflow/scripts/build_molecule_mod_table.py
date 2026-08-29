@@ -22,6 +22,11 @@ OUTPUT_COLUMNS = [
     "target_mod_code", "call_code", "state_detail", "target_modified",
     "call_prob", "canonical_base", "modified_primary_base", "fail",
     "within_alignment", "gene_id", "gene_name", "metagene_index",
+    # The populated path joins the read->fragmentform assignment (below) and derives `usable`; the
+    # empty-output header must advertise the SAME columns so downstream readers see a consistent
+    # schema whether or not the table has rows (they read by name, so order is immaterial here).
+    "ZT", "ZG", "ZN", "ZM", "assigned", "gene_index", "transcript_index", "classification",
+    "assignment_gene_id", "assignment_gene_name", "assignment_metagene_index", "usable",
 ]
 
 # transcript-oriented base each modification sits on (canonical_base in modkit's output is already

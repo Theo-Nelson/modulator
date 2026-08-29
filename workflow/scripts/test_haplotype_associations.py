@@ -17,7 +17,7 @@ import pandas as pd
 from pyroaring import BitMap
 
 from genotype_utils import (add_heterogeneity_flag, benjamini_hochberg, context_key_from_row,
-                            drop_unassigned_reads, informative_strata, max_abs_distribution_shift, mh_stratified_effect,
+                            drop_unassigned_reads, informative_strata, mh_stratified_effect,
                             stratified_max_distribution_shift, stratified_primary, stratum_heterogeneity,
                             run_contingency_test, shard_tsv_by_chrom, tsv_header)
 
@@ -173,7 +173,11 @@ def _hap_for_one_chrom(hap_path, mod_path, args):
                         tt = np.array(counts, dtype=float)   # rows=haplotypes(sorted), cols=[modified, not]
                         if int(tt.sum()) < int(args.min_total_reads):
                             continue
-                        if tt[:, 0].sum() == 0:
+                        # Both margins must be non-empty to be testable. Skipping only the all-unmodified
+                        # case (col 0) let an all-modified pair (col 1 empty) fall through and be written
+                        # as a NaN "untestable" row -- inconsistent with the symmetric gates in the
+                        # snp x mod / mod x mod / hierarchical tests, which drop both degenerate cases.
+                        if tt[:, 0].sum() == 0 or tt[:, 1].sum() == 0:
                             continue
                         # pooled (kept as *_pooled companion)
                         p_test_name, p_stat_name, p_stat_value, p_pooled = run_contingency_test(
