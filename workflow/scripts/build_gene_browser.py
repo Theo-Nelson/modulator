@@ -365,7 +365,7 @@ function draw(){
       <td>${esc(f.pas||"–")}</td><td>${f.tail?f.tail.toFixed(0)+" nt":"–"}</td><td>${f.exons.length}</td></tr>`).join("");
   $("#main").innerHTML=`
    <h1>${esc(G.gene)}</h1>
-   <div class="sub">${G.chrom} · ${G.strand} strand (${arrow}) · ${G.forms.length} fragmentforms · ${fmt(G.reads)} reads</div>
+   <div class="sub">${esc(G.chrom)} · ${esc(G.strand)} strand (${arrow}) · ${G.forms.length} fragmentforms · ${fmt(G.reads)} reads</div>
    <div class="card"><h2>Fragmentform structures</h2>
      <div class="hint">Click an exon to filter the tables below to modification sites inside it.
        <span id="selinfo"></span></div>
