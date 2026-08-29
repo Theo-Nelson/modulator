@@ -23,6 +23,7 @@ echo "### 2/4 classify_diffs taxonomy + snp-at-mod-base unit tests"
 "$PY" "$HERE/test_dispersion_scaling.py" || rc=1
 "$PY" "$HERE/test_tes_clustering_invariant.py" || rc=1
 "$PY" "$HERE/test_condition_tail_threshold_step.py" || rc=1
+"$PY" "$HERE/test_modmod_same_base.py" || rc=1
 PYTHONPATH=src "$PY" "$HERE/test_scaling_features.py" || rc=1
 
 echo "### 3/4 full pipeline on the synthetic dataset"

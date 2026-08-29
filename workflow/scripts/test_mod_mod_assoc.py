@@ -158,7 +158,7 @@ def _modmod_for_chrom(mod_path, args):
     hdr = tsv_header(mod_path)
     mod_df = pd.read_csv(mod_path, sep="\t", low_memory=False, usecols=[c for c in _MOD_WANT if c in hdr])
     if mod_df.empty:
-        return [], 0
+        return [], 0, 0
     # same usability + state filter as the production test
     if "usable" in mod_df.columns:
         mod_df = mod_df[mod_df["usable"].fillna(False)].copy()
@@ -167,13 +167,14 @@ def _modmod_for_chrom(mod_path, args):
     mod_df = mod_df[mod_df["state_detail"].isin(["modified", "canonical", "other_mod"])].copy()
     mod_df = drop_unassigned_reads(mod_df)
     if mod_df.empty:
-        return [], 0
+        return [], 0, 0
     mod_df["target_state"] = mod_df["state_detail"].eq("modified").astype(int)
     mod_df["context_key"] = mod_df.apply(context_key_from_row, axis=1)
     gene_col = "gene_names" if "gene_names" in mod_df.columns else ("gene_name" if "gene_name" in mod_df.columns else None)
 
     rows = []
     n_skipped_dense = 0
+    n_same_base = 0
     for ck, mm in mod_df.groupby("context_key", sort=False):
         mk = _rk(mm)
         ridx = {k: i for i, k in enumerate(pd.unique(mk))}
@@ -216,6 +217,14 @@ def _modmod_for_chrom(mod_path, args):
                     continue
                 if site_meta[sb][1] - s0a > args.max_distance:
                     break
+                if site_meta[sb][1] == s0a and site_meta[sb][2] == site_meta[sa][2]:
+                    # Same genomic base + strand, different modification codes (e.g. A->inosine 17596
+                    # vs A->m6A): a single molecule's base carries at most one of them, so the pair is
+                    # MUTUALLY EXCLUSIVE BY CONSTRUCTION -- an OR~0 artifact that tops the mutually-
+                    # exclusive ranking, not biology. (Two sites at the same (chrom,start0,strand) must
+                    # differ in mod_code, else they'd be one site.) Skip; count for transparency.
+                    n_same_base += 1
+                    continue
                 mb, ub = site_bits[sb]
                 b_both = ma & mb; b_ao = ma & ub; b_bo = ua & mb; b_ne = ua & ub
                 counts = (len(b_both), len(b_ao), len(b_bo), len(b_ne))
@@ -229,7 +238,7 @@ def _modmod_for_chrom(mod_path, args):
                 r = _pair_row(sa, sb, counts, site_meta, args, strata_counts=strata_counts)
                 if r is not None:
                     rows.append(r)
-    return rows, n_skipped_dense
+    return rows, n_skipped_dense, n_same_base
 
 
 def main():
@@ -240,13 +249,17 @@ def main():
     tmp = tempfile.mkdtemp(prefix=".modmod_bs_", dir=os.path.dirname(args.out_tsv) or ".")
     rows = []
     n_skipped = 0
+    n_same_base = 0
     try:
         mod_shards = shard_tsv_by_chrom(args.molecule_mods, os.path.join(tmp, "mod"))
         for chrom in sorted(mod_shards):
-            r, nsk = _modmod_for_chrom(mod_shards[chrom], args)
-            rows.extend(r); n_skipped += nsk
+            r, nsk, nsb = _modmod_for_chrom(mod_shards[chrom], args)
+            rows.extend(r); n_skipped += nsk; n_same_base += nsb
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
+    if n_same_base:
+        print(f"[mod_mod] excluded {n_same_base:,} same-base pair(s) (two modification codes on ONE "
+              f"base: mutually exclusive by construction, not co-occurrence)", file=sys.stderr, flush=True)
     if n_skipped:
         # Surface the cap's effect PERSISTENTLY, not just on stdout: dense reads are long reads that
         # carry most of the co-occurrence information, so a large skip count means the mod-mod result
