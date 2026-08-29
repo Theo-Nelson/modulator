@@ -323,13 +323,21 @@ def add_heterogeneity_flag(out_df, alpha=0.05):
     """BH-adjust the per-row strata_heterogeneity_p across the whole table and set strata_heterogeneous =
     (adjusted < alpha). Every other per-row p in these outputs is BH-adjusted; a RAW p<0.05 heterogeneity
     flag would fire on ~5% of perfectly homogeneous rows (thousands of false flags on a 260k-row table).
-    NaN heterogeneity p (rows with <2 informative strata) is excluded from the family and never flagged.
-    Adds strata_heterogeneity_p_adj and (re)writes strata_heterogeneous. No-op if the column is absent."""
+    NaN heterogeneity p (rows whose strata never passed the heterogeneity test's own count guard, even if
+    n_strata_informative reports otherwise) is excluded from the family and never flagged.
+
+    strata_heterogeneous is a NULLABLE boolean: True = tested + heterogeneous, False = tested +
+    homogeneous, <NA> = heterogeneity NOT assessed for this row. Collapsing the untested rows to plain
+    False would read as "checked and clean" when nothing was checked -- a table where no row was testable
+    would otherwise look uniformly homogeneous. Adds strata_heterogeneity_p_adj and (re)writes
+    strata_heterogeneous. No-op if the column is absent."""
     if out_df is None or "strata_heterogeneity_p" not in getattr(out_df, "columns", []):
         return out_df
     padj = benjamini_hochberg(pd.to_numeric(out_df["strata_heterogeneity_p"], errors="coerce").values)
     out_df["strata_heterogeneity_p_adj"] = padj
-    out_df["strata_heterogeneous"] = pd.to_numeric(out_df["strata_heterogeneity_p_adj"], errors="coerce") < alpha
+    padj_num = pd.to_numeric(out_df["strata_heterogeneity_p_adj"], errors="coerce")
+    het = (padj_num < alpha).astype("boolean")   # NaN comparison -> False; fix below
+    out_df["strata_heterogeneous"] = het.where(padj_num.notna(), other=pd.NA)  # untested -> <NA>, not False
     return out_df
 
 

@@ -102,6 +102,17 @@ def main():
         _dff = df[df["ZT"].astype(str).ne("")] if "ZT" in df.columns else df.iloc[0:0]
         ff = _dff.groupby(["gene_name", "ZT", "sample"], sort=False)["tail_len"].agg(["median", "size"]).reset_index()
         ff = ff[ff["size"] >= args.min_reads_per_sample]
+        # A fragmentform must clear the read threshold in EVERY sample that summarises the gene, else
+        # WHICH forms enter a replicate's mean changes between conditions: a form dropping below the
+        # threshold in one condition (a pure isoform-usage shift -- exactly the case this test targets)
+        # silently leaves that condition's mean, turning the confound into a STEP at the threshold and
+        # manufacturing a tail difference where no isoform's tail moved. Restrict to the fragmentforms
+        # common to all contributing samples so every replicate's mean averages the SAME form set; a
+        # genuine gene-wide shift (all shared forms move) still survives.
+        if not ff.empty:
+            n_samples_per_gene = ff.groupby("gene_name")["sample"].transform("nunique")
+            n_samples_per_zt = ff.groupby(["gene_name", "ZT"])["sample"].transform("nunique")
+            ff = ff[n_samples_per_zt == n_samples_per_gene]
         per = (ff.groupby(["gene_name", "sample"], sort=False)
                  .agg(median=("median", "mean"), size=("size", "sum")).reset_index())
     gene_of = (df.groupby(feat_col, sort=False)["gene_name"].first()
