@@ -486,6 +486,17 @@ def make_plot(df_site, per_tx, title, out_png):
 def main():
     args = parse_args()
 
+    if args.alternative != "two-sided":
+        # A one-sided alternative reaches only sites tested by the single-stratum EXACT test
+        # (do_fisher_2x2); the multi-stratum primary is the generalized CMH, which is inherently
+        # two-sided. So a directional --alternative silently mixes one- and two-sided p-values in one
+        # BH family. Surface it rather than let the family be quietly inconsistent.
+        print(f"[test_diffs] WARNING: --alternative={args.alternative} is one-sided, but the multi-stratum "
+              f"primary test (generalized CMH) is inherently TWO-SIDED. The directional alternative applies "
+              f"ONLY to single-informative-stratum sites (the exact test); CMH sites stay two-sided, so the "
+              f"BH family mixes sidedness. Use --alternative two-sided for a homogeneous family.",
+              file=sys.stderr, flush=True)
+
     # Load
     df = pd.read_csv(args.in_tsv, sep="\t", low_memory=False)
 
