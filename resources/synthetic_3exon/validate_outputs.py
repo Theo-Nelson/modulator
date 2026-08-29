@@ -183,16 +183,28 @@ def main():
     check("GENE_B differential tail (B1 vs B2) significant",
           len(gb) and gb.iloc[0]["p_adj_bh"] < 0.05)
     tm = rd(f"polya/{P}_taillength_mod.tsv")
-    check("tail x modification detects the D coupling (>=1 site p_adj<0.05)",
-          (tm["p_adj_bh"] < 0.05).any())
+    # M2: assert the coupling is detected AT THE DESIGNED SITE D, not "any row" -- crediting the D signal
+    # to some other site must fail. Parse the start out of mod_site_id (chrom:start[-end]:strand:mod).
+    def _start_of(mid):
+        try:
+            return int(str(mid).split(":")[1].split("-")[0])
+        except (IndexError, ValueError):
+            return -1
+    tm["site"] = tm["mod_site_id"].map(_start_of).map(lbl)
+    dtm = tm[tm.site == "D"].sort_values("p_adj_bh").head(1)
+    check("tail x modification detects the D coupling AT SITE D (p_adj<0.05)",
+          len(dtm) and dtm.iloc[0]["p_adj_bh"] < 0.05,
+          f"D p_adj={dtm.iloc[0]['p_adj_bh']:.1e}" if len(dtm) else "no D row")
 
     print("== BETWEEN-CONDITIONS ==")
     md = rd(f"between_conditions/{P}_zikv_vs_mock_mod_diffs.tsv")
     sc2 = [c for c in md.columns if "start" in c.lower()][0]
     md["site"] = md[sc2].map(lbl)
     crow = md[md.site == "COND"]
-    check("COND site differentially modified between conditions",
-          len(crow) and crow.iloc[0]["p_adj_bh"] < 0.05,
+    # M2: also assert the DIRECTION. Ground truth: COND is mock~85% vs zikv~15%, contrast zikv_vs_mock,
+    # so delta = zikv - mock must be NEGATIVE. An FDR-only check passed even when the contrast was inverted.
+    check("COND site differentially modified between conditions (mock hi > zikv lo, delta<0)",
+          len(crow) and crow.iloc[0]["p_adj_bh"] < 0.05 and crow.iloc[0]["delta"] < 0,
           f"delta={crow.iloc[0]['delta']:.2f} p_adj={crow.iloc[0]['p_adj_bh']:.1e}" if len(crow) else "missing")
     iso = rd(f"between_conditions/{P}_zikv_vs_mock_isoform_usage_diffs.tsv")
     ga = iso[iso.gene_name == "GENE_A"]
@@ -222,7 +234,17 @@ def main():
 
     print("== REPORT ==")
     check("HTML report produced", (R / f"report/{P}_report.html").exists())
-    check("interactive gene browser produced", (R / f"report/{P}_gene_browser.html").exists())
+    gb_path = R / f"report/{P}_gene_browser.html"
+    check("interactive gene browser produced", gb_path.exists())
+    # M2: don't stop at existence -- a browser that renders 0 genes, or a funnel that inverts, must fail.
+    gb_txt = gb_path.read_text() if gb_path.exists() else ""
+    check("gene browser actually renders the expected genes",
+          ("GENE_A" in gb_txt and "GENE_B" in gb_txt))
+    rs = rd(f"assemble/{P}_per_sample_read_stats.tsv")
+    mono = all(
+        r["assigned_reads"] <= r["considered_reads"] <= r["total_mapped"] <= r["total_reads_bam"]
+        for _, r in rs.iterrows()) if len(rs) else False
+    check("read funnel is monotonic (assigned <= considered <= mapped <= total) in every sample", mono)
 
     print(f"\nSUMMARY: {n_pass} PASS / {n_fail} FAIL")
     import sys as _sys

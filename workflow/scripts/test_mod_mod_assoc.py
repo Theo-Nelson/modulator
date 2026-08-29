@@ -70,13 +70,18 @@ def _pair_row(sid_a, sid_b, counts, site_meta, args, strata_counts=None):
         return None
     n_a_mod = n_both + n_a_only
     n_a_unmod = n_b_only + n_neither
-    if n_a_mod < int(args.min_state_reads) or n_a_unmod < int(args.min_state_reads):
+    n_b_mod = n_both + n_b_only
+    n_b_unmod = n_a_only + n_neither
+    # A 2x2 association needs variation on BOTH margins: gate on site A's AND site B's modification states.
+    # Gating on A alone admitted pairs where B has no (or too few) modified/unmodified reads -- one margin
+    # degenerate, the pair structurally untestable -- padding the BH family (30.6% of rows on HG002) and
+    # costing genuine hits ~1000 significant pairs to the inflated multiple-testing burden.
+    if (n_a_mod < int(args.min_state_reads) or n_a_unmod < int(args.min_state_reads)
+            or n_b_mod < int(args.min_state_reads) or n_b_unmod < int(args.min_state_reads)):
         return None
     tt = [[float(n_both), float(n_a_only)], [float(n_b_only), float(n_neither)]]
     chrom_a, s0_a, strand_a, code_a, ctx, genes = site_meta[sid_a]
     chrom_b, s0_b, _sb, code_b, _cb, _g = site_meta[sid_b]
-    n_b_mod = n_both + n_b_only
-    n_b_unmod = n_a_only + n_neither
     union_mod = n_both + n_a_only + n_b_only
 
     # ---- POOLED descriptive statistics (single 2x2 over all reads) -- kept ONLY as *_pooled ----
