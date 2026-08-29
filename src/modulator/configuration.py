@@ -13,8 +13,6 @@ AUTOPARSE_KEYS = (
     "modkit",
     "aggregation",
     "toggles",
-    "mods",
-    "ref_bases",
     "test_diffs",
     "classify_diffs",
     "multigene_filter",

@@ -175,14 +175,9 @@ filters:
   count_diff_factor: 3
   mod_fail_margin: 1
 
-mods: ["17596", "a", "m", "17802", "69426", "19228", "19229", "19227"]
-ref_bases: ["A", "A", "C", "T", "A", "C", "G", "T"]
-
 threads: 64
 prefix: "fivegenes_readbacked_annot"
 
-min_reads: 1
-min_frac: 0.00
 min_cov: 0
 
 test_diffs:
