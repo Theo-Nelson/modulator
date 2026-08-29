@@ -87,6 +87,8 @@ def main():
     df = df[df[feat_col].astype(str).ne("")]
 
     # One summary per (feature, replicate); the replicate is the unit of analysis.
+    gene_untestable = []       # gene level: genes dropped by the common-fragmentform restriction
+    ff_all = None
     if args.level == "fragmentform":
         per = df.groupby([feat_col, "sample"], sort=False)["tail_len"].agg(["median", "size"]).reset_index()
         per = per[per["size"] >= args.min_reads_per_sample]
@@ -100,8 +102,8 @@ def main():
         # shift (all isoforms move) is preserved. Only fragmentforms with >= min_reads in a replicate
         # count toward that replicate's mean.
         _dff = df[df["ZT"].astype(str).ne("")] if "ZT" in df.columns else df.iloc[0:0]
-        ff = _dff.groupby(["gene_name", "ZT", "sample"], sort=False)["tail_len"].agg(["median", "size"]).reset_index()
-        ff = ff[ff["size"] >= args.min_reads_per_sample]
+        ff_all = _dff.groupby(["gene_name", "ZT", "sample"], sort=False)["tail_len"].agg(["median", "size"]).reset_index()
+        ff_all = ff_all[ff_all["size"] >= args.min_reads_per_sample]
         # A fragmentform must clear the read threshold in EVERY sample that summarises the gene, else
         # WHICH forms enter a replicate's mean changes between conditions: a form dropping below the
         # threshold in one condition (a pure isoform-usage shift -- exactly the case this test targets)
@@ -109,10 +111,17 @@ def main():
         # manufacturing a tail difference where no isoform's tail moved. Restrict to the fragmentforms
         # common to all contributing samples so every replicate's mean averages the SAME form set; a
         # genuine gene-wide shift (all shared forms move) still survives.
-        if not ff.empty:
-            n_samples_per_gene = ff.groupby("gene_name")["sample"].transform("nunique")
-            n_samples_per_zt = ff.groupby(["gene_name", "ZT"])["sample"].transform("nunique")
-            ff = ff[n_samples_per_zt == n_samples_per_gene]
+        if not ff_all.empty:
+            n_samples_per_gene = ff_all.groupby("gene_name")["sample"].transform("nunique")
+            n_samples_per_zt = ff_all.groupby(["gene_name", "ZT"])["sample"].transform("nunique")
+            ff = ff_all[n_samples_per_zt == n_samples_per_gene]
+        else:
+            ff = ff_all
+        # A gene with qualifying reads but NO fragmentform covered in all its samples cannot form a
+        # composition-stable gene mean, so it is not tested here. It must NOT vanish silently (the loss
+        # is biased toward multi-isoform genes with uneven coverage -- the population this analysis is
+        # about): emit an explicit untestable row (NaN stats) for each so it stays visible and counted.
+        gene_untestable = sorted(set(ff_all["gene_name"]) - set(ff["gene_name"])) if not ff_all.empty else []
         per = (ff.groupby(["gene_name", "sample"], sort=False)
                  .agg(median=("median", "mean"), size=("size", "sum")).reset_index())
     gene_of = (df.groupby(feat_col, sort=False)["gene_name"].first()
@@ -150,6 +159,35 @@ def main():
                  "test": {s: round(float(m[s]), 1) for s in sorted(test_s) if s in m}},
                 separators=(",", ":")),
         })
+    # Surface genes the common-fragmentform restriction removed (only those that WOULD have been
+    # testable -- qualifying coverage in >= min_samples_per_group replicates of BOTH conditions) as
+    # explicit untestable rows (NaN stats), so composition-unstable multi-isoform genes are visible
+    # and counted rather than silently absent. per_replicate_json carries the reason.
+    n_untestable = 0
+    for g in gene_untestable:
+        sub = ff_all[ff_all["gene_name"] == g]
+        ref_reps = sorted({s for s in sub["sample"] if s in ref_s})
+        test_reps = sorted({s for s in sub["sample"] if s in test_s})
+        if len(ref_reps) < args.min_samples_per_group or len(test_reps) < args.min_samples_per_group:
+            continue
+        cov = {}
+        for _, rr in sub.iterrows():
+            cov.setdefault(str(rr["sample"]), []).append(str(rr["ZT"]).split(".")[-1])
+        rows.append({
+            "contrast": name, "level": args.level, "feature": g, "gene_name": g,
+            "n_reference": len(ref_reps), "n_test": len(test_reps),
+            "reads_reference": int(sub[sub["sample"].isin(ref_s)]["size"].sum()),
+            "reads_test": int(sub[sub["sample"].isin(test_s)]["size"].sum()),
+            "mean_tail_reference": float("nan"), "mean_tail_test": float("nan"),
+            "delta_nt": float("nan"), "stat": float("nan"), "p_value": float("nan"),
+            "per_sample_json": json.dumps({s: sorted(cov[s]) for s in sorted(cov)}, separators=(",", ":")),
+            "per_replicate_json": json.dumps(
+                {"status": "untestable_no_common_fragmentform",
+                 "note": "no fragmentform cleared min_reads_per_sample in every replicate; "
+                         "a composition-stable gene mean cannot be formed"},
+                separators=(",", ":")),
+        })
+        n_untestable += 1
     out = pd.DataFrame(rows)
     if out.empty:
         pd.DataFrame(columns=OUT_COLS).to_csv(args.out_tsv, sep="\t", index=False)
@@ -161,8 +199,13 @@ def main():
     os.makedirs(os.path.dirname(args.out_tsv) or ".", exist_ok=True)
     out.to_csv(args.out_tsv, sep="\t", index=False)
     if args.verbose:
-        print(f"[condition_tail:{args.level}] {name}: {len(out):,} features tested, "
-              f"{int((out['p_adj_bh'] < 0.05).sum()):,} at FDR<0.05 -> {args.out_tsv}", flush=True)
+        n_tested = int(np.isfinite(pd.to_numeric(out["p_value"], errors="coerce")).sum())
+        msg = (f"[condition_tail:{args.level}] {name}: {n_tested:,} features tested, "
+               f"{int((out['p_adj_bh'] < 0.05).sum()):,} at FDR<0.05")
+        if gene_untestable:
+            msg += (f"; {n_untestable:,} gene(s) NOT tested (no fragmentform covered in every "
+                    f"replicate -> composition-unstable; emitted as untestable rows)")
+        print(msg + f" -> {args.out_tsv}", flush=True)
 
 
 if __name__ == "__main__":

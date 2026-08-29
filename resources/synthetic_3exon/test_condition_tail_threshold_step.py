@@ -44,6 +44,14 @@ def build_tail_tsv(path):
     for i, s in enumerate(TEST_SAMPLES):
         _reads(rows, "GY", "GY.G1.T1", s, 130 + (i - 1), 20)
         _reads(rows, "GY", "GY.G1.T2", s, 90 + (i - 1), 20)
+    # --- GZ: coverage in every replicate, but NO form clears the threshold in all of them (T1 dips
+    # in one zikv rep, T2 in one mock rep) -> no common form -> must appear as an UNTESTABLE row,
+    # not silently vanish. reads: qualifying=20, sub-threshold=3.
+    gz = {"m1": (20, 20), "m2": (20, 20), "m3": (20, 3),
+          "z1": (20, 20), "z2": (3, 20), "z3": (20, 20)}
+    for s, (n1, n2) in gz.items():
+        _reads(rows, "GZ", "GZ.G1.T1", s, 110, n1)
+        _reads(rows, "GZ", "GZ.G1.T2", s, 80, n2)
     with open(path, "w", newline="") as fh:
         w = csv.DictWriter(fh, fieldnames=["sample", "tail_len", "ZT", "gene_name"], delimiter="\t")
         w.writeheader()
@@ -95,6 +103,16 @@ def main():
             print(f"  PASS  GY genuine gene-wide shift survives: delta={gy['delta_nt']} nt")
         else:
             print(f"  FAIL  GY real +30 nt effect lost after the fix: delta={gy['delta_nt']} nt"); rc = 1
+
+    # GZ: no common fragmentform -> must be VISIBLE as an untestable row (NaN stats + status),
+    # never silently dropped (the silent-data-loss MAJOR).
+    gz = out.get("GZ")
+    if gz is None:
+        print("  FAIL  GZ (no common fragmentform) silently DROPPED -- should be an untestable row"); rc = 1
+    elif gz["p_value"].strip() != "" or "untestable_no_common_fragmentform" not in gz["per_replicate_json"]:
+        print(f"  FAIL  GZ present but not marked untestable: p_value={gz['p_value']!r} json={gz['per_replicate_json']!r}"); rc = 1
+    else:
+        print("  PASS  GZ (no common fragmentform) emitted as a visible untestable row, not dropped")
 
     print("condition-tail threshold-step: " + ("OK" if rc == 0 else "FAILURES"))
     sys.exit(rc)
