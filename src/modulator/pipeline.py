@@ -70,16 +70,8 @@ class PipelinePaths:
         return self.results / "aggregate_zn"
 
     @property
-    def aggregate_zt(self) -> Path:
-        return self.results / "aggregate_zt"
-
-    @property
     def modkit_zn(self) -> Path:
         return self.results / "modkit_zn"
-
-    @property
-    def modkit_zt(self) -> Path:
-        return self.results / "modkit_zt"
 
     @property
     def test_diffs(self) -> Path:
@@ -188,10 +180,6 @@ class PipelinePaths:
     @property
     def zn_filtered_long(self) -> Path:
         return self.aggregate_zn / f"{self.prefix}_FILTERED_sites_long.tsv"
-
-    @property
-    def zt_filtered_long(self) -> Path:
-        return self.aggregate_zt / f"{self.prefix}_FILTERED_long.tsv"
 
     @property
     def zn_diff_results(self) -> Path:
@@ -372,8 +360,8 @@ class PipelinePaths:
     def scrap_tx_counts(self, sample: str) -> Path:
         return self.zt_scrap_dir / f"{sample}.multigene_scrap_tx_counts.tsv"
 
-    def modkit_dir(self, which: str, sample: str) -> Path:
-        return (self.modkit_zn if which == "zn" else self.modkit_zt) / sample
+    def modkit_dir(self, sample: str) -> Path:
+        return self.modkit_zn / sample
 
 
 class ModulatorPipeline:
@@ -651,13 +639,13 @@ class ModulatorPipeline:
     def _require_reference_gtf(self) -> Path:
         return self._require_existing_file(self.reference_gtf, "reference GTF")
 
-    def _require_modkit_outputs(self, which: str) -> Path:
-        base = self.paths.modkit_zn if which == "zn" else self.paths.modkit_zt
-        self._require_existing_dir(base, f"modkit {which.upper()} output directory")
+    def _require_modkit_outputs(self) -> Path:
+        base = self.paths.modkit_zn
+        self._require_existing_dir(base, "modkit ZN output directory")
         has_partitions = any(base.rglob("*.bed")) or any(base.rglob("*.bed.gz"))
         if not has_partitions:
             raise FileNotFoundError(
-                f"No partition BED outputs were found under {base}. Run the modkit {which.upper()} stage first."
+                f"No partition BED outputs were found under {base}. Run the modkit ZN stage first."
             )
         return base
 
@@ -725,12 +713,12 @@ class ModulatorPipeline:
     def _all_samples(self, fn) -> bool:
         return bool(self.samples) and all(self._nonempty(fn(sample)) for sample in self.samples)
 
-    def _modkit_done(self, which: str) -> bool:
-        base = self.paths.modkit_zn if which == "zn" else self.paths.modkit_zt
+    def _modkit_done(self) -> bool:
+        base = self.paths.modkit_zn
         if not base.exists() or not self.samples:
             return False
         for sample in self.samples:
-            d = self.paths.modkit_dir(which, sample)
+            d = self.paths.modkit_dir(sample)
             if not d.exists():
                 return False
             beds_gz = list(d.rglob("*.bed.gz"))
@@ -785,7 +773,7 @@ class ModulatorPipeline:
         if stage == "modkit_zn":
             if not as_bool(toggles.get("enable_zn_pileup", True), True):
                 return True
-            return self._modkit_done("zn")
+            return self._modkit_done()
         if stage == "aggregate_zn":
             if not as_bool(toggles.get("enable_zn_aggregate", True), True):
                 return True
@@ -1302,7 +1290,7 @@ class ModulatorPipeline:
         reference_fa = self._require_reference_fa()
         modkit_cfg = self.config.get("modkit", {})
         common = modkit_cfg.get("common", {})
-        output_dir = self.paths.modkit_dir(which, sample)
+        output_dir = self.paths.modkit_dir(sample)
         # Clean the sample's per-ZN output dir before modkit writes into it. modkit pileup emits one
         # <N>.bed per ZN value present in THIS run's BAM but does NOT remove beds a PRIOR run left, so a
         # re-run after e.g. a changed assembler.min_reads (different ZN partition set) would leave stale
@@ -1357,7 +1345,7 @@ class ModulatorPipeline:
         filters_cfg = self.config.get("filters", {})
         out_prefix = self.paths.aggregate_zn / self.prefix
         out_prefix.parent.mkdir(parents=True, exist_ok=True)
-        self._require_modkit_outputs("zn")
+        self._require_modkit_outputs()
         self._require_existing_file(self.paths.out_gtf, "assembled GTF")
         tmpdir = (
             self.config.get("aggregation_tmpdir")
@@ -1583,10 +1571,11 @@ class ModulatorPipeline:
 
         # ---- Step 2: candidate mod sites (needs zn_long + candidate SNPs; no BAM scan). ----
         zn_long = str(self.paths.zn_filtered_long) if self.paths.zn_filtered_long.exists() else ""
-        zt_long = str(self.paths.zt_filtered_long) if self.paths.zt_filtered_long.exists() else ""
+        # Per-transcript (ZT) modkit aggregation is not implemented as a pipeline stage, so no ZT-long
+        # table is ever produced; the consumer keeps the flag but always receives an empty path.
         mod_site_args = [
             "--zn-long", zn_long,
-            "--zt-long", zt_long,
+            "--zt-long", "",
             "--out-tsv", str(self.paths.geno_candidate_mod_sites),
             "--out-bed", str(self.paths.geno_candidate_mod_bed),
             "--min-total-cov", str(int(geno.get("min_mod_site_cov", 1))),
@@ -2136,7 +2125,8 @@ class ModulatorPipeline:
             "--top-transcripts", str(int(report_cfg.get("top_transcripts", 20))),
             "--top-genes", str(int(report_cfg.get("top_genes", 20))),
             "--zn-long", str(self.paths.zn_filtered_long) if self.paths.zn_filtered_long.exists() else "",
-            "--zt-long", str(self.paths.zt_filtered_long) if self.paths.zt_filtered_long.exists() else "",
+            "--zt-long", "",   # ZT aggregation is not a pipeline stage; no ZT-long table is produced
+
             "--diff-results", str(self.paths.zn_diff_results) if self.paths.zn_diff_results.exists() else "",
             "--diff-figs-dir", str(self.paths.zn_diff_figs) if self.paths.zn_diff_figs.exists() else "",
             "--classified-sites", str(self.paths.zn_site_classified) if self.paths.zn_site_classified.exists() else "",
