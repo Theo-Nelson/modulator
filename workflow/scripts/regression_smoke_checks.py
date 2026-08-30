@@ -159,6 +159,27 @@ def test_stale_zn_filter(module):
         raise AssertionError(f"stale ZN=99 bed must be dropped; kept ZN partitions {kept_zn}")
 
 
+def test_polya_gene_from_zt():
+    """M3: recover the gene from a zt_label `{gene}.{gene_id}.G<n>.T<n>`. The fallback (no gene_id)
+    must strip `.G<n>.T<n>` to a NO-MERGE key -- NOT return the raw label (which splits one gene into
+    per-transcript keys, the regression the reviewer caught) and NOT split(".")[0] (dotted-name merge)."""
+    spec = importlib.util.spec_from_file_location(
+        "build_read_polya_table", ROOT / "build_read_polya_table.py")
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    g = mod.gene_from_zt
+    if g("CCT8.ENSG00000156261.14.G10.T1", "ENSG00000156261.14") != "CCT8":
+        raise AssertionError("known gene_id should recover the clean gene name")
+    if g("CTC-338M12.4.ENSG9.G2.T3", "ENSG9") != "CTC-338M12.4":
+        raise AssertionError("dotted GENCODE gene name must be preserved")
+    t1 = g("CCT8.ENSG00000156261.14.G10.T1", "")
+    t2 = g("CCT8.ENSG00000156261.14.G10.T2", "")
+    if t1 != t2:
+        raise AssertionError(f"no-gene_id fallback must collapse a gene's transcripts to one key, got {t1!r} != {t2!r}")
+    if t1 != "CCT8.ENSG00000156261.14":
+        raise AssertionError(f"fallback must strip .G<n>.T<n>, not return the raw label: {t1!r}")
+
+
 def main():
     assembler = load_assembler_module()
     aggregate = load_aggregate_module()
@@ -167,6 +188,7 @@ def main():
     test_metagene_coloring(assembler)
     test_aggregate_partition_mapping(aggregate)
     test_stale_zn_filter(aggregate)
+    test_polya_gene_from_zt()
     print("regression_smoke_checks: OK")
 
 

@@ -1434,7 +1434,10 @@ def build_between_conditions_section(bc_dir, top_n, top_note=""):
               "PER-FRAGMENTFORM table that tests each ZN transcript partition on its own to resolve "
               "which fragmentform carries the change. Each analysis shows a top-by-effect figure "
               "with the individual replicate values, so effect size and replicate agreement are visible "
-              "together.",
+              "together. CAVEAT: a modification site that comes out 0% in one condition and X% in the "
+              "other (an entire arm all-unmodified) has an ANTI-conservative raw p at the mu=0 boundary "
+              "-- ~4-10x optimistic -- so for those most-extreme '0% -> X%' sites trust the FDR-adjusted "
+              "p_adj_bh (family-wide control still holds), not the raw p_value.",
         definitions=definitions_html([
             ("ZN_transcript_index", "Transcript partition (ZN) the modification site belongs to. Present "
                                     "only in the per-fragmentform table; the site-level table pools "

@@ -31,6 +31,21 @@ OUT_COLS = ["sample", "qname", "strand", "tail_len", "tail_estimated",
             "ZT", "ZG", "ZN", "ZM", "gene_name", "metagene_index", "transcript_index", "classification"]
 
 
+def gene_from_zt(zt: str, gene_id: str = "") -> str:
+    """Recover the gene name from a zt_label `{gene}.{gene_id}.G<n>.T<n>` (M3).
+
+    If gene_id is known (gtf_gene_id, populated even for a NOVEL_LOCUS overlapping a known gene), strip
+    `.{gene_id}.G<n>.T<n>` to recover the clean {gene} (CCT8, not CCT8.ENSG00000156261.14). Otherwise
+    strip only `.G<n>.T<n>`, leaving `{gene}.{gene_id}` -- a NO-MERGE fallback that is unique per gene.
+    Never split(".")[0] (truncates dotted GENCODE names) and never the raw label (which would give each
+    transcript its own key, splitting one gene into ...G10.T1 vs ...G10.T2)."""
+    z = str(zt)
+    g = str(gene_id).strip()
+    if g and g.lower() not in ("na", "nan", "none"):
+        return re.sub(r"\." + re.escape(g) + r"\.G\d+\.T\d+$", "", z)
+    return re.sub(r"\.G\d+\.T\d+$", "", z)
+
+
 def parse_args():
     ap = argparse.ArgumentParser(description="Per-read poly(A) tail length (dorado pt:i) from ZT-tagged BAMs.")
     ap.add_argument("--bams", nargs="+", required=True, help="ZT-tagged BAMs carrying pt:i + ZT/ZG/ZN/ZM tags")
@@ -130,14 +145,9 @@ def main():
     # `.{gene_id}.G<n>.T<n>` to recover the clean gene. Fall back to the `.G<n>.T<n>` strip otherwise --
     # never split(".")[0], which truncates dotted GENCODE names (CTC-338M12.4 -> CTC-338M12).
     _zt = normalize_string_series(df.get("ZT", pd.Series(dtype=str)))
-    zt_gene = _zt.str.replace(r"\.G\d+\.T\d+$", "", regex=True)   # {gene}.{gene_id} (fallback)
-    if "gtf_gene_id" in df.columns:
-        _gid = normalize_string_series(df["gtf_gene_id"])
-        _has_gid = _gid.ne("") & ~_gid.str.lower().isin(["na", "nan", "none"])
-        # strip the exact ".{gene_id}.G<n>.T<n>" suffix per row where the gene_id is known
-        _clean = [re.sub(r"\." + re.escape(g) + r"\.G\d+\.T\d+$", "", z) if h else z
-                  for z, g, h in zip(_zt, _gid, _has_gid)]
-        zt_gene = pd.Series(_clean, index=df.index)
+    _gid = (normalize_string_series(df["gtf_gene_id"]) if "gtf_gene_id" in df.columns
+            else pd.Series("", index=df.index))
+    zt_gene = pd.Series([gene_from_zt(z, g) for z, g in zip(_zt, _gid)], index=df.index)
     if "gene_name" not in df.columns:
         df["gene_name"] = zt_gene
     else:

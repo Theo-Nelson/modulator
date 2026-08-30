@@ -198,6 +198,14 @@ def beta_binomial_diff(sites, prior_weight=20.0, min_group_samples=2, ref_df=REF
         #     and dragged the prior to theta~0.37, over-shrinking every near-binomial site (a separated
         #     0.2->0.72 site went p 8.5e-7 -> 0.23). Such a site is still TESTED, only barred from the
         #     trend, because its own theta is a penalty artifact, not biology.
+        #
+        # KNOWN CAVEAT (documented, not code-changed -- old and new code are byte-identical here): a site
+        # whose group came out all-zero BY CHANCE under the null is ANTI-conservative -- at the mu=0
+        # boundary _fit_theta's penalty inflates the LRT, so P(p<0.05) among these sites reaches 0.2-0.5
+        # (the marginal null rate stays fine, ~0.026, and family-wide BH-FDR still controls). This is a
+        # boundary property of the dispersion estimator, not of the _group_degen guard. PRACTICAL
+        # CONSEQUENCE: ranking by the most extreme "0% -> X%" sites selects exactly the subset whose
+        # per-site p-values are ~4-10x optimistic; trust the FDR-adjusted q, not the raw p, for those.
         _lt = float(np.log(theta_s))
         _at_bound = abs(_lt - _LOG_THETA_LO) < 1e-2
         _kg0 = k[gidx == 0]; _ng0 = n[gidx == 0]

@@ -73,6 +73,20 @@ def low_stoich_sensitivity(nrep=3, depth=120, seed=20260830, p_thresh=1e-3):
     return hit / float(len(effects))
 
 
+def all_zero_dropped_and_effect_kept():
+    """M5: sites all-unmodified (or all-modified) in BOTH groups admit no between-group difference and
+    must be DROPPED from the output entirely -- not emitted as "tested" p=1 rows that sit in the BH
+    family, inflating m and crushing every adjusted p. A real effect embedded with them is still
+    tested. Returns (n_all_zero_rows_emitted, effect_was_tested)."""
+    g = np.array([0, 0, 0, 1, 1, 1], dtype=int)
+    all_zero = [(("z", i), np.zeros(6), np.full(6, 100.0), g) for i in range(20)]
+    effect = (("e",), np.array([20, 24, 26, 84, 90, 78], dtype=float), np.full(6, 120.0), g)
+    res = diffstats.beta_binomial_diff(all_zero + [effect], prior_weight=20.0)
+    keys = [r["key"] for r in res]
+    n_zero = sum(1 for k in keys if isinstance(k, tuple) and k and k[0] == "z")
+    return n_zero, (("e",) in keys)
+
+
 def main():
     # thresholds sit ~4 SE (SE~0.01 at n=500) above the observed Cox-Reid rates and WELL below the
     # ~0.11 pre-fix inflation, so this bites on a regression without flaking on Monte-Carlo noise.
@@ -85,6 +99,11 @@ def main():
         # must hold AND real effects embedded in it must still be detected (prior-collapse BLOCKER).
         ("low-stoich null type-I,  3v3 <= 0.09", low_stoich_null_type_i() <= 0.09),
         ("low-stoich SENSITIVITY,  3v3 >= 0.80", low_stoich_sensitivity() >= 0.80),
+    ]
+    _n_zero, _eff_kept = all_zero_dropped_and_effect_kept()
+    checks += [
+        ("M5: all-zero sites DROPPED (not in BH family)", _n_zero == 0),
+        ("M5: a real effect among them is still tested", _eff_kept),
     ]
     n_pass = 0
     for name, ok in checks:
