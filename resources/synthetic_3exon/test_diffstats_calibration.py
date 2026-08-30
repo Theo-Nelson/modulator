@@ -15,6 +15,22 @@ import numpy as np
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "..", "workflow", "scripts"))
 import diffstats  # noqa: E402
+import genotype_utils as gu  # noqa: E402
+
+
+def mc_exact_rx2_null_type_i(depths, rate, seed0=0, M=800):
+    """Type-I of the shared run_contingency_test single-stratum path on sparse r x 2 tables -- the M2
+    regime that the asymptotic chi2 inflated to 0.15-0.25 and every single-sample site hits."""
+    rng = np.random.default_rng(seed0)
+    hit = used = 0
+    for _ in range(M):
+        tab = np.array([[(m := rng.binomial(d, rate)), d - m] for d in depths], dtype=float)
+        if not ((tab.sum(0) > 0).all() and (tab.sum(1) > 0).all()):
+            continue
+        used += 1
+        _, _, _, p = gu.run_contingency_test(tab)
+        hit += (p < 0.05)
+    return hit / max(1, used)
 
 
 def null_type_i(phi, nrep, nsites=500, seed=20260822, mu_range=(0.2, 0.8), cov=(50, 300)):
@@ -104,6 +120,14 @@ def main():
     checks += [
         ("M5: all-zero sites DROPPED (not in BH family)", _n_zero == 0),
         ("M5: a real effect among them is still tested", _eff_kept),
+    ]
+    # Shared single-stratum exact test (genotype_utils.run_contingency_test) -- used by 5 other scripts.
+    _nm, _, _, _p2xc = gu.run_contingency_test(np.array([[50, 10, 40], [10, 50, 40]], dtype=float))
+    _nm3, _, _, _pbig = gu.run_contingency_test(np.array([[1000, 0, 0], [0, 1000, 0], [0, 0, 1000]], dtype=float))
+    checks += [
+        ("shared exact: r x 2 null type-I [1,200,1] <= 0.06", mc_exact_rx2_null_type_i([1, 200, 1], 0.05) <= 0.06),
+        ("shared exact: 2 x c handled (both margins), not floored/garbage", _nm.startswith("montecarlo_exact") and _p2xc < 1e-6),
+        ("shared exact: p-floor removed (huge effect << 1e-4)", _pbig < 1e-4),
     ]
     n_pass = 0
     for name, ok in checks:

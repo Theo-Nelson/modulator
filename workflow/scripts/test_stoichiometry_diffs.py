@@ -38,7 +38,8 @@ from scipy.stats import chi2 as _chi2_dist, chi2_contingency, fisher_exact
 import matplotlib.pyplot as plt
 from matplotlib.ticker import MaxNLocator
 from plot_utils import save_figure
-from genotype_utils import add_heterogeneity_flag, informative_strata, stratum_heterogeneity
+from genotype_utils import (add_heterogeneity_flag, informative_strata, montecarlo_exact_test,
+                            stratum_heterogeneity)
 
 # Canonical output schema, so the header is identical whether or not any site was testable (a
 # zero-sites early-exit previously wrote a 14-column header while a real run emitted 21+).
@@ -256,31 +257,6 @@ def summarize_site(df_site, min_cov, which_test, pseudocount, alternative):
         chi2, p, dof, _ = chi2_contingency(tab_pc, correction=False)
         return f"chi2_{tab.shape[0]}x{tab.shape[1]}_pc{pc:g}", "chi2", float(chi2), float(p)
 
-    def do_mc_exact_rx2(tab, n_resamples=9999, seed=12345):
-        """Monte-Carlo EXACT test for an r x 2 table (cols = [modified, unmodified]).
-
-        M2: the single-informative-stratum PRIMARY previously used an asymptotic chi2 here, which is
-        ~2x anti-conservative on the realistic m6A regime -- sparse, unequal coverage, low rate (null
-        P(p<0.05) = 0.103 at per-transcript depths [1,200,1], rate 0.15). This is R's
-        chisq.test(simulate.p.value=TRUE): resample tables with the SAME margins under independence
-        (multivariate-hypergeometric: distribute the total modified reads across transcripts by their
-        coverage) and compare chi2 statistics. Deterministic (fixed seed) so the output stays
-        byte-reproducible; fully vectorised. Falls back to asymptotic chi2 only if resampling is
-        impossible (a degenerate margin, already screened as untestable upstream)."""
-        tab = np.asarray(tab, dtype=float)
-        row_tot = tab.sum(axis=1)                     # per-transcript coverage (fixed row margins)
-        n_mod = float(tab[:, 0].sum()); N = float(tab.sum()); n_unmod = N - n_mod
-        if n_mod <= 0 or n_unmod <= 0 or (row_tot <= 0).any():
-            return do_chi2_rx2(tab, pseudocount)
-        exp_mod = row_tot * n_mod / N
-        exp_unmod = row_tot * n_unmod / N
-        obs = float(((tab[:, 0] - exp_mod) ** 2 / exp_mod + (tab[:, 1] - exp_unmod) ** 2 / exp_unmod).sum())
-        rng = np.random.default_rng(seed)
-        draws = rng.multivariate_hypergeometric(row_tot.astype(int), int(n_mod), size=n_resamples)
-        mod = draws.astype(float); unmod = row_tot[None, :] - mod
-        chi2s = ((mod - exp_mod) ** 2 / exp_mod + (unmod - exp_unmod) ** 2 / exp_unmod).sum(axis=1)
-        p = (int(np.sum(chi2s >= obs - 1e-9)) + 1) / (n_resamples + 1)
-        return f"montecarlo_exact_{tab.shape[0]}x2", "chi2", obs, float(p)
 
     # A zero marginal (all transcripts 100%- or 0%-modified, i.e. no variation in the modified column)
     # is UNTESTABLE: fisher returns a nan odds ratio and chi2_contingency RAISES at pseudocount=0.
@@ -345,10 +321,12 @@ def summarize_site(df_site, min_cov, which_test, pseudocount, alternative):
         primary_eff = mh_max_abs_rate_diff(inf)
     elif n_strata == 1:
         T1 = inf[0]
-        # 2x2 -> Fisher (exact); r x 2 -> Monte-Carlo EXACT (M2: the old asymptotic chi2 here was ~2x
-        # anti-conservative on sparse/unequal/low-rate strata, the realistic m6A regime).
+        # 2x2 -> Fisher (exact); r x 2 -> the shared Monte-Carlo EXACT test (M2: the old asymptotic
+        # chi2 here was ~2-5x anti-conservative on sparse/unequal/low-rate strata, the realistic m6A
+        # regime; the shared version fixes both margins and removes the p-floor via the asymptotic
+        # hybrid -- same code path as the five other single-stratum tests).
         primary_test, primary_stat_name, primary_stat, primary_p = (
-            do_fisher_2x2(T1) if T1.shape[0] == 2 else do_mc_exact_rx2(T1))
+            do_fisher_2x2(T1) if T1.shape[0] == 2 else montecarlo_exact_test(T1))
         primary_eff = mh_max_abs_rate_diff(inf)
     else:
         primary_test, primary_stat_name = "untestable", "none"

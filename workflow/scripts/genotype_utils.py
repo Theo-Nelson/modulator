@@ -9,7 +9,7 @@ from typing import Dict, Iterable, List, Optional, Tuple
 
 import numpy as np
 import pandas as pd
-from scipy.stats import chi2, chi2_contingency, fisher_exact, rankdata as _rankdata
+from scipy.stats import chi2, chi2_contingency, fisher_exact, random_table, rankdata as _rankdata
 
 
 def safe_int(x, default=0) -> int:
@@ -114,6 +114,34 @@ def binary_rate_delta(table_2x2: np.ndarray) -> float:
     return round(float(abs(rate0 - rate1)), 6)
 
 
+def montecarlo_exact_test(table, seed: int = 12345, n_resamples: int = 9999):
+    """Monte-Carlo EXACT test of independence for an r x c contingency table -- Patefield resampling of
+    tables with BOTH margins fixed (R's chisq.test(simulate.p.value=TRUE)). Deterministic (fixed seed).
+
+    This is the exact replacement for the asymptotic chi2 in the single-informative-stratum primary,
+    which is ~2-5x anti-conservative on sparse / unequal-coverage / low-rate tables -- the m6A regime,
+    and EVERY site on single-sample data (where every row takes that branch). Fixing BOTH margins makes
+    it correct for 2 x c as well as r x 2 (a row-margin-only sampler returns an incoherent number on a
+    2 x c table). The MC p has a resolution floor of 1/(n_resamples+1); when the observed statistic
+    exceeds every resample -- a strong, well-conditioned table beyond MC resolution -- the asymptotic
+    chi2 p is accurate there and is reported instead, so the floor never (a) makes a clean study with a
+    few strong effects report NONE under BH nor (b) ties all strong hits at 1e-4 and destroys ranking.
+    Assumes no zero margin (the caller screens those as untestable)."""
+    tab = np.asarray(table, dtype=float)
+    r, c = tab.shape
+    row = tab.sum(axis=1); col = tab.sum(axis=0); N = tab.sum()
+    exp = np.outer(row, col) / N
+    obs_stat = float(np.sum((tab - exp) ** 2 / exp))
+    dof = (r - 1) * (c - 1)
+    asymptotic_p = float(chi2.sf(obs_stat, dof))
+    rng = np.random.default_rng(seed)
+    samples = random_table(row.astype(int), col.astype(int)).rvs(size=n_resamples, random_state=rng)
+    stats = np.sum((samples - exp) ** 2 / exp, axis=(1, 2))
+    hits = int(np.sum(stats >= obs_stat - 1e-9))
+    p = asymptotic_p if hits == 0 else (hits + 1) / (n_resamples + 1)
+    return f"montecarlo_exact_{r}x{c}", "chi2", obs_stat, float(p)
+
+
 def run_contingency_test(
     table: np.ndarray,
     test: str = "auto",
@@ -143,15 +171,14 @@ def run_contingency_test(
         stat, p, _, _ = chi2_contingency(tt_pc, correction=False)
         return f"chi2_{tt.shape[0]}x{tt.shape[1]}_pc{pseudocount:g}", "chi2", float(stat), float(p)
 
-    if test == "fisher":
-        if tab.shape == (2, 2):
-            return do_fisher_2x2(tab)
-        return do_chi2(tab)
+    # Non-2x2 tables use the Monte-Carlo EXACT test, NOT the asymptotic chi2 (M2: chi2 is ~2-5x
+    # anti-conservative on the sparse/low-rate tables this branch actually sees, and on single-sample
+    # data EVERY site takes it). `test="chi2"` still forces the asymptotic test as an explicit override.
     if test == "chi2":
         return do_chi2(tab)
     if tab.shape == (2, 2):
         return do_fisher_2x2(tab)
-    return do_chi2(tab)
+    return montecarlo_exact_test(tab)
 
 
 def cmh_stratified_test(strata):
