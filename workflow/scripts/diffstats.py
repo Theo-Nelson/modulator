@@ -176,39 +176,35 @@ def beta_binomial_diff(sites, prior_weight=20.0, min_group_samples=2, ref_df=REF
         k, n, gidx = k[ok], n[ok], gidx[ok]
         if (gidx == 0).sum() < min_group_samples or (gidx == 1).sum() < min_group_samples:
             continue
-        theta_s, _ = _fit_theta(k, n, gidx, 2)
-        # Flag sites that carry NO usable dispersion information: a degenerate pooled mean (all reads
-        # modified or all unmodified -- e.g. the all-zero sites that flood the universe when the site
-        # filter is disabled) leaves theta unidentified, so the optimiser pins it at a bound. Such sites
-        # must NOT enter the across-site prior median, or they collapse the prior and destroy a genuine
-        # effect (prior-collapse finding).
-        #
-        # MAJOR-4: exclude only the LOWER bound (theta=1e-2, extreme overdispersion -- the pathological
-        # pin an unidentified/degenerate site runs to). A site at the UPPER bound (theta=1e6) is
-        # genuinely NEAR-BINOMIAL (under-dispersed): that is real, legitimate low-dispersion evidence and
-        # MUST stay in the prior median. Dropping it (the old both-bounds test) biased the prior toward
-        # overdispersion, so every other site was over-shrunk to a too-dispersed prior and real effects
-        # were washed out -- and on a near-binomial batch it emptied the informative set below the
-        # shrink threshold, disabling shrinkage entirely.
+        # M5: a site all-unmodified (or all-modified) across BOTH groups admits no between-group
+        # difference -- the LRT is exactly 0 and p is exactly 1. These are UNTESTABLE, not measured
+        # negatives, yet they were emitted as "tested" rows and left in the BH family (28.9% of a real
+        # per-transcript table), inflating m and crushing every adjusted p (min p_adj 0.999 -> 0.710
+        # once dropped). Skip them BEFORE the (expensive) theta fit. One-group-degenerate sites -- a
+        # real 0%->X% effect -- have a NON-degenerate pooled mean and are kept (handled by _group_degen).
         _mu_hat = float(k.sum() / n.sum()) if n.sum() > 0 else 0.0
+        if _mu_hat <= 1e-9 or _mu_hat >= 1.0 - 1e-9:
+            continue
+        theta_s, _ = _fit_theta(k, n, gidx, 2)
+        # Sites that carry no usable dispersion information must NOT enter the across-site prior median
+        # or they collapse it and destroy a genuine effect (prior-collapse finding). Two exclusions:
+        #   * _at_bound: theta pinned at the LOWER bound (1e-2, extreme overdispersion) -- the
+        #     pathological pin an unidentified site runs to. (The UPPER bound = near-binomial is real
+        #     low-dispersion evidence and MUST stay in the prior; dropping it biased the prior toward
+        #     overdispersion and washed out real effects.)
+        #   * _group_degen (BLOCKER, prior collapse on real low-stoichiometry data): an entire GROUP
+        #     all-unmodified/all-modified makes the Cox-Reid penalty pin theta at an ARTIFICIAL ~0.37
+        #     (dispersion ~0.73). At real stoichiometry these were the MAJORITY of the informative set
+        #     and dragged the prior to theta~0.37, over-shrinking every near-binomial site (a separated
+        #     0.2->0.72 site went p 8.5e-7 -> 0.23). Such a site is still TESTED, only barred from the
+        #     trend, because its own theta is a penalty artifact, not biology.
         _lt = float(np.log(theta_s))
         _at_bound = abs(_lt - _LOG_THETA_LO) < 1e-2
-        _degenerate = (_mu_hat <= 1e-9) or (_mu_hat >= 1.0 - 1e-9)
-        # BLOCKER (prior collapse on real data): a site where an entire GROUP is all-unmodified (or
-        # all-modified) carries NO within-group dispersion for that group, so _fit_theta's Cox-Reid
-        # penalty on the zero-variance group pins theta at an ARTIFICIAL mid value (~0.37, dispersion
-        # ~0.73) -- not at the 1e-2 lower bound, and with a non-degenerate POOLED mean, so the old test
-        # let it through. At real stoichiometry 78-83% of sites are <1% modified and routinely have one
-        # group all-zero, so these artifacts became the MAJORITY of the "informative" set and dragged
-        # the prior median to theta~0.37, over-shrinking every genuinely near-binomial site and
-        # destroying power (a perfectly-separated 0.2->0.72 site went p 8.5e-7 -> 0.23). Exclude any
-        # site with a degenerate GROUP from the prior. It is still TESTED -- only barred from setting
-        # the trend, because its own theta is a penalty artifact, not biology.
         _kg0 = k[gidx == 0]; _ng0 = n[gidx == 0]
         _kg1 = k[gidx == 1]; _ng1 = n[gidx == 1]
         _group_degen = (_kg0.sum() <= 1e-9 or _kg0.sum() >= _ng0.sum() - 1e-9
                         or _kg1.sum() <= 1e-9 or _kg1.sum() >= _ng1.sum() - 1e-9)
-        informative = not (_at_bound or _degenerate or _group_degen)
+        informative = not (_at_bound or _group_degen)
         prepared.append((key, k, n, gidx, theta_s, informative))
     if not prepared:
         return []
