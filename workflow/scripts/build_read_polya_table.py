@@ -114,8 +114,8 @@ def main():
     # Join gene_name / metagene_index / transcript_index / fragmentform classification from the summary.
     summ = robust_load_summary(args.summary_tsv) if args.summary_tsv else pd.DataFrame()
     if not summ.empty and "zt_label" in summ.columns:
-        keep = [c for c in ["zt_label", "gtf_gene_name", "gene_index", "transcript_index",
-                            "metagene_index", "classification"] if c in summ.columns]
+        keep = [c for c in ["zt_label", "gtf_gene_name", "gtf_gene_id", "gene_index",
+                            "transcript_index", "metagene_index", "classification"] if c in summ.columns]
         meta = summ[keep].drop_duplicates("zt_label").rename(columns={
             "zt_label": "ZT", "gtf_gene_name": "gene_name"})
         df = df.merge(meta, on="ZT", how="left")
@@ -123,10 +123,21 @@ def main():
     # the BAM but absent from classification_summary merges to NaN). Without this, those reads carry a
     # NaN metagene_index and are silently dropped from the between-fragmentform tail test, since its
     # groupby("metagene_index") drops NaN keys -- a whole gene's fragmentforms can vanish with no note.
-    # Recover the gene name from the ZT id (<gene>.G<n>.T<n>) by stripping the trailing ".G<n>.T<n>",
-    # NOT split(".")[0] -- the latter truncates a dotted GENCODE gene name (CTC-338M12.4 -> CTC-338M12).
-    zt_gene = normalize_string_series(df.get("ZT", pd.Series(dtype=str))).str.replace(
-        r"\.G\d+\.T\d+$", "", regex=True)
+    #
+    # M3: the zt_label is `{gene}.{gene_id}.G<n>.T<n>` -- stripping only `.G<n>.T<n>` leaves
+    # `{gene}.{gene_id}` (CCT8.ENSG00000156261.14), which then joins to nothing downstream. When the
+    # gene_id is known (gtf_gene_id, populated even for a NOVEL_LOCUS that overlaps a known gene), strip
+    # `.{gene_id}.G<n>.T<n>` to recover the clean gene. Fall back to the `.G<n>.T<n>` strip otherwise --
+    # never split(".")[0], which truncates dotted GENCODE names (CTC-338M12.4 -> CTC-338M12).
+    _zt = normalize_string_series(df.get("ZT", pd.Series(dtype=str)))
+    zt_gene = _zt.str.replace(r"\.G\d+\.T\d+$", "", regex=True)   # {gene}.{gene_id} (fallback)
+    if "gtf_gene_id" in df.columns:
+        _gid = normalize_string_series(df["gtf_gene_id"])
+        _has_gid = _gid.ne("") & ~_gid.str.lower().isin(["na", "nan", "none"])
+        # strip the exact ".{gene_id}.G<n>.T<n>" suffix per row where the gene_id is known
+        _clean = [re.sub(r"\." + re.escape(g) + r"\.G\d+\.T\d+$", "", z) if h else z
+                  for z, g, h in zip(_zt, _gid, _has_gid)]
+        zt_gene = pd.Series(_clean, index=df.index)
     if "gene_name" not in df.columns:
         df["gene_name"] = zt_gene
     else:

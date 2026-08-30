@@ -173,6 +173,7 @@ def _stats_for_one_sample(task):
     total_n = 0
     total_mapped = 0
     total_unmapped = 0
+    mapped_mm_tagged_n = 0   # M6: mapped reads carrying a modification basecall (MM tag)
     considered_n = 0
     fail_counts = {k: 0 for k in FAIL_KEYS}
 
@@ -196,6 +197,13 @@ def _stats_for_one_sample(task):
                 total_unmapped += 1
             else:
                 total_mapped += 1   # primary mapped read (secondary/supplementary already skipped above)
+                # M6: count reads that actually carry a modification basecall (MM/ML tag). A BAM with
+                # NO modification calls (e.g. a plain-basecalled library) still flows through the whole
+                # funnel, so the report presented its empty modification tables as MEASURED negatives
+                # ("0 sites modified") rather than "no modification data". This makes the distinction
+                # explicit. modkit writes MM/Mm (+ ML/Ml); either casing counts.
+                if (aln.has_tag("MM") or aln.has_tag("Mm")):
+                    mapped_mm_tagged_n += 1
 
             reason = considered_fail_reason(
                 aln,
@@ -254,6 +262,8 @@ def _stats_for_one_sample(task):
         total_reads_bam=total_n,
         total_mapped=total_mapped,
         total_unmapped=total_unmapped,
+        mapped_mm_tagged=mapped_mm_tagged_n,   # M6: mapped reads with a modification basecall (MM tag)
+        mapped_mm_tagged_frac=_frac(mapped_mm_tagged_n, total_mapped),
 
         # Considered universe (original BAM + filters)
         considered_reads=considered_n,

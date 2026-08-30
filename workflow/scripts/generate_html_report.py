@@ -101,6 +101,8 @@ COLUMN_DEFINITIONS = {
     "total_reads_bam": "Total alignment records in the input BAM for this sample.",
     "total_mapped": "Reads with a mapped primary alignment.",
     "total_unmapped": "Reads with no mapped alignment.",
+    "mapped_mm_tagged": "Mapped reads that carry a modification basecall (MM/ML tag). If this is 0 the BAM has NO modification data (a plain-basecalled library), so the modification tables are ABSENT, not measured negatives -- distinguish 'no data' from 'measured, no modification found'.",
+    "mapped_mm_tagged_frac": "Fraction of mapped reads carrying a modification basecall (mapped_mm_tagged / total_mapped). Near 0 means the library was not modification-basecalled.",
     "considered_reads": "Reads that passed every primary QC filter (mapped, primary, MAPQ, intron count, 3' soft-clip) and are eligible for fragmentform assignment.",
     "failed_unmapped": "Number of reads filtered because they were unmapped.",
     "failed_low_mapq": "Number of reads filtered because their mapping quality was below the minimum (see input parameter min_mapq).",
@@ -2279,12 +2281,25 @@ def main():
 
     read_stats_counts_cols = [
         c for c in [
-            "sample", "total_reads_bam", "total_mapped", "total_unmapped", "considered_reads",
+            "sample", "total_reads_bam", "total_mapped", "total_unmapped", "mapped_mm_tagged",
+            "considered_reads",
             "failed_unmapped", "failed_low_mapq", "failed_low_introns",
             "failed_low_softclip3p", "zt_tagged_exists", "zt_total_records", "zt_unmapped_records",
             "zt_mapped_records", "assigned_reads", "zt_mapped_unassigned_reads"
         ] if c in read_stats_df.columns
     ]
+    # M6: warn when a sample carries NO modification basecalls -- its empty modification tables are
+    # "no data", not measured negatives, and every modification result for it should be read that way.
+    read_stats_mm_warning = ""
+    if "mapped_mm_tagged" in read_stats_df.columns:
+        _mm = pd.to_numeric(read_stats_df["mapped_mm_tagged"], errors="coerce").fillna(0)
+        _no_mm = read_stats_df.loc[_mm <= 0, "sample"].astype(str).tolist()
+        if _no_mm:
+            read_stats_mm_warning = (
+                "<p class='muted'><b>No modification basecalls</b> in "
+                + html.escape(", ".join(_no_mm)) + ": these BAM(s) carry no MM/ML tags, so every "
+                "modification result for them is ABSENT (no data), not a measured absence of "
+                "modification. Basecall with a modification model to measure modifications.</p>")
     read_stats_length_cols = ["sample"] + [c for c in read_stats_df.columns if "_len_" in c]
     read_stats_length_cols = [c for c in read_stats_length_cols if c in read_stats_df.columns]
 
@@ -2416,7 +2431,8 @@ def main():
         (
             subsection(
                 "Read Retention Counts",
-                df_to_html(read_stats_df[read_stats_counts_cols], max_rows=100) if read_stats_counts_cols else "<p class='muted'>No read-count funnel columns available.</p>",
+                read_stats_mm_warning
+                + (df_to_html(read_stats_df[read_stats_counts_cols], max_rows=100) if read_stats_counts_cols else "<p class='muted'>No read-count funnel columns available.</p>"),
                 definitions=definitions_html(column_definitions(read_stats_counts_cols), summary="Column definitions") if read_stats_counts_cols else "",
             ) +
             subsection(
