@@ -505,6 +505,16 @@ class ModulatorPipeline:
         self._preflight_bams()
 
     @staticmethod
+    def _contig_length_mismatches(bam_len: dict[str, int], ref_len: dict[str, int]):
+        """Return (mismatches, shared) for a BAM's @SQ lengths vs the reference .fai lengths.
+        `mismatches` is a sorted list of (contig, bam_length, ref_length) for shared contig NAMES whose
+        LENGTHS differ -- the signature of a BAM aligned to a different genome (mm39 vs GRCh38). Extra
+        contigs on either side (e.g. alt scaffolds) are ignored: only shared-name disagreement counts."""
+        shared = set(bam_len) & set(ref_len)
+        mism = sorted((c, bam_len[c], ref_len[c]) for c in shared if bam_len[c] != ref_len[c])
+        return mism, shared
+
+    @staticmethod
     def _bam_has_index(bam_path: str) -> bool:
         """True if a coordinate index (.bai/.csi) exists for this BAM, using every name modkit and
         pysam will try: <bam>.bai, <bam>.csi, and the samtools <stem>.bai/.csi variant."""
@@ -602,6 +612,54 @@ class ModulatorPipeline:
                     + "\n    create them with:\n" + fix
                     + "\n    or set preflight.auto_index: true to build them automatically."
                 )
+
+        # Reference-genome mismatch: a BAM aligned to a DIFFERENT genome than reference_fa completes
+        # silently with plausible, wrong output when the two genomes share contig NAMES but not lengths
+        # (mm39 vs GRCh38 both have chr1, 195 Mb vs 249 Mb) -- mouse reads then get attributed to human
+        # genes, exit 0, full report. The name-only checks downstream do not catch this. Compare each
+        # BAM's @SQ lengths to the reference .fai and abort on any shared contig whose length differs.
+        _ref_fa = getattr(self, "reference_fa", None)
+        if as_bool(pf.get("check_reference_contigs", True), True) and _ref_fa:
+            fai = Path(f"{_ref_fa}.fai")
+            ref_len: dict[str, int] = {}
+            if fai.exists():
+                try:
+                    for line in fai.read_text().splitlines():
+                        f = line.split("\t")
+                        if len(f) >= 2:
+                            ref_len[f[0]] = int(f[1])
+                except (OSError, ValueError):
+                    ref_len = {}
+            try:
+                import pysam  # noqa: PLC0415 - required for the pileup anyway; imported lazily here
+            except Exception:  # noqa: BLE001
+                pysam = None
+            if not ref_len:
+                warnings.append("could not read the reference .fai to check contig lengths "
+                                f"(expected {fai}); run `samtools faidx {self.reference_fa}` to enable "
+                                "the wrong-reference guard.")
+            elif pysam is None:
+                warnings.append("pysam unavailable; skipping the reference-contig-length check.")
+            else:
+                for p in paths:
+                    try:
+                        with pysam.AlignmentFile(p, "rb", check_sq=False) as fh:
+                            bam_len = dict(zip(fh.references, fh.lengths))
+                    except Exception:  # noqa: BLE001 - index/read issues already reported above
+                        continue
+                    mism, shared = self._contig_length_mismatches(bam_len, ref_len)
+                    if shared and mism:
+                        ex = "; ".join(f"{c}: BAM {b:,} bp vs reference {r:,} bp" for c, b, r in mism[:3])
+                        problems.append(
+                            f"reference mismatch for '{Path(p).name}': {len(mism)}/{len(shared)} shared "
+                            f"contigs have a DIFFERENT length than reference_fa ({ex}"
+                            + (", ..." if len(mism) > 3 else "") + "). The BAM was aligned to a different "
+                            "genome than reference_fa (e.g. mouse mm39 vs human GRCh38 -- same contig "
+                            "NAMES, different lengths); every downstream coordinate would be wrong.")
+                    elif not shared:
+                        warnings.append(
+                            f"'{Path(p).name}' shares NO contig names with reference_fa; verify the "
+                            "reference matches the alignment.")
 
         for w in warnings:
             print(f"[modulator] preflight WARNING: {w}", flush=True)

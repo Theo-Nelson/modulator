@@ -194,7 +194,21 @@ def beta_binomial_diff(sites, prior_weight=20.0, min_group_samples=2, ref_df=REF
         _lt = float(np.log(theta_s))
         _at_bound = abs(_lt - _LOG_THETA_LO) < 1e-2
         _degenerate = (_mu_hat <= 1e-9) or (_mu_hat >= 1.0 - 1e-9)
-        informative = not (_at_bound or _degenerate)
+        # BLOCKER (prior collapse on real data): a site where an entire GROUP is all-unmodified (or
+        # all-modified) carries NO within-group dispersion for that group, so _fit_theta's Cox-Reid
+        # penalty on the zero-variance group pins theta at an ARTIFICIAL mid value (~0.37, dispersion
+        # ~0.73) -- not at the 1e-2 lower bound, and with a non-degenerate POOLED mean, so the old test
+        # let it through. At real stoichiometry 78-83% of sites are <1% modified and routinely have one
+        # group all-zero, so these artifacts became the MAJORITY of the "informative" set and dragged
+        # the prior median to theta~0.37, over-shrinking every genuinely near-binomial site and
+        # destroying power (a perfectly-separated 0.2->0.72 site went p 8.5e-7 -> 0.23). Exclude any
+        # site with a degenerate GROUP from the prior. It is still TESTED -- only barred from setting
+        # the trend, because its own theta is a penalty artifact, not biology.
+        _kg0 = k[gidx == 0]; _ng0 = n[gidx == 0]
+        _kg1 = k[gidx == 1]; _ng1 = n[gidx == 1]
+        _group_degen = (_kg0.sum() <= 1e-9 or _kg0.sum() >= _ng0.sum() - 1e-9
+                        or _kg1.sum() <= 1e-9 or _kg1.sum() >= _ng1.sum() - 1e-9)
+        informative = not (_at_bound or _degenerate or _group_degen)
         prepared.append((key, k, n, gidx, theta_s, informative))
     if not prepared:
         return []

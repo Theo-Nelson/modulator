@@ -33,6 +33,46 @@ def null_type_i(phi, nrep, nsites=500, seed=20260822, mu_range=(0.2, 0.8), cov=(
     return float(np.mean(np.array([r["p_value"] for r in res]) < 0.05))
 
 
+def _low_stoich_universe(rng, m, nrep, depth=120):
+    """A realistic modification-site universe: ~80% of sites are <1% modified, so most have an entire
+    group at zero counts. Before the prior-collapse fix these all-zero-group sites (theta pinned at a
+    Cox-Reid artifact ~0.37) set the across-site prior median and over-shrank every real site."""
+    gidx = np.array([0] * nrep + [1] * nrep, dtype=int)
+    sites = []
+    for i in range(m):
+        rate = rng.choice([0.002, 0.005, 0.008, 0.02], p=[0.45, 0.25, 0.13, 0.17])
+        k = rng.poisson(rate * depth, 2 * nrep).astype(float)
+        n = np.full(2 * nrep, float(depth))
+        sites.append((("bg", i), np.minimum(k, n), n, gidx))
+    return sites
+
+
+def low_stoich_null_type_i(nrep=3, m=400, depth=120, seed=20260830):
+    """Type-I at low stoichiometry: both groups share one low rate. Specificity must hold here too."""
+    rng = np.random.default_rng(seed)
+    res = diffstats.beta_binomial_diff(_low_stoich_universe(rng, m, nrep, depth), prior_weight=20.0)
+    return float(np.mean(np.array([r["p_value"] for r in res]) < 0.05))
+
+
+def low_stoich_sensitivity(nrep=3, depth=120, seed=20260830, p_thresh=1e-3):
+    """POWER at realistic stoichiometry: clear, well-separated effect sites EMBEDDED in the
+    low-stoichiometry universe must still be detected. This is the assertion the prior-collapse BLOCKER
+    would have failed (embedded effects went p~1e-7 -> ~0.2): the old suite tested only mu 0.2-0.8 with
+    no embedding and asserted only false positives, so it passed 4/4 while the headline analysis was
+    dead on real data. Returns the fraction of effect sites reaching p < p_thresh."""
+    rng = np.random.default_rng(seed)
+    gidx = np.array([0] * nrep + [1] * nrep, dtype=int)
+    effects = []
+    for j, (mr, mt) in enumerate([(0.20, 0.72), (0.04, 0.42), (0.10, 0.55), (0.30, 0.80), (0.05, 0.45)]):
+        kr = rng.binomial(depth, mr, nrep); kt = rng.binomial(depth, mt, nrep)
+        k = np.concatenate([kr, kt]).astype(float); n = np.full(2 * nrep, float(depth))
+        effects.append((("eff", j), k, n, gidx))
+    sites = effects + _low_stoich_universe(rng, 400, nrep, depth)
+    res = {r["key"]: r["p_value"] for r in diffstats.beta_binomial_diff(sites, prior_weight=20.0)}
+    hit = sum(1 for j in range(len(effects)) if res.get(("eff", j), 1.0) < p_thresh)
+    return hit / float(len(effects))
+
+
 def main():
     # thresholds sit ~4 SE (SE~0.01 at n=500) above the observed Cox-Reid rates and WELL below the
     # ~0.11 pre-fix inflation, so this bites on a regression without flaking on Monte-Carlo noise.
@@ -41,6 +81,10 @@ def main():
         ("null type-I @ phi=0.005,3v3 <= 0.09", null_type_i(0.005, 3) <= 0.09),
         ("null type-I @ phi=0.02, 3v3 <= 0.09", null_type_i(0.02, 3) <= 0.09),
         ("null type-I @ phi=0.05, 3v3 <= 0.09", null_type_i(0.05, 3) <= 0.09),
+        # low-stoichiometry regime (the real m6A universe: ~80% of sites <1% modified). Specificity
+        # must hold AND real effects embedded in it must still be detected (prior-collapse BLOCKER).
+        ("low-stoich null type-I,  3v3 <= 0.09", low_stoich_null_type_i() <= 0.09),
+        ("low-stoich SENSITIVITY,  3v3 >= 0.80", low_stoich_sensitivity() >= 0.80),
     ]
     n_pass = 0
     for name, ok in checks:
