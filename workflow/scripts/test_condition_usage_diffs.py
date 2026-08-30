@@ -17,6 +17,7 @@ Never pools reads across replicates (that would be pseudoreplication; measured 6
 import argparse
 import json
 import os
+import re
 import sys
 
 import numpy as np
@@ -52,25 +53,46 @@ def parse_args():
     return ap.parse_args()
 
 
-def _gene_of(zt: str) -> str:
-    return str(zt).split(".")[0]
+def _fallback_gene_of(zt: str) -> str:
+    """Last-resort gene key when the authoritative gtf_gene_name is unavailable (e.g. a NOVEL_LOCUS
+    with gtf_gene_name = NA). The zt_label is `{gene}.{gene_id}.G<n>.T<n>` and BOTH gene and gene_id
+    can contain dots (GENCODE clone names like CTC-338M12.4, versioned Ensembl ids), so split(".")[0]
+    (M4) truncated dotted names and MERGED distinct genes' denominators (CTC-338M12.4 and .3 -> one
+    "CTC-338M12"). Strip only the `.G<n>.T<n>` suffix, keeping `{gene}.{gene_id}` -- unique per gene,
+    so nothing is merged. Used only as a fallback; a real gtf_gene_name always wins."""
+    return re.sub(r"\.G\d+\.T\d+$", "", str(zt))
 
 
-def _feature_map(args, zts) -> pd.DataFrame:
-    """fragmentform -> (feature, gene). One row per (zt_label, feature); junctions fan out."""
+def _load_gene_map(args) -> dict:
+    """zt_label -> AUTHORITATIVE gtf_gene_name from the classification summary. Blank/NA are dropped so
+    the string fallback handles those. Empty dict if no summary was passed."""
+    if not getattr(args, "classification_summary", ""):
+        return {}
+    s = pd.read_csv(args.classification_summary, sep="\t", low_memory=False)
+    s.columns = [str(c).lstrip("#") for c in s.columns]
+    gcol = "gtf_gene_name" if "gtf_gene_name" in s.columns else ("gene_name" if "gene_name" in s.columns else None)
+    if "zt_label" not in s.columns or gcol is None:
+        return {}
+    g = s[["zt_label", gcol]].dropna(subset=["zt_label"]).copy()
+    g[gcol] = g[gcol].astype(str).str.strip()
+    g = g[~g[gcol].str.lower().isin(("", "na", "nan", "none"))]
+    return dict(zip(g["zt_label"].astype(str), g[gcol]))
+
+
+def _feature_map(args, zts, gene_of) -> pd.DataFrame:
+    """fragmentform -> (feature, gene). One row per (zt_label, feature); junctions fan out.
+    `gene_of(zt)` returns the authoritative gtf_gene_name (or the no-merge fallback)."""
     if args.feature == "isoform":
-        return pd.DataFrame({"zt_label": zts, "feature": zts, "gene_name": [_gene_of(z) for z in zts]})
+        return pd.DataFrame({"zt_label": zts, "feature": zts, "gene_name": [gene_of(z) for z in zts]})
     if args.feature == "apa":
         if not args.classification_summary:
             sys.exit("--feature apa needs --classification-summary")
         s = pd.read_csv(args.classification_summary, sep="\t", low_memory=False)
         s.columns = [str(c).lstrip("#") for c in s.columns]
-        gene_col = "gtf_gene_name" if "gtf_gene_name" in s.columns else "gene_name"
-        s = s[["zt_label", "iso_tes", "chrom", "strand", gene_col]].dropna(subset=["zt_label", "iso_tes"])
+        s = s[["zt_label", "iso_tes", "chrom", "strand"]].dropna(subset=["zt_label", "iso_tes"])
         s["feature"] = (s["chrom"].astype(str) + ":" + s["iso_tes"].astype(int).astype(str)
                         + ":" + s["strand"].astype(str))
-        s["gene_name"] = s[gene_col].fillna("").astype(str).replace("", np.nan)
-        s["gene_name"] = s["gene_name"].fillna(s["zt_label"].map(_gene_of))
+        s["gene_name"] = s["zt_label"].map(gene_of)
         return s[["zt_label", "feature", "gene_name"]]
     if not args.splice_junctions:
         sys.exit("--feature junction needs --splice-junctions")
@@ -79,8 +101,7 @@ def _feature_map(args, zts) -> pd.DataFrame:
     j = j.dropna(subset=["zt_label", "intron_start1", "intron_end1"])
     j["feature"] = (j["chrom"].astype(str) + ":" + j["intron_start1"].astype(int).astype(str)
                     + "-" + j["intron_end1"].astype(int).astype(str) + ":" + j["strand"].astype(str))
-    j["gene_name"] = j.get("gene_name", pd.Series(index=j.index, dtype=str)).fillna(
-        j["zt_label"].map(_gene_of))
+    j["gene_name"] = j["zt_label"].map(gene_of)
     return j[["zt_label", "feature", "gene_name"]].drop_duplicates()
 
 
@@ -107,7 +128,14 @@ def main():
         return
     tx = tx[samples].fillna(0)
 
-    fmap = _feature_map(args, list(tx.index))
+    # Authoritative zt_label -> gene map (gtf_gene_name); fall back to a NO-MERGE key for anything
+    # absent (novel loci). Used for BOTH the feature->gene assignment and the gene denominators, so a
+    # dotted gene name can no longer be truncated or two distinct genes merged (M4).
+    _gene_map = _load_gene_map(args)
+    def gene_of(zt):
+        return _gene_map.get(str(zt)) or _fallback_gene_of(zt)
+
+    fmap = _feature_map(args, list(tx.index), gene_of)
     fmap = fmap[fmap["zt_label"].isin(tx.index)]
     if fmap.empty:
         pd.DataFrame(columns=OUT_COLS).to_csv(args.out_tsv, sep="\t", index=False)
@@ -119,7 +147,7 @@ def main():
     fc["feature"] = fmap["feature"].to_numpy(); fc["gene_name"] = fmap["gene_name"].to_numpy()
     feat = fc.groupby(["gene_name", "feature"], sort=False)[samples].sum()
 
-    gene_of_zt = pd.Series([_gene_of(z) for z in tx.index], index=tx.index)
+    gene_of_zt = pd.Series([gene_of(z) for z in tx.index], index=tx.index)
     gene_tot = tx.groupby(gene_of_zt, sort=False)[samples].sum()
 
     genes = feat.index.get_level_values(0)

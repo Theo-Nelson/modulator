@@ -2127,10 +2127,14 @@ class ModulatorPipeline:
                         "--out-tsv", str(self.paths.cond_usage_diffs(name, feature)),
                         "--feature", feature,
                         "--min-gene-reads", str(int(cfg.get("min_gene_reads", 20))), *common, *common_stat]
-                if feature == "apa":
-                    if not self._nonempty(self.paths.classification_summary):
-                        continue
+                # The classification summary maps zt_label -> the AUTHORITATIVE gtf_gene_name; pass it
+                # for EVERY feature (not just apa) so the gene is read from a column instead of being
+                # string-parsed out of the dotted zt_label (M4). apa still requires it (iso_tes lives
+                # there); isoform/junction use it when present and fall back to the label otherwise.
+                if self._nonempty(self.paths.classification_summary):
                     args += ["--classification-summary", str(self.paths.classification_summary)]
+                elif feature == "apa":
+                    continue
                 if feature == "junction":
                     if not self._nonempty(self.paths.splice_junctions):
                         continue
