@@ -124,10 +124,17 @@ def main():
     # Shared single-stratum exact test (genotype_utils.run_contingency_test) -- used by 5 other scripts.
     _nm, _, _, _p2xc = gu.run_contingency_test(np.array([[50, 10, 40], [10, 50, 40]], dtype=float))
     _nm3, _, _, _pbig = gu.run_contingency_test(np.array([[1000, 0, 0], [0, 1000, 0], [0, 0, 1000]], dtype=float))
+    # zero-row guard: a 3x2 stratum with an all-zero row (a transcript with no reads in that sample --
+    # routine at 3v3, the design point) must DROP the zero row and test the rest, not return NaN and
+    # silently drop a genuine hit from the BH family.
+    _nmz, _, _, _pz = gu.montecarlo_exact_test(np.array([[0, 0], [10, 90], [85, 15]], dtype=float))
+    _nmu, _, _, _pu = gu.montecarlo_exact_test(np.array([[0, 0], [0, 0], [50, 50]], dtype=float))
     checks += [
         ("shared exact: r x 2 null type-I [1,200,1] <= 0.06", mc_exact_rx2_null_type_i([1, 200, 1], 0.05) <= 0.06),
         ("shared exact: 2 x c handled (both margins), not floored/garbage", _nm.startswith("montecarlo_exact") and _p2xc < 1e-6),
         ("shared exact: p-floor removed (huge effect << 1e-4)", _pbig < 1e-4),
+        ("shared exact: zero row DROPPED, not NaN'd out of the BH family", np.isfinite(_pz) and _pz < 1e-6),
+        ("shared exact: <2x2 after dropping is untestable (NaN)", _nmu == "untestable" and not np.isfinite(_pu)),
     ]
     n_pass = 0
     for name, ok in checks:

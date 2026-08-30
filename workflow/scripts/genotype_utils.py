@@ -126,8 +126,17 @@ def montecarlo_exact_test(table, seed: int = 12345, n_resamples: int = 9999):
     exceeds every resample -- a strong, well-conditioned table beyond MC resolution -- the asymptotic
     chi2 p is accurate there and is reported instead, so the floor never (a) makes a clean study with a
     few strong effects report NONE under BH nor (b) ties all strong hits at 1e-4 and destroys ranking.
-    Assumes no zero margin (the caller screens those as untestable)."""
+    Robust to zero margins: an all-zero ROW (a transcript with no reads) or COLUMN (an outcome with
+    none) carries no information and would put a 0 in the expected table -> 0/0 = NaN p, silently
+    dropping a genuine hit from the BH family. run_contingency_test screens zero margins, but DIRECT
+    callers do not (test_stoichiometry_diffs' single-informative-stratum path), and _stratum_informative
+    only requires >=2 nonzero rows -- so at r>2 a zero row survives into this table. Drop all-zero rows
+    and columns here; if <2x2 remains the table is genuinely untestable (NaN, leaves the BH family)."""
     tab = np.asarray(table, dtype=float)
+    tab = tab[tab.sum(axis=1) > 0]        # drop all-zero rows
+    tab = tab[:, tab.sum(axis=0) > 0]     # drop columns left all-zero (recomputed after the row drop)
+    if tab.shape[0] < 2 or tab.shape[1] < 2:
+        return "untestable", "none", float("nan"), float("nan")
     r, c = tab.shape
     row = tab.sum(axis=1); col = tab.sum(axis=0); N = tab.sum()
     exp = np.outer(row, col) / N
@@ -231,7 +240,9 @@ def cmh_stratified_test(strata):
 
 def _stratum_informative(T) -> bool:
     """A stratum carries within-stratum information iff N>=2 AND >=2 rows and >=2 columns have reads --
-    exactly the strata cmh_stratified_test keeps (no zero row, no zero column)."""
+    exactly the strata cmh_stratified_test keeps. NOTE: this requires >=2 NONZERO rows/columns, NOT
+    that EVERY row/column is nonzero, so at r>2 an informative stratum can still contain a zero row (a
+    transcript with no reads in that sample); montecarlo_exact_test drops such rows/columns itself."""
     T = np.asarray(T, dtype=float)
     if T.size == 0:
         return False
