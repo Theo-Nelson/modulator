@@ -1686,6 +1686,18 @@ class ModulatorPipeline:
                 max_ff = int(subset_cfg.get("max_reads_per_fragmentform", 0) or 0)
                 ff_seed = int(subset_cfg.get("subsample_seed", 12345))
                 cap_script = str(self.script_path("cap_reads_per_fragmentform.py"))
+                if max_ff <= 0:
+                    # M1: with the per-fragmentform cap OFF the molecule mod table is built at FULL depth.
+                    # build_molecule_mod_table joins + sorts one chromosome at a time, so on a deep library
+                    # a single chromosome can be the whole table -- ~130M rows / tens of GB of TSV and
+                    # >150 GiB peak RAM (measured on production chr19), enough to OOM a normal node. Warn
+                    # loudly; set genotype.subset_bams.max_reads_per_fragmentform (e.g. 400) to bound it
+                    # with a deterministic seeded subsample (changes results: subsampled, not full depth).
+                    print("[modulator] WARNING genotype: max_reads_per_fragmentform=0 (per-fragmentform "
+                          "depth cap OFF) -- the molecule mod table is built at FULL depth and can need "
+                          ">150 GiB RAM / tens of GB of disk on deep libraries. Set "
+                          "genotype.subset_bams.max_reads_per_fragmentform (~400) to bound it (seeded "
+                          "subsample; deterministic but changes results).", file=sys.stderr, flush=True)
 
                 def _subset(in_bam: str) -> None:
                     out_bam = self.paths.geno_subset_bam(Path(in_bam))
