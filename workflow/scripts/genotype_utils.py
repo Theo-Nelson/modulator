@@ -160,12 +160,17 @@ def run_contingency_test(
     if tab.size == 0 or tab.shape[0] < 2 or tab.shape[1] < 2:
         return "none", "none", 0.0, 1.0
 
-    # A table with a zero marginal (a group or an outcome with no reads at all -- e.g. 100%/100%,
-    # 0%/0%, or a monomorphic group) is structurally UNTESTABLE: there is no variation to test on one
-    # axis. fisher returns an undefined (nan) odds ratio and chi2_contingency RAISES when pseudocount=0.
-    # Return NaN p so it is excluded from the BH family (it can never be significant), rather than
-    # crashing, writing a nan/inf statistic, or padding the multiple-testing burden with p==1 rows.
-    if not ((tab.sum(axis=0) > 0).all() and (tab.sum(axis=1) > 0).all()):
+    # Drop all-zero ROWS/COLUMNS (a group or outcome with no reads carries no information) BEFORE
+    # deciding testability. Strata are built over a FIXED row set -- a group absent from one sample is
+    # a zero row by construction, routine at 3v3 -- and _stratum_informative keeps such tables (it
+    # requires >=2 nonzero rows, not every row nonzero). The OLD zero-margin screen instead marked the
+    # WHOLE table untestable (NaN), silently dropping a genuinely-significant reduced table from the BH
+    # family -- and disagreeing with montecarlo_exact_test, which reduces internally for its direct
+    # callers. Reduce here so the dispatch (2x2->Fisher, else->MC exact) sees the informative survivors.
+    tab = tab[tab.sum(axis=1) > 0][:, tab.sum(axis=0) > 0]
+    # After the reduction there is no all-zero row/column left; the only remaining untestable case is a
+    # table that collapsed below 2x2 (all variation was on a single removed axis -- e.g. 100%/100%).
+    if tab.shape[0] < 2 or tab.shape[1] < 2:
         return "untestable", "none", float("nan"), float("nan")
 
     def do_fisher_2x2(tt):

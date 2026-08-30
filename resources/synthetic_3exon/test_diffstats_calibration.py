@@ -136,6 +136,17 @@ def main():
         ("shared exact: zero row DROPPED, not NaN'd out of the BH family", np.isfinite(_pz) and _pz < 1e-6),
         ("shared exact: <2x2 after dropping is untestable (NaN)", _nmu == "untestable" and not np.isfinite(_pu)),
     ]
+    # run_contingency_test (the path all FIVE genotype scripts use) must ALSO reduce a zero-row/zero-col
+    # table and test the survivors -- not screen the whole thing to untestable before dispatch, which
+    # silently dropped a significant reduced table and disagreed with the direct-call path.
+    _rc_name, _, _, _rc_p = gu.run_contingency_test(np.array([[0, 0], [10, 90], [85, 15]], dtype=float))
+    _rc_col = gu.run_contingency_test(np.array([[50, 10, 0], [10, 50, 0]], dtype=float))
+    _rc_u = gu.run_contingency_test(np.array([[0, 0], [0, 0], [50, 50]], dtype=float))
+    checks += [
+        ("run_contingency_test: zero row reduced + tested (not untestable)", np.isfinite(_rc_p) and _rc_p < 1e-6),
+        ("run_contingency_test: zero column reduced + tested", np.isfinite(_rc_col[3]) and _rc_col[3] < 1e-6),
+        ("run_contingency_test: genuine <2x2 collapse still untestable", _rc_u[0] == "untestable" and not np.isfinite(_rc_u[3])),
+    ]
     n_pass = 0
     for name, ok in checks:
         rate_ok = "PASS" if ok else "**FAIL**"
