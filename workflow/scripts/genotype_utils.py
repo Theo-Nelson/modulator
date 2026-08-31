@@ -343,13 +343,21 @@ def stratum_heterogeneity(inf_strata, min_row=10, min_col=5, smooth=1.0):
     if len(inf) < 2:
         return float("nan"), float("nan"), 0, len(inf)
     if c > 2:                                                  # pooled near-empty column guard (c>=3 only)
-        col_pooled = np.sum([T.sum(axis=0) for T in inf], axis=0)
-        keep = col_pooled >= min_col
-        if int(keep.sum()) < 2:
-            return float("nan"), float("nan"), 0, len(inf)     # <2 testable response levels left
-        if not keep.all():
-            inf = [T[:, keep] for T in inf]
-            r, c = inf[0].shape
+        # Pool the column totals over the strata the test WILL ACTUALLY USE -- those passing the
+        # min_row guard applied in the loop below -- NOT all informative strata. A column whose reads
+        # live entirely in a min_row-SKIPPED stratum would otherwise clear a pooled-over-everything
+        # guard yet be empty in every used stratum, and the near-empty degeneracy returns at full
+        # magnitude (same shape as the globally- and near-empty column bugs, one level deeper:
+        # informative-but-skipped). min_row routinely discards strata informative_strata kept.
+        used = [T for T in inf if not (T.sum(axis=1) < min_row).any()]
+        if len(used) >= 2:
+            col_pooled = np.sum([T.sum(axis=0) for T in used], axis=0)
+            keep = col_pooled >= min_col
+            if int(keep.sum()) < 2:
+                return float("nan"), float("nan"), 0, len(used)  # <2 testable response levels left
+            if not keep.all():
+                inf = [T[:, keep] for T in inf]
+                r, c = inf[0].shape
     d = (r - 1) * (c - 1)
     if d < 1:
         return float("nan"), float("nan"), 0, len(inf)

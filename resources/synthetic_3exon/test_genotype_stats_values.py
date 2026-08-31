@@ -45,6 +45,10 @@ def main():
                    approx(gu.stratified_max_distribution_shift([[[8, 2], [2, 8]], [[8, 2], [2, 8]]]), 0.6)))
     checks.append(("stratified_max_distribution_shift within-stratum-equal rows == 0.0",
                    approx(gu.stratified_max_distribution_shift([[[5, 5], [5, 5]]]), 0.0)))
+    # 3-row case where MAX over row pairs (0.6, rows 0 vs 2) != MEAN over pairs (0.4): pins the reducer
+    # as a max, not a mean (a 2x2-only fixture cannot separate them -- there is a single row pair).
+    checks.append(("stratified_max_distribution_shift 3-row == max over pairs (0.6, not mean 0.4)",
+                   approx(gu.stratified_max_distribution_shift([[[80, 20], [50, 50], [20, 80]]]), 0.6)))
 
     # --- binary_rate_delta: rate0=8/10, rate1=3/10 -> 0.5; non-2x2 -> 0 ---
     checks.append(("binary_rate_delta [[8,2],[3,7]] == 0.5", approx(gu.binary_rate_delta([[8, 2], [3, 7]]), 0.5)))
