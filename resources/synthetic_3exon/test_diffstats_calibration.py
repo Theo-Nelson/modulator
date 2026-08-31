@@ -103,6 +103,28 @@ def all_zero_dropped_and_effect_kept():
     return n_zero, (("e",) in keys)
 
 
+def het_empty_last_col_null(reps=400, seed0=1):
+    """MAJOR 1: heterogeneity null type-I when the last column is empty in every stratum (a phantom
+    level). Without the informative_strata level-reduction this blew up to 0.56-0.81 (rank-deficient
+    theta vs Agresti-smoothed covariance). Strata drawn from ONE identical distribution (true null)."""
+    rng = np.random.default_rng(seed0)
+    flags = used = 0
+    for _ in range(reps):
+        strata = []
+        for _k in range(3):
+            T = np.zeros((2, 3))
+            for i in range(2):
+                T[i, :2] = rng.multinomial(rng.integers(20, 60), [0.5, 0.5])  # last col always 0
+            strata.append(T)
+        inf = gu.informative_strata(strata)
+        if len(inf) < 2:
+            continue
+        used += 1
+        _, hp, _, _ = gu.stratum_heterogeneity(inf)
+        flags += (np.isfinite(hp) and hp < 0.05)
+    return flags / max(1, used)
+
+
 def main():
     # thresholds sit ~4 SE (SE~0.01 at n=500) above the observed Cox-Reid rates and WELL below the
     # ~0.11 pre-fix inflation, so this bites on a regression without flaking on Monte-Carlo noise.
@@ -146,6 +168,18 @@ def main():
         ("run_contingency_test: zero row reduced + tested (not untestable)", np.isfinite(_rc_p) and _rc_p < 1e-6),
         ("run_contingency_test: zero column reduced + tested", np.isfinite(_rc_col[3]) and _rc_col[3] < 1e-6),
         ("run_contingency_test: genuine <2x2 collapse still untestable", _rc_u[0] == "untestable" and not np.isfinite(_rc_u[3])),
+    ]
+    # MAJOR 1+2: informative_strata drops levels zero in EVERY stratum, so CMH + heterogeneity get the
+    # reduction (not just the exact_single path). A phantom empty column made heterogeneity anti-
+    # conservative and cost CMH a spurious df.
+    _phantom = [np.array([[80, 20, 0], [20, 80, 0]], dtype=float) for _ in range(3)]  # last col empty everywhere
+    _red = gu.informative_strata(_phantom)
+    _cmh_full = gu.cmh_stratified_test([np.array([[80, 20], [20, 80]], dtype=float) for _ in range(3)])
+    _cmh_phantom = gu.cmh_stratified_test(_red)
+    checks += [
+        ("MAJOR1: heterogeneity null w/ empty last col <= 0.10 (was 0.56-0.81)", het_empty_last_col_null() <= 0.10),
+        ("MAJOR1+2: informative_strata drops the globally-empty level", all(T.shape == (2, 2) for T in _red)),
+        ("MAJOR2: phantom empty level does not inflate CMH p (df restored)", abs(_cmh_phantom[3] - _cmh_full[3]) < 1e-9),
     ]
     n_pass = 0
     for name, ok in checks:

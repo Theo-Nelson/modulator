@@ -207,12 +207,28 @@ def main():
           len(crow) and crow.iloc[0]["p_adj_bh"] < 0.05 and crow.iloc[0]["delta"] < 0,
           f"delta={crow.iloc[0]['delta']:.2f} p_adj={crow.iloc[0]['p_adj_bh']:.1e}" if len(crow) else "missing")
     iso = rd(f"between_conditions/{P}_zikv_vs_mock_isoform_usage_diffs.tsv")
-    ga = iso[iso.gene_name == "GENE_A"]
-    check("GENE_A isoform usage shifts between conditions (>=1 form p_adj<0.05)",
-          (ga["p_adj_bh"] < 0.05).any())
+    ga_sig = iso[(iso.gene_name == "GENE_A") & (iso["p_adj_bh"] < 0.05)].copy()
+    ga_sig["feature"] = ga_sig["feature"].astype(str)
+    t2 = ga_sig[ga_sig.feature.str.endswith(".T2")]   # A2, zikv-favoured
+    t1 = ga_sig[ga_sig.feature.str.endswith(".T1")]   # A1, mock-favoured
+    # MAJOR 3: also assert DIRECTION. Ground truth: mock favours A1, zikv favours A2 (contrast
+    # zikv_vs_mock), so delta = mu_test(zikv) - mu_reference(mock) must be >0 for A2 (T2) and <0 for A1
+    # (T1). An FDR-only check passed even when gidx was inverted (which negates every delta and swaps
+    # mu_reference/mu_test).
+    check("GENE_A isoform usage shifts, zikv favours A2 (T2 delta>0 & mu_test>mu_ref, T1 delta<0)",
+          len(t2) and float(t2.iloc[0]["delta"]) > 0
+          and float(t2.iloc[0]["mu_test"]) > float(t2.iloc[0]["mu_reference"])
+          and len(t1) and float(t1.iloc[0]["delta"]) < 0,
+          f"T2 delta={float(t2.iloc[0]['delta']):.2f}" if len(t2) else "no sig A2 form")
     tl = rd(f"between_conditions/{P}_zikv_vs_mock_tail_diffs.tsv")
-    check("GENE_B tail length differs between conditions",
-          (tl[tl.gene_name == "GENE_B"]["p_adj_bh"] < 0.05).any())
+    gb_sig = tl[(tl.gene_name == "GENE_B") & (tl["p_adj_bh"] < 0.05)]
+    # MAJOR 3: ground truth -- GENE_B B1 is ~120 nt (mock) -> ~180 nt (zikv), so the significant form's
+    # delta_nt must be POSITIVE (zikv longer, mean_tail_test > mean_tail_reference). continuous_diff(b,a)
+    # inverted it (+56.75 -> -56.75) yet an FDR-only check still passed.
+    check("GENE_B tail longer in zikv between conditions (significant form delta_nt>0)",
+          len(gb_sig) and float(gb_sig.iloc[0]["delta_nt"]) > 0
+          and float(gb_sig.iloc[0]["mean_tail_test"]) > float(gb_sig.iloc[0]["mean_tail_reference"]),
+          f"delta_nt={float(gb_sig.iloc[0]['delta_nt']):.2f}" if len(gb_sig) else "no sig GENE_B form")
 
     print("== STRUCTURAL CLASSIFICATION (classify_diffs) ==")
     cl = rd(f"test_diffs/{P}__ZN_site_classified.tsv")

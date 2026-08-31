@@ -256,11 +256,29 @@ def _stratum_informative(T) -> bool:
 
 
 def informative_strata(strata):
-    """The subset of `strata` that carry within-stratum information (see _stratum_informative). Filtering
-    once here lets the caller reuse the SAME informative set for the primary test, the odds ratio, the
-    effect, and the heterogeneity test -- so none of them silently reverts to a table that pools reads
-    back in from the non-informative samples."""
-    return [np.asarray(T, dtype=float) for T in strata if _stratum_informative(T)]
+    """The subset of `strata` that carry within-stratum information (see _stratum_informative), with
+    LEVELS (rows/columns) that are zero in EVERY informative stratum dropped. Filtering once here lets
+    the caller reuse the SAME informative set for the primary test, the odds ratio, the effect, and the
+    heterogeneity test -- so none of them silently reverts to a table that pools reads back in.
+
+    Why the level-reduction (fixing the common point once, so CMH + heterogeneity + the exact test all
+    get it): a level with no reads in ANY informative stratum is a phantom dimension. It costs
+    cmh_stratified_test a spurious degree of freedom -> p inflated (12.6x per empty level, real hits
+    lost -- CONSERVATIVE), and it makes stratum_heterogeneity rank-deficient relative to its Agresti-
+    smoothed covariance so W = inv(Cov) blows up -> false heterogeneity flags (ANTI-conservative:
+    null type-I 0.56-0.81 when the last column is empty). run_contingency_test already reduced for the
+    single-stratum exact path; doing it HERE gives every consumer the reduced strata, so a site can no
+    longer get the honest answer at 1 stratum and an inflated one at >=2. CMH needs a fixed row/col set,
+    so a level is dropped only when it is zero across ALL strata (kept if nonzero in any)."""
+    inf = [np.asarray(T, dtype=float) for T in strata if _stratum_informative(T)]
+    if not inf or len({T.shape for T in inf}) != 1:   # ragged strata (shouldn't happen) -> don't reduce
+        return inf
+    stack = np.stack(inf)                              # (K, r, c)
+    row_keep = stack.sum(axis=(0, 2)) > 0             # rows nonzero in >=1 stratum
+    col_keep = stack.sum(axis=(0, 1)) > 0             # cols nonzero in >=1 stratum
+    if row_keep.all() and col_keep.all():
+        return inf
+    return [T[row_keep][:, col_keep] for T in inf]
 
 
 def stratified_primary(inf_strata, exact_test, min_strata=2):
