@@ -306,7 +306,7 @@ def stratified_primary(inf_strata, exact_test, min_strata=2):
     return ("untestable", "none", float("nan"), float("nan"), 0, "none")
 
 
-def stratum_heterogeneity(inf_strata, min_row=10, smooth=1.0):
+def stratum_heterogeneity(inf_strata, min_row=10, min_col=5, smooth=1.0):
     """Cochran's Q test of effect HOMOGENEITY across the INFORMATIVE strata, on the row-conditional
     PROPORTION (RISK-DIFFERENCE) scale -- the SAME scale as the reported effect (mh_stratified_effect /
     stratified_max_distribution_shift). Testing homogeneity on the odds-ratio scale (the earlier
@@ -326,11 +326,30 @@ def stratum_heterogeneity(inf_strata, min_row=10, smooth=1.0):
     below that the normal approximation is unreliable. With both, the null is ~nominal (0.037 on HG002-like
     K=2 depths, 0.06-0.08 at 16-32 reads/row), the p-values are finite (so add_heterogeneity_flag's BH
     adjustment gives real protection: post-BH false-flag ~0 on homogeneous tables), and >=98% of rows are
-    still tested. Returns (hetero_stat, hetero_p, hetero_df, n_usable); NaN when <2 usable strata."""
+    still tested. Returns (hetero_stat, hetero_p, hetero_df, n_usable); NaN when <2 usable strata.
+
+    NEAR-EMPTY COLUMN GUARD (min_col): the column-wise mirror of the per-stratum min_row guard.
+    informative_strata already drops any response level empty in EVERY stratum, but a column with just
+    a few reads POOLED across strata survives and still gives a near-degenerate row-conditional
+    proportion whose Agresti-smoothed variance under-states the true noise -> Q inflation -> false
+    heterogeneity (measured null ~0.26 at <5 pooled reads, well above nominal). So for c>=3 any column
+    whose reads pooled across strata total < min_col is dropped before the test; the response is never
+    reduced below 2 columns (untestable -> NaN). 2x2 tables are left untouched (nothing to drop)."""
     inf = [np.asarray(T, dtype=float) for T in inf_strata]
     if len(inf) < 2:
         return float("nan"), float("nan"), 0, len(inf)
     r, c = inf[0].shape
+    inf = [T for T in inf if T.shape == (r, c)]                # common-shape strata only (mirrors in-loop guard)
+    if len(inf) < 2:
+        return float("nan"), float("nan"), 0, len(inf)
+    if c > 2:                                                  # pooled near-empty column guard (c>=3 only)
+        col_pooled = np.sum([T.sum(axis=0) for T in inf], axis=0)
+        keep = col_pooled >= min_col
+        if int(keep.sum()) < 2:
+            return float("nan"), float("nan"), 0, len(inf)     # <2 testable response levels left
+        if not keep.all():
+            inf = [T[:, keep] for T in inf]
+            r, c = inf[0].shape
     d = (r - 1) * (c - 1)
     if d < 1:
         return float("nan"), float("nan"), 0, len(inf)

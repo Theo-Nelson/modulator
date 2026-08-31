@@ -105,16 +105,46 @@ def all_zero_dropped_and_effect_kept():
 
 def het_empty_last_col_null(reps=400, seed0=1):
     """MAJOR 1: heterogeneity null type-I when the last column is empty in every stratum (a phantom
-    level). Without the informative_strata level-reduction this blew up to 0.56-0.81 (rank-deficient
-    theta vs Agresti-smoothed covariance). Strata drawn from ONE identical distribution (true null)."""
+    level). The two rows have DIFFERENT but stratum-CONSTANT proportions ([.8,.2] vs [.2,.8]) so the true
+    risk difference is homogeneous (null holds) yet non-zero -- which is what makes the empty column bite:
+    with BOTH column guards removed the rank-deficient theta vs Agresti-smoothed covariance inflates Q and
+    this runs ~0.52 (an EQUAL-rows null gives theta~0 and stays low even when broken, so it could not
+    catch a regression). informative_strata drops the globally-empty level and stratum_heterogeneity's
+    min_col drops it again as a pooled near-empty column; together they hold this at ~nominal."""
     rng = np.random.default_rng(seed0)
+    rows = ([0.8, 0.2], [0.2, 0.8])
     flags = used = 0
     for _ in range(reps):
         strata = []
         for _k in range(3):
             T = np.zeros((2, 3))
             for i in range(2):
-                T[i, :2] = rng.multinomial(rng.integers(20, 60), [0.5, 0.5])  # last col always 0
+                T[i, :2] = rng.multinomial(rng.integers(20, 60), rows[i])  # last col always 0
+            strata.append(T)
+        inf = gu.informative_strata(strata)
+        if len(inf) < 2:
+            continue
+        used += 1
+        _, hp, _, _ = gu.stratum_heterogeneity(inf)
+        flags += (np.isfinite(hp) and hp < 0.05)
+    return flags / max(1, used)
+
+
+def het_near_empty_col_null(reps=500, seed0=3):
+    """MAJOR 1 residual (min_col): heterogeneity null type-I when the last column is NEAR-empty -- a few
+    reads pooled across strata, so informative_strata (which only drops levels empty in EVERY stratum)
+    cannot help. Rows are homogeneous but unequal ([.8,.2]/[.2,.8]); the near-degenerate last column
+    inflates Q to ~0.26 (~5x nominal) unless stratum_heterogeneity's pooled min_col guard drops it."""
+    rng = np.random.default_rng(seed0)
+    rows = ([0.8, 0.2], [0.2, 0.8])
+    flags = used = 0
+    for _ in range(reps):
+        strata = []
+        for _k in range(3):
+            T = np.zeros((2, 3))
+            for i in range(2):
+                T[i, :2] = rng.multinomial(rng.integers(20, 60), rows[i])
+                T[i, 2] = rng.integers(0, 2) if rng.random() < 0.3 else 0  # pooled < min_col
             strata.append(T)
         inf = gu.informative_strata(strata)
         if len(inf) < 2:
@@ -177,7 +207,8 @@ def main():
     _cmh_full = gu.cmh_stratified_test([np.array([[80, 20], [20, 80]], dtype=float) for _ in range(3)])
     _cmh_phantom = gu.cmh_stratified_test(_red)
     checks += [
-        ("MAJOR1: heterogeneity null w/ empty last col <= 0.10 (was 0.56-0.81)", het_empty_last_col_null() <= 0.10),
+        ("MAJOR1: heterogeneity null w/ empty last col <= 0.10 (unequal rows; ~0.52 if unguarded)", het_empty_last_col_null() <= 0.10),
+        ("MAJOR1 residual: heterogeneity null w/ NEAR-empty col <= 0.12 (~0.26 without min_col)", het_near_empty_col_null() <= 0.12),
         ("MAJOR1+2: informative_strata drops the globally-empty level", all(T.shape == (2, 2) for T in _red)),
         ("MAJOR2: phantom empty level does not inflate CMH p (df restored)", abs(_cmh_phantom[3] - _cmh_full[3]) < 1e-9),
     ]
