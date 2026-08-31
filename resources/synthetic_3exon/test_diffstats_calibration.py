@@ -182,6 +182,35 @@ def het_informative_but_skipped_col_null(reps=600, seed0=11):
     return flags / max(1, used)
 
 
+def het_col_drop_unmasks_skipped_col_null(reps=600, seed0=21):
+    """MAJOR 1 residual, deepest level (fixed-point column reduction): the min_col drop itself lowers row
+    sums, so a BOUNDARY stratum (row totals just >= min_row) that cleared min_col for a second column can
+    fall under min_row once a FIRST near-empty column is dropped -- stranding that second column empty
+    among the strata actually used. A single min_col pass (even pooled over the initially-min_row-passing
+    strata) cannot see this; only recomputing the used set after each drop (iterating to a fixed point)
+    closes it. Two identical main strata (homogeneous truth) + one boundary stratum (row totals 11)
+    carrying col X (pooled 4 < min_col) and col Y (pooled 8 >= min_col): dropping X pushes the boundary
+    under min_row, leaving Y empty among the used strata. Single-pass ~0.48; fixed point ~0.05."""
+    rng = np.random.default_rng(seed0)
+    rows = ([0.8, 0.2], [0.2, 0.8])
+    flags = used = 0
+    for _ in range(reps):
+        strata = []
+        for _k in range(2):                                   # main used strata; cols X,Y empty
+            T = np.zeros((2, 4))
+            for i in range(2):
+                T[i, :2] = rng.multinomial(rng.integers(20, 60), rows[i])
+            strata.append(T)
+        strata.append(np.array([[3., 2., 2., 4.], [2., 3., 2., 4.]]))  # row totals 11; X pooled 4, Y pooled 8
+        inf = gu.informative_strata(strata)
+        if len(inf) < 2:
+            continue
+        used += 1
+        _, hp, _, _ = gu.stratum_heterogeneity(inf)
+        flags += (np.isfinite(hp) and hp < 0.05)
+    return flags / max(1, used)
+
+
 def main():
     # thresholds sit ~4 SE (SE~0.01 at n=500) above the observed Cox-Reid rates and WELL below the
     # ~0.11 pre-fix inflation, so this bites on a regression without flaking on Monte-Carlo noise.
@@ -237,6 +266,7 @@ def main():
         ("MAJOR1: heterogeneity null w/ empty last col <= 0.10 (unequal rows; ~0.52 if unguarded)", het_empty_last_col_null() <= 0.10),
         ("MAJOR1 residual: heterogeneity null w/ NEAR-empty col <= 0.12 (~0.26 without min_col)", het_near_empty_col_null() <= 0.12),
         ("MAJOR1 residual: heterogeneity null w/ INFORMATIVE-but-min_row-SKIPPED col <= 0.10 (~0.52 if pooled over all)", het_informative_but_skipped_col_null() <= 0.10),
+        ("MAJOR1 residual: heterogeneity null w/ col-drop UNMASKING a skipped stratum <= 0.10 (~0.48 single-pass; needs fixed point)", het_col_drop_unmasks_skipped_col_null() <= 0.10),
         ("MAJOR1+2: informative_strata drops the globally-empty level", all(T.shape == (2, 2) for T in _red)),
         ("MAJOR2: phantom empty level does not inflate CMH p (df restored)", abs(_cmh_phantom[3] - _cmh_full[3]) < 1e-9),
     ]
