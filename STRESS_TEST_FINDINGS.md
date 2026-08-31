@@ -78,7 +78,7 @@ ground truth before release, so they're documented for the authors to decide).
 
 ### LOW (latent / edge)
 - `discover_candidate_snps.py`: `--min-mapq 0` vs `1` flips which SAM flags are filtered (not just MAPQ).
-- `build_molecule_mod_table.py` / `extract_mod_calls_pysam.py`: a `"."`-strand candidate mod site drops all its calls (strands are normally `+`/`-`).
+- ~~`build_molecule_mod_table.py` / `extract_mod_calls_pysam.py`: a `"."`-strand candidate mod site drops all its calls~~ — RESOLVED: the live `build_molecule_mod_table.py` skips the strand-mismatch filter when `ref_strand in {".", "?"}` (keeps the calls), and the orphaned `extract_mod_calls_pysam.py` (its only remaining carrier, never called by the pipeline) has been deleted.
 - `test_mod_mod_assoc.py`: the `min_state_reads` gate checks only site A's marginal, so a monomorphic site B yields uninformative zero-column pairs that still enter BH.
 - `genotype_utils.py` (`shard_tsv_by_chrom`): if `chrom` were the last column, the shard key keeps a trailing newline (latent; chrom isn't last today).
 - `assemble_transcripts.py`: the *script* default `--min-frac 0.05` is a genome-global fraction that wipes all output at genome scale (the pipeline overrides to `0.00`; direct-CLI footgun).

@@ -25,6 +25,8 @@ echo "### 2/4 classify_diffs taxonomy + snp-at-mod-base unit tests"
 "$PY" "$HERE/test_condition_tail_threshold_step.py" || rc=1
 "$PY" "$HERE/test_modmod_same_base.py" || rc=1
 "$PY" "$HERE/test_diffstats_calibration.py" || rc=1
+"$PY" "$HERE/test_genotype_stats_values.py" || rc=1
+"$PY" "$HERE/test_cap_reads_per_fragmentform.py" || rc=1
 "$PY" "$HERE/test_usage_dotted_gene.py" || rc=1
 PYTHONPATH=src "$PY" "$HERE/test_reference_contig_guard.py" || rc=1
 PYTHONPATH=src "$PY" "$HERE/test_scaling_features.py" || rc=1
