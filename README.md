@@ -15,7 +15,7 @@ base-modification tags and, in a single command:
 
 The supported interface is the `modulator` Python CLI.
 
-**See a live example → [sample HTML report](https://rawcdn.githack.com/Theo-Nelson/modulator/000b10773772b38bd39e98603a2f5548b748c707/docs/sample_report/demo14_report.html) · [sample gene browser](https://rawcdn.githack.com/Theo-Nelson/modulator/000b10773772b38bd39e98603a2f5548b748c707/docs/sample_report/demo14_gene_browser.html)** (both rendered from the bundled 14-gene demo). <!-- commit-pinned rawcdn URL: immutable, so the HTML and its externalized figures always match; re-pin the SHA whenever docs/sample_report is regenerated. -->
+**See a live example → [sample HTML report](https://rawcdn.githack.com/Theo-Nelson/modulator/0baa342be8c46a3081d2ccbb9c5ace85ca3f95f3/docs/sample_report/demo14_report.html) · [sample gene browser](https://rawcdn.githack.com/Theo-Nelson/modulator/0baa342be8c46a3081d2ccbb9c5ace85ca3f95f3/docs/sample_report/demo14_gene_browser.html)** (both rendered from the bundled 14-gene demo). <!-- commit-pinned rawcdn URL: immutable, so the HTML and its externalized figures always match; re-pin the SHA whenever docs/sample_report is regenerated. -->
 
 
 **Full parameter, output, and HPC reference -> [ADVANCED_USAGE.md](ADVANCED_USAGE.md)**
