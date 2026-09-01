@@ -1493,7 +1493,7 @@ def build_apa_motif_section(apa_df, top_n):
     if not ip.empty:
         cols = [c for c in ["gene_name", "zt_label", "chrom", "strand", "tes", "downstream_a_frac",
                             "fragmentform_class", "read_support"] if c in ip.columns]
-        parts.append(subsection("Sites flagged as likely internal priming", df_to_html(ip[cols], max_rows=top_n)))
+        parts.append(subsection("Fragmentforms flagged as likely internal priming", df_to_html(ip[cols], max_rows=top_n)))
     return section(
         "APA Motifs (Polyadenylation Signals) in Fragmentforms",
         "".join(parts),
