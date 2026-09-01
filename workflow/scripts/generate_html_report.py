@@ -1474,7 +1474,7 @@ def build_apa_motif_section(apa_df, top_n):
         f"<li><b>{total:,}</b> APA sites checked — <b>{n_pas:,} ({100.0 * n_pas / total:.1f}%)</b> carry a polyadenylation signal</li>"
         f"<li><b>{counts.get('PAS_CANONICAL', 0):,}</b> canonical <code>AATAAA</code>; "
         f"<b>{counts.get('PAS_VARIANT', 0):,}</b> a variant hexamer</li>"
-        f"<li><b>{n_ip:,}</b> flagged <b>likely internal priming</b> (no PAS + A-rich downstream genome)</li>"
+        f"<li><b>{n_ip:,}</b> <b>A-rich, PAS-less 3′ ends</b> (no PAS + A-rich downstream genome — possible internal priming or genome-encoded A-run)</li>"
         "</ul>"
     )
     summ = pd.DataFrame({"apa_motif_class": list(counts.keys()), "n_sites": list(counts.values())})
@@ -1493,22 +1493,26 @@ def build_apa_motif_section(apa_df, top_n):
     if not ip.empty:
         cols = [c for c in ["gene_name", "zt_label", "chrom", "strand", "tes", "downstream_a_frac",
                             "fragmentform_class", "read_support"] if c in ip.columns]
-        parts.append(subsection("Fragmentforms flagged as likely internal priming", df_to_html(ip[cols], max_rows=top_n)))
+        parts.append(subsection("Fragmentforms with A-rich, PAS-less 3′ ends (possible internal priming or genome-encoded A-run)", df_to_html(ip[cols], max_rows=top_n)))
     return section(
         "APA Motifs (Polyadenylation Signals) in Fragmentforms",
         "".join(parts),
         intro="Each fragmentform's TES is a cleavage/polyadenylation site. For every one, the genomic "
               "sequence around it is read in sense (fragmentform) orientation and scanned for a polyadenylation "
               "signal (canonical AATAAA or a known variant hexamer, normally 10-30 nt upstream) plus a "
-              "downstream U/GU-rich element. This both annotates the site and filters artifacts: a site "
-              "with no PAS whose downstream genome is A-rich was most likely produced by an oligo-dT "
-              "primer annealing to an internal A-stretch (internal priming), not by real cleavage.",
+              "downstream U/GU-rich element. This both annotates the site and flags lower-confidence 3′ ends: "
+              "a site with no PAS whose downstream genome is A-rich is an A-rich, PAS-less 3′ end. In "
+              "oligo-dT cDNA methods that is the classic internal-priming signature (a poly-dT primer annealing "
+              "to an internal A-stretch instead of the tail); in direct-RNA, where the adapter is ligated to the "
+              "native 3′ end, the same pattern can instead reflect a genome-encoded A-run captured at a "
+              "fragment end. Either way, treat these as lower-confidence APA calls to inspect rather than "
+              "confirmed cleavage sites.",
         definitions=definitions_html([
             ("PAS_CANONICAL", "Canonical AATAAA hexamer found upstream — the textbook signal."),
             ("PAS_VARIANT", "One of the 11 known variant hexamers (ATTAAA, TATAAA, AGTAAA, ...)."),
-            ("PAS_NONE_INTERNAL_PRIMING", "No PAS AND A-rich downstream genome — likely an oligo-dT internal-priming artifact, not a real APA site."),
+            ("PAS_NONE_INTERNAL_PRIMING", "No PAS AND A-rich downstream genome — an A-rich, PAS-less 3′ end. Possible internal priming (the classic oligo-dT cDNA artifact) or a genome-encoded A-run captured at a fragment 3′ end; a lower-confidence APA call, not a confirmed artifact."),
             ("PAS_NONE", "No PAS but not A-rich — a non-canonical or novel site worth inspecting."),
-            ("downstream_a_frac", "A fraction of the genomic sequence just downstream of the cleavage site; high values are the internal-priming signature."),
+            ("downstream_a_frac", "A fraction of the genomic sequence just downstream of the cleavage site; high values are the A-rich, PAS-less signature (possible internal priming)."),
         ], summary="Category definitions"),
     )
 

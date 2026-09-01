@@ -697,6 +697,32 @@ class ModulatorPipeline:
     def _require_reference_gtf(self) -> Path:
         return self._require_existing_file(self.reference_gtf, "reference GTF")
 
+    def _reference_gene_count(self) -> int:
+        """Distinct ``gene_id`` in the reference GTF. Used as the default gene-browser cap so every
+        annotated gene stays lookup-able: a run assembles at most one browser entry per reference gene
+        it covers (plus a few novel loci), so this bound effectively never truncates a real run, while
+        still being a finite guard. Memoized; falls back to 20000 if the GTF can't be read."""
+        cached = getattr(self, "_ref_gene_count_cache", None)
+        if cached is not None:
+            return cached
+        genes = set()
+        try:
+            with open(self.reference_gtf) as fh:
+                for line in fh:
+                    if not line or line[0] == "#":
+                        continue
+                    i = line.find('gene_id "')
+                    if i == -1:
+                        continue
+                    j = line.find('"', i + 9)
+                    if j != -1:
+                        genes.add(line[i + 9:j])
+        except OSError:
+            return 20000
+        n = len(genes) or 20000
+        self._ref_gene_count_cache = n
+        return n
+
     def _require_modkit_outputs(self) -> Path:
         base = self.paths.modkit_zn
         self._require_existing_dir(base, "modkit ZN output directory")
@@ -2250,7 +2276,9 @@ class ModulatorPipeline:
                 "--gtf", str(self.paths.out_gtf),
                 "--out-html", str(self.paths.gene_browser_html),
                 "--title", f"{self.prefix} — gene browser",
-                "--max-genes", str(int(report_cfg.get("browser_max_genes", 4000))),
+                # Default the cap to the reference GTF's gene count so every annotated gene is
+                # lookup-able (no silent truncation); an explicit browser_max_genes still overrides.
+                "--max-genes", str(int(report_cfg.get("browser_max_genes") or self._reference_gene_count())),
                 "--verbose",
             ]
             for flag, path in (

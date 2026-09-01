@@ -54,7 +54,7 @@ def parse_args():
                          "and the browser groups rows by the 'contrast' column)")
     ap.add_argument("--hierarchical-stoich", default="", help="*_hierarchical_stoich.tsv")
     ap.add_argument("--out-html", required=True)
-    ap.add_argument("--max-genes", type=int, default=4000, help="Cap genes embedded (largest by read support)")
+    ap.add_argument("--max-genes", type=int, default=20000, help="Cap genes embedded (largest by read support); 20000 covers a full human/mouse transcriptome so every expressed gene is lookup-able")
     ap.add_argument("--title", default="modulator gene browser")
     ap.add_argument("--verbose", action="store_true")
     return ap.parse_args()
