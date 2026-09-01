@@ -2543,8 +2543,7 @@ def main():
             nl_body,
             intro="Read-backed loci whose fragmentforms overlap no annotated gene in the reference GTF. Each locus "
                   "is formed by merging overlapping novel fragmentforms on one strand and is given a unique, "
-                  "deterministic, coordinate-anchored name (NOVEL_<chrom>_<strand>_<n>_<start>_<end>), so two "
-                  "distinct novel loci on the same chromosome and strand can never be conflated.",
+                  "deterministic, coordinate-anchored name (NOVEL_<chrom>_<strand>_<n>_<start>_<end>).",
             definitions=definitions_html(column_definitions(list(novel_loci_df.columns)), summary="Column definitions") if not novel_loci_df.empty else "",
         )
 
