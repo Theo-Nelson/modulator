@@ -178,6 +178,43 @@ def main():
         if off_context_mod_site in set(hap_mod.get("mod_site_id", [])):
             raise AssertionError("Off-context mod site should not appear in haplotype-mod associations.")
 
+    # ---- A9: a SNP whose exon annotation names metagene 1 only, observed on reads ASSIGNED to metagene
+    # 2 (e.g. the SNP lies in a retained intron / 5' region absent from metagene-2 fragmentform models).
+    # The mod calls on those same reads are keyed MG:2 (assignment metagene), so the pair must be found.
+    with tempfile.TemporaryDirectory(prefix="genotype_smoke_a9_") as tmpdir:
+        tmp = Path(tmpdir)
+        snp_rows, mod_rows = [], []
+        for i in range(1, 17):
+            q = f"r{i}"
+            allele = "alt" if i % 2 == 0 else "ref"
+            modified = 1 if allele == "alt" else 0           # perfectly allele-linked modification
+            snp_rows.append({"sample": "S1", "qname": q, "snp_id": "chr1:501:A>G", "chrom": "chr1", "pos1": 501,
+                             "start0": 500, "end0": 501, "ref": "A", "alt": "G",
+                             "observed_base": "G" if allele == "alt" else "A", "allele_class": allele,
+                             "baseq": 40, "mapq": 60, "strand": "+", "ZT": "GENE2.GENE2.G2.T1", "ZG": 2, "ZN": 1,
+                             "ZM": 2, "gene_names": "GENE1", "gene_ids": "GENE1", "metagene_indices": "1"})
+            mod_rows.append({"sample": "S1", "qname": q, "mod_site_id": "chr1:900-901:+:a", "chrom": "chr1",
+                             "start0": 900, "end0": 901, "strand": "+", "target_mod_code": "a",
+                             "call_code": "a" if modified else "-", "state_detail": "modified" if modified else "canonical",
+                             "target_modified": modified, "call_prob": 0.99, "canonical_base": "A",
+                             "modified_primary_base": "A", "fail": False, "within_alignment": True,
+                             "gene_id": "GENE2", "gene_name": "GENE2", "metagene_index": "2",
+                             "ZT": "GENE2.GENE2.G2.T1", "ZG": 2, "ZN": 1, "ZM": 2, "assigned": True,
+                             "assignment_gene_id": "GENE2", "assignment_gene_name": "GENE2",
+                             "assignment_metagene_index": "2", "usable": True})
+        snp_path = tmp / "molecule_snps.tsv"; mod_path = tmp / "molecule_mods.tsv"
+        pd.DataFrame(snp_rows).to_csv(snp_path, sep="\t", index=False)
+        pd.DataFrame(mod_rows).to_csv(mod_path, sep="\t", index=False)
+        out = tmp / "snp_mod.tsv"
+        run([sys.executable, str(ROOT / "test_snp_mod_assoc.py"), "--molecule-snps", str(snp_path),
+             "--molecule-mods", str(mod_path), "--out-tsv", str(out), "--min-allele-reads", "2", "--min-total-reads", "4"])
+        res = pd.read_csv(out, sep="\t")
+        if res.empty or "chr1:900-901:+:a" not in set(res["mod_site_id"]):
+            raise AssertionError("A9: SNP on reads assigned to metagene 2 must pair with the mod calls on those reads "
+                                 "even though the SNP's exon annotation names metagene 1 only.")
+        if float(res.iloc[0]["effect_abs_delta_mod_frac"]) < 0.9:
+            raise AssertionError("A9: the perfectly allele-linked modification should show a ~1.0 effect.")
+
     print("genotype_regression_smoke_checks: OK")
 
 

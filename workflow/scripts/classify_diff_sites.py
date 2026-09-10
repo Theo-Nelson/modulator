@@ -705,14 +705,30 @@ def render_category_figures(fig_records, zn_long_path, figs_dir, per_category,
               file=sys.stderr)
         return {}
 
-    df = pd.read_csv(zn_long_path, sep="\t", low_memory=False)
     need = {"gene_name", "mod_code", "chrom", "start0", "end0", "strand",
             "ZN_transcript_index", "sample", "Nvalid_cov", "Nmod"}
-    missing = need - set(df.columns)
+    hdr = set(pd.read_csv(zn_long_path, sep="\t", nrows=0).columns)
+    missing = need - hdr
     if missing:
         print(f"[classify] WARN zn-long missing columns {sorted(missing)}; skipping figures",
               file=sys.stderr)
         return {}
+    # Only the top-`per_category` sites of each category are plotted, so stream the (large) long
+    # table in chunks and keep just those sites' rows instead of loading every row + a tuple per row.
+    _wanted = set()
+    for recs in by_cat.values():
+        for rec in sorted(recs, key=lambda d: d['effect'], reverse=True)[:per_category]:
+            _wanted.add(f"{rec['gene']}|{rec['mod']}|{rec['chrom']}|{int(rec['start0'])}|{int(rec['end0'])}|{rec['strand']}")
+    _parts = []
+    for chunk in pd.read_csv(zn_long_path, sep="\t", low_memory=False, usecols=sorted(need), chunksize=2_000_000):
+        k = (chunk["gene_name"].astype(str) + "|" + chunk["mod_code"].astype(str) + "|" + chunk["chrom"].astype(str)
+             + "|" + pd.to_numeric(chunk["start0"], errors="coerce").fillna(-1).astype(int).astype(str)
+             + "|" + pd.to_numeric(chunk["end0"], errors="coerce").fillna(-1).astype(int).astype(str)
+             + "|" + chunk["strand"].astype(str))
+        sub = chunk[k.isin(_wanted)]
+        if not sub.empty:
+            _parts.append(sub)
+    df = pd.concat(_parts, ignore_index=True) if _parts else pd.DataFrame(columns=sorted(need))
     for c in ["start0", "end0", "Nvalid_cov", "Nmod", "ZN_transcript_index"]:
         df[c] = pd.to_numeric(df[c], errors="coerce")
     df = df.dropna(subset=["start0", "end0", "Nvalid_cov", "Nmod",

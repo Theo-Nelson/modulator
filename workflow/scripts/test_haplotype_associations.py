@@ -10,16 +10,14 @@ Per chromosome -> bounded RAM.
 import argparse
 import json
 import os
-import shutil
-import tempfile
 import numpy as np
 import pandas as pd
 from pyroaring import BitMap
 
-from genotype_utils import (add_heterogeneity_flag, benjamini_hochberg, context_key_from_row,
+from genotype_utils import (add_heterogeneity_flag, benjamini_hochberg, context_key_series,
                             drop_unassigned_reads, informative_strata, mh_stratified_effect,
-                            stratified_max_distribution_shift, stratified_primary, stratum_heterogeneity,
-                            run_contingency_test, shard_tsv_by_chrom, tsv_header)
+                            open_chrom_table, stratified_max_distribution_shift, stratified_primary,
+                            stratum_heterogeneity, run_contingency_test)
 
 TX_COLS = [
     "block_id", "context_key", "chrom", "n_reads", "n_haplotypes_tested", "n_transcripts_tested",
@@ -48,6 +46,10 @@ def parse_args():
     ap.add_argument("--min-total-reads", type=int, default=8)
     ap.add_argument("--test", choices=["auto", "fisher", "chi2"], default="auto")
     ap.add_argument("--pseudocount", type=float, default=0.5)
+    ap.add_argument("--jobs", type=int, default=1,
+                    help="Chromosomes processed in parallel (forked workers; results are concatenated in "
+                         "sorted-chromosome order, so the output is identical for any value). Each worker "
+                         "holds one chromosome of the tables, so size this to memory.")
     return ap.parse_args()
 
 
@@ -55,8 +57,8 @@ def _rk(df):
     return (df["sample"].astype(str) + "\x00" + df["qname"].astype(str))
 
 
-def _hap_for_one_chrom(hap_path, mod_path, args):
-    hap = pd.read_csv(hap_path, sep="\t", low_memory=False)
+def _hap_for_one_chrom(hap_tbl, mod_tbl, chrom, args):
+    hap = hap_tbl.read(chrom)
     _hl = hap["haplotype"].fillna("").astype(str)
     # drop empty AND the pooled "OTHER" bucket: build_haplotype_blocks merges all sub-threshold
     # haplotypes into one "OTHER" label, which is not a real allele string and must not be tested as a
@@ -117,9 +119,9 @@ def _hap_for_one_chrom(hap_path, mod_path, args):
 
     # ---- hap x mod: roaring ----
     mod_rows = []
-    if mod_path is not None:
-        _hdr = tsv_header(mod_path)
-        mod = pd.read_csv(mod_path, sep="\t", low_memory=False, usecols=[c for c in _MOD_WANT if c in _hdr])
+    if mod_tbl is not None:
+        _hdr = mod_tbl.header_cols
+        mod = mod_tbl.read(chrom, usecols=[c for c in _MOD_WANT if c in _hdr])
         if "usable" in mod.columns:
             mod = mod[mod["usable"].fillna(False)].copy()
         else:
@@ -128,7 +130,7 @@ def _hap_for_one_chrom(hap_path, mod_path, args):
         mod = drop_unassigned_reads(mod)
         if not mod.empty:
             mod["target_state"] = mod["state_detail"].eq("modified").astype(int)
-            mod["context_key"] = mod.apply(context_key_from_row, axis=1)
+            mod["context_key"] = context_key_series(mod)
             hap_by_ctx = {k: v for k, v in hap.groupby("context_key", sort=False)} if "context_key" in hap.columns else {}
             for ck, mm in mod.groupby("context_key", sort=False):
                 hm = hap_by_ctx.get(ck)
@@ -211,23 +213,48 @@ def _hap_for_one_chrom(hap_path, mod_path, args):
     return tx_rows, mod_rows
 
 
+
+
+def _run_chroms(fn, chroms, jobs):
+    """Run fn(chrom) for every chrom, in parallel across forked workers when jobs > 1; returns the
+    results in `chroms` order (identical to the serial loop)."""
+    chroms = list(chroms)
+    jobs = max(1, min(int(jobs), len(chroms))) if chroms else 1
+    if jobs <= 1:
+        return [fn(c) for c in chroms]
+    import multiprocessing
+    from concurrent.futures import ProcessPoolExecutor
+    ctx = multiprocessing.get_context("fork")
+    with ProcessPoolExecutor(max_workers=jobs, mp_context=ctx) as ex:
+        return list(ex.map(fn, chroms))
+
+_G = {}
+
+
+def _hap_task(chrom):
+    mod_tbl = _G["mod"] if chrom in _G["mod_chroms"] else None
+    return _hap_for_one_chrom(_G["hap"], mod_tbl, chrom, _G["args"])
+
+
 def main():
     args = parse_args()
     if not (os.path.exists(args.molecule_haplotypes) and os.path.getsize(args.molecule_haplotypes)):
         pd.DataFrame(columns=TX_COLS).to_csv(args.out_haplotype_transcript, sep="\t", index=False)
         pd.DataFrame(columns=MOD_COLS).to_csv(args.out_haplotype_mod, sep="\t", index=False)
         return
-    tmp = tempfile.mkdtemp(prefix=".hap_bs_", dir=os.path.dirname(args.out_haplotype_mod) or ".")
     tx_rows, mod_rows = [], []
+    hap_tbl = open_chrom_table(args.molecule_haplotypes)
+    mod_tbl = (None if not (os.path.exists(args.molecule_mods) and os.path.getsize(args.molecule_mods))
+               else open_chrom_table(args.molecule_mods))
     try:
-        hap_shards = shard_tsv_by_chrom(args.molecule_haplotypes, os.path.join(tmp, "hap"))
-        mod_shards = ({} if not (os.path.exists(args.molecule_mods) and os.path.getsize(args.molecule_mods))
-                      else shard_tsv_by_chrom(args.molecule_mods, os.path.join(tmp, "mod")))
-        for chrom in sorted(hap_shards):
-            tr, mr = _hap_for_one_chrom(hap_shards[chrom], mod_shards.get(chrom), args)
+        mod_chroms = set(mod_tbl.chroms) if mod_tbl is not None else set()
+        _G.update(hap=hap_tbl, mod=mod_tbl, mod_chroms=mod_chroms, args=args)
+        for tr, mr in _run_chroms(_hap_task, hap_tbl.chroms, args.jobs):
             tx_rows.extend(tr); mod_rows.extend(mr)
     finally:
-        shutil.rmtree(tmp, ignore_errors=True)
+        for t in (hap_tbl, mod_tbl):
+            if t is not None and hasattr(t, "close"):
+                t.close()
 
     tx_out = pd.DataFrame(tx_rows)
     if not tx_out.empty:

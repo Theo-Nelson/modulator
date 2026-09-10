@@ -140,6 +140,15 @@ def detect(snps, mods):
     return rows, hits
 
 
+def _hits_by_pos(hits):
+    """(chrom, start0) -> [((chrom,start0,strand,mod), cls), ...] in the original insertion order, so the
+    loose-match fallback below picks the SAME first match as the old whole-dict scan did."""
+    out = {}
+    for key, cls in hits.items():
+        out.setdefault((key[0], key[1]), []).append((key, cls))
+    return out
+
+
 def annotate_tsv(path, hits):
     """Add `snp_at_mod_base` (0/1) + `snp_at_mod_base_class` columns in place
     (idempotent), joining on (chrom, mod-start0, mod-code).
@@ -147,39 +156,55 @@ def annotate_tsv(path, hits):
     The mod-site position column is `start0` (mod-diff tables) or `mod_start0`
     (snp_mod_assoc); the mod-code column is `mod_code` or `target_mod_code`. This lets
     the same flag be surfaced onto snp_mod_assoc, whose rows would otherwise be silently
-    skipped for lacking a literal `start0`/`mod_code` column."""
+    skipped for lacking a literal `start0`/`mod_code` column.
+
+    Streams the table row-by-row to a .tmp (the old version materialised every row as a dict -- 24 GiB on
+    an 8-sample run) and resolves the loose match through a per-position index instead of scanning every
+    hit for every row."""
+    by_pos = _hits_by_pos(hits)
     try:
-        with open(path) as fh:
-            rr = csv.DictReader(fh, delimiter="\t")
-            fields = list(rr.fieldnames or [])
-            pos_col = "start0" if "start0" in fields else ("mod_start0" if "mod_start0" in fields else None)
-            mc_col = "mod_code" if "mod_code" in fields else ("target_mod_code" if "target_mod_code" in fields else None)
-            if "chrom" not in fields or pos_col is None:
-                return False
-            rows = list(rr)
-    except (OSError, csv.Error):
+        fh_in = open(path)
+    except OSError:
         return False
-    for c in ("snp_at_mod_base", "snp_at_mod_base_class"):
-        if c not in fields:
-            fields.append(c)
-    for row in rows:
-        ch = row.get("chrom"); s0 = _to_int(row.get(pos_col))
-        st = row.get("strand", ""); mc = str(row.get(mc_col, "")) if mc_col else ""
-        cls = hits.get((ch, s0, st, mc))
-        if cls is None:
-            # progressively looser match for differential tables missing strand and/or mod_code
-            for (hch, hs0, hst, hmc), v in hits.items():
-                if hch == ch and hs0 == s0 and (not mc or hmc == mc) and (not st or hst == st):
-                    cls = v
-                    break
-        row["snp_at_mod_base"] = "1" if cls else "0"
-        row["snp_at_mod_base_class"] = cls or ""
+    tmp = path + ".tmp"
+    try:
+        rr = csv.DictReader(fh_in, delimiter="\t")
+        fields = list(rr.fieldnames or [])
+        pos_col = "start0" if "start0" in fields else ("mod_start0" if "mod_start0" in fields else None)
+        mc_col = "mod_code" if "mod_code" in fields else ("target_mod_code" if "target_mod_code" in fields else None)
+        if "chrom" not in fields or pos_col is None:
+            fh_in.close()
+            return False
+        out_fields = list(fields)
+        for c in ("snp_at_mod_base", "snp_at_mod_base_class"):
+            if c not in out_fields:
+                out_fields.append(c)
+        with open(tmp, "w", newline="") as fo:
+            w = csv.DictWriter(fo, fieldnames=out_fields, delimiter="\t", extrasaction="ignore")
+            w.writeheader()
+            for row in rr:
+                ch = row.get("chrom"); s0 = _to_int(row.get(pos_col))
+                st = row.get("strand", ""); mc = str(row.get(mc_col, "")) if mc_col else ""
+                cls = hits.get((ch, s0, st, mc))
+                if cls is None:
+                    # progressively looser match for differential tables missing strand and/or mod_code
+                    for (hch, hs0, hst, hmc), v in by_pos.get((ch, s0), ()):
+                        if (not mc or hmc == mc) and (not st or hst == st):
+                            cls = v
+                            break
+                row["snp_at_mod_base"] = "1" if cls else "0"
+                row["snp_at_mod_base_class"] = cls or ""
+                w.writerow(row)
+    except csv.Error:
+        fh_in.close()
+        try:
+            os.remove(tmp)
+        except OSError:
+            pass
+        return False
+    fh_in.close()
     # atomic write (.tmp + os.replace) so a crash/full-disk mid-write can't truncate a table that
     # took hours to produce -- matching the convention in discover_candidate_snps / build_molecule_snp_table.
-    tmp = path + ".tmp"
-    with open(tmp, "w", newline="") as fh:
-        w = csv.DictWriter(fh, fieldnames=fields, delimiter="\t", extrasaction="ignore")
-        w.writeheader(); w.writerows(rows)
     os.replace(tmp, path)
     return True
 

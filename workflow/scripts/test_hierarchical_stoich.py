@@ -26,9 +26,7 @@ size of the confound is measurable per site rather than assumed.
 import argparse
 import os
 import re
-import shutil
 import sys
-import tempfile
 from bisect import bisect_right
 
 import numpy as np
@@ -36,7 +34,7 @@ import pandas as pd
 from pyroaring import BitMap
 
 from genotype_utils import (add_heterogeneity_flag, benjamini_hochberg, informative_strata,
-                            run_contingency_test, shard_tsv_by_chrom, stratified_primary,
+                            open_chrom_table, run_contingency_test, stratified_primary,
                             stratum_heterogeneity, tsv_header)
 
 
@@ -199,18 +197,16 @@ def main():
     # processing is exact, not an approximation.
     rows = []
     n_pairs = n_skipped = 0
-    tmp = tempfile.mkdtemp(prefix=".hier_", dir=os.path.dirname(args.out_tsv) or ".")
+    mod_tbl = open_chrom_table(args.molecule_mods)
     try:
-        shards = shard_tsv_by_chrom(args.molecule_mods, os.path.join(tmp, "mod"))
         if args.verbose:
-            print(f"[hier] assigned reads: {len(ra_all):,} | mod shards: {len(shards)}", flush=True)
-        for chrom in sorted(shards):
+            print(f"[hier] assigned reads: {len(ra_all):,} | mod chromosomes: {len(mod_tbl.chroms)}", flush=True)
+        for chrom in mod_tbl.chroms:
             ra = ra_all[ra_all["chrom"].astype(str) == str(chrom)]
             if ra.empty:
                 continue
-            mod_hdr = tsv_header(shards[chrom])
-            mods = pd.read_csv(shards[chrom], sep="\t", low_memory=False,
-                               usecols=[c for c in _MOD_WANT if c in mod_hdr])
+            mod_hdr = mod_tbl.header_cols
+            mods = mod_tbl.read(chrom, usecols=[c for c in _MOD_WANT if c in mod_hdr])
             if "usable" in mods.columns:
                 mods = mods[mods["usable"].fillna(False)]
             elif "fail" in mods.columns:
@@ -226,7 +222,8 @@ def main():
             r, p, s = _process_chrom(ra, mods, gtf, args)
             rows.extend(r); n_pairs += p; n_skipped += s
     finally:
-        shutil.rmtree(tmp, ignore_errors=True)
+        if hasattr(mod_tbl, "close"):
+            mod_tbl.close()
 
     _finish(rows, args, n_pairs, n_skipped)
 

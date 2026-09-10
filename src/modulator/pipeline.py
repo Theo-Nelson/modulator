@@ -364,6 +364,27 @@ class PipelinePaths:
         return self.modkit_zn / sample
 
 
+# Config keys that only control HOW a run executes (never WHAT it produces); see _config_sig.
+_CONFIG_SIG_IGNORE = (
+    "threads", "jobs", "aggregation_tmpdir", "preflight", "report.title",
+    "aggregation.jobs", "aggregation.tmpdir",
+    "genotype.jobs", "genotype.mod_jobs", "genotype.snp_scan_jobs", "genotype.assoc_jobs",
+    "genotype.mod_interval_size",
+    "polya.jobs",
+    "modkit.common.threads", "modkit.common.log_file_template", "modkit.common.queue_size",
+)
+
+
+def _as_list(value: Any) -> list[str]:
+    """Coerce a config value that is documented as a list (gene_filter / mod_filter) to a list of
+    strings. A scalar from `--set test_diffs.gene_filter=ALCAM` must become ["ALCAM"], not be
+    iterated character by character (str) or crash (int); `--set key=[a,b]` is the list form."""
+    if value is None or value == "":
+        return []
+    if isinstance(value, (list, tuple, set)):
+        return [str(v) for v in value if v is not None and str(v) != ""]
+    return [str(value)]
+
 class ModulatorPipeline:
     def __init__(self, config: dict[str, Any], *, workdir: str | Path, jobs: int = 1, verbose: bool = True, resume: bool = False, stage_inputs: bool = True):
         self.root = find_project_root(workdir)
@@ -399,6 +420,7 @@ class ModulatorPipeline:
         # When set to a list (only during the genotype stage), run_python_script records
         # each substep's peak RSS into it, so per-substep memory can be written out.
         self._substep_mem: list[tuple[str, float]] | None = None
+        self._substep_time: list[tuple[str, float]] | None = None
         self.prefix = str(config.get("prefix", "modulator_run"))
         self.paths = PipelinePaths(self.root, self.prefix)
         # Samplesheet (optional) is the sample SOURCE + the condition metadata; it stages the BAMs
@@ -410,10 +432,16 @@ class ModulatorPipeline:
         self.samples = self._discover_samples()
         self.reference_fa = self._resolve_reference("reference_fa", ("reference", "fasta"))
         self.reference_gtf = self._resolve_reference("reference_gtf", ("reference", "gtf"))
-        try:
-            self.top_threads = max(1, int(config.get("threads", 1)))
-        except (ValueError, TypeError):
-            self.top_threads = 1  # 'auto'/'' or other non-int -> fall back to a safe default
+        _thr = config.get("threads", 1)
+        if isinstance(_thr, str) and _thr.strip().lower() in ("auto", "all", ""):
+            self.top_threads = max(1, os.cpu_count() or 1)
+        else:
+            try:
+                self.top_threads = max(1, int(_thr))
+            except (ValueError, TypeError):
+                print(f"[modulator] WARNING: threads={_thr!r} is not an integer; running single-threaded "
+                      "(set threads: auto to use every visible core)", flush=True)
+                self.top_threads = 1
         self._validate_config()
 
     def _load_samplesheet(self) -> None:
@@ -742,8 +770,20 @@ class ModulatorPipeline:
     def run_python_script(self, script_name: str, args: list[str], *, label: str) -> None:
         cmd = [sys.executable, str(self.script_path(script_name)), *args]
         sink = self._substep_mem
-        on_peak = (lambda lbl, gib: sink.append((lbl, gib))) if sink is not None else None
-        run_command(cmd, cwd=self.root, label=label, verbose=self.verbose, on_peak=on_peak)
+        if sink is None:
+            run_command(cmd, cwd=self.root, label=label, verbose=self.verbose, on_peak=None)
+            return
+        # measured substep (genotype): record peak RSS AND wall time, and log both per substep
+        peaks: list[float] = []
+        t0 = time.perf_counter()
+        run_command(cmd, cwd=self.root, label=label, verbose=self.verbose,
+                    on_peak=lambda lbl, gib: peaks.append(gib))
+        dt = time.perf_counter() - t0
+        gib = peaks[-1] if peaks else 0.0
+        sink.append((label, gib))
+        if self._substep_time is not None:
+            self._substep_time.append((label, dt))
+        print(f"[modulator]   {label} finished in {dt:.1f}s  peak={gib:.2f} GiB", flush=True)
 
     @property
     def _checkpoint_dir(self) -> Path:
@@ -757,9 +797,23 @@ class ModulatorPipeline:
         written under a DIFFERENT config must not count as done -- otherwise --resume with changed
         parameters reuses stale outputs AND rewrites the run manifest to claim the new parameters
         (false provenance). Conservative: any config change invalidates every stage's marker."""
+        import copy
         import hashlib
         import json
-        return hashlib.sha1(json.dumps(self.config, sort_keys=True, default=str).encode()).hexdigest()[:16]
+        cfg = copy.deepcopy(self.config)
+        # Runtime-only keys (parallelism, scratch locations, log names, report title, preflight) do not
+        # change any output, so they must not invalidate checkpoints: a 31-sample run resumed on a node
+        # with a different core count would otherwise redo modkit/assemble from scratch.
+        for dotted in _CONFIG_SIG_IGNORE:
+            node = cfg
+            parts = dotted.split(".")
+            for part in parts[:-1]:
+                node = node.get(part) if isinstance(node, dict) else None
+                if node is None:
+                    break
+            if isinstance(node, dict):
+                node.pop(parts[-1], None)
+        return hashlib.sha1(json.dumps(cfg, sort_keys=True, default=str).encode()).hexdigest()[:16]
 
     def _mark_stage_done(self, stage: str) -> None:
         try:
@@ -1035,6 +1089,7 @@ class ModulatorPipeline:
         timings: list[tuple[str, float]] = []
         mem_peaks: list[tuple[str, float]] = []
         geno_substeps: list[tuple[str, float]] = []
+        geno_times: list[tuple[str, float]] = []
         for stage in selected:
             if self.resume and self._stage_done(stage):
                 if self.verbose:
@@ -1051,6 +1106,7 @@ class ModulatorPipeline:
                 print(f"[modulator] stage: {stage}", flush=True)
             # Per-substep memory is only meaningful for the (sequential) genotype scripts.
             self._substep_mem = [] if stage == "genotype" else None
+            self._substep_time = [] if stage == "genotype" else None
             # M4: a stage that early-returns as a no-op because its INPUT is missing/empty leaves any
             # OLD output on disk. The stage sets this flag so it is NOT checkpointed under the current
             # config -- otherwise --resume would skip it forever and the manifest would claim the new
@@ -1064,7 +1120,10 @@ class ModulatorPipeline:
             mem_peaks.append((stage, sampler.peak_gib))
             if self._substep_mem:
                 geno_substeps.extend(self._substep_mem)
+            if self._substep_time:
+                geno_times.extend(self._substep_time)
             self._substep_mem = None
+            self._substep_time = None
             print(f"[modulator] stage {stage} finished in {dt:.1f}s  peak={sampler.peak_gib:.2f} GiB", flush=True)
             # Only checkpoint a stage that actually produced its outputs. A stage that
             # early-returned as a no-op on missing/empty input (e.g. test_diffs with an empty
@@ -1095,6 +1154,17 @@ class ModulatorPipeline:
                     for lbl, gib in geno_substeps:
                         fh.write(f"{lbl}\t{gib:.3f}\n")
                 print(f"[modulator] genotype substep memory -> {gpath}", flush=True)
+            except OSError:
+                pass
+        if geno_times:
+            try:
+                tpath2 = self.paths.results / "genotype_timing.tsv"
+                tpath2.parent.mkdir(parents=True, exist_ok=True)
+                with open(tpath2, "w") as fh:
+                    fh.write("substep\tseconds\n")
+                    for lbl, dt in geno_times:
+                        fh.write(f"{lbl}\t{dt:.2f}\n")
+                print(f"[modulator] genotype substep timing -> {tpath2}", flush=True)
             except OSError:
                 pass
 
@@ -1153,6 +1223,7 @@ class ModulatorPipeline:
             "--require-softclip3p", str(cfg.get("require_softclip3p", 0)),
             # Samples are scanned in parallel (jobs<=1 stays serial / single-core safe).
             "--jobs", str(self.jobs),
+            "--threads", str(max(1, self.top_threads // max(1, min(self.jobs, len(self.samples))))),
         ]
         if as_bool(cfg.get("primary_only", True), True):
             args.append("--primary-only")
@@ -1249,6 +1320,15 @@ class ModulatorPipeline:
             output_counts = self.paths.scrap_tx_counts(sample)
             for path in [output_clean, output_scrap, output_summary, output_removed, output_counts]:
                 ensure_parent(path)
+            # per-sample resume (see _run_modkit_pileup): all five outputs present + a marker written
+            # under the current config signature -> this sample is not re-filtered.
+            mg_marker = self.paths.zt_scrap_dir / f"{sample}.multigene.done"
+            if (self._sample_marker_ok(mg_marker)
+                    and all(self._nonempty(p) for p in (output_clean, output_scrap, output_summary))
+                    and output_removed.exists() and output_counts.exists()):
+                if self.verbose:
+                    print(f"[modulator] multigene_filter[{sample}]: complete, skipping", flush=True)
+                continue
 
             args = [
                 "--bam", str(input_bam),
@@ -1261,15 +1341,17 @@ class ModulatorPipeline:
                 "--out-scrap-tx-counts-tsv", str(output_counts),
                 "--zero-gene-action", str(cfg.get("zero_gene_action", "keep")),
                 "--multi-gene-action", str(cfg.get("multi_gene_action", "scrap_unresolved")),
+                # BGZF threads per sample: the stage is I/O-bound on one 30-40 GB BAM in + two out
+                "--threads", str(max(1, self.top_threads // max(1, min(self.jobs, len(self.samples))))),
             ]
-            tasks.append((
-                f"multigene_filter[{sample}]",
-                lambda sample_name=sample, sample_args=args: self.run_python_script(
+            def _run_one(sample_name=sample, sample_args=args, marker=mg_marker):
+                self.run_python_script(
                     "filter_multigene_reads_from_zt_bam.py",
                     sample_args,
                     label=f"filter_multigene_reads_from_zt_bam[{sample_name}]",
-                ),
-            ))
+                )
+                self._write_sample_marker(marker)
+            tasks.append((f"multigene_filter[{sample}]", _run_one))
         run_parallel(tasks, jobs=self.jobs)
 
         counts = [str(self.paths.scrap_tx_counts(sample)) for sample in self.samples]
@@ -1375,6 +1457,13 @@ class ModulatorPipeline:
         modkit_cfg = self.config.get("modkit", {})
         common = modkit_cfg.get("common", {})
         output_dir = self.paths.modkit_dir(sample)
+        # Per-sample resume: a sample whose directory is complete (every bed bgzipped+indexed, no raw
+        # bed left) AND was produced under the CURRENT config signature is not redone. A time-limit at
+        # sample 25 of 31 used to throw away every finished sample (the checkpoint is per stage).
+        done_marker = output_dir / ".modkit.done"
+        if self._sample_marker_ok(done_marker) and self._modkit_sample_dir_complete(output_dir):
+            print(f"[modulator] modkit_{which}[{sample}]: complete, skipping", flush=True)
+            return
         # Clean the sample's per-ZN output dir before modkit writes into it. modkit pileup emits one
         # <N>.bed per ZN value present in THIS run's BAM but does NOT remove beds a PRIOR run left, so a
         # re-run after e.g. a changed assembler.min_reads (different ZN partition set) would leave stale
@@ -1387,7 +1476,14 @@ class ModulatorPipeline:
         output_dir.mkdir(parents=True, exist_ok=True)
         input_bam = self._modkit_input_bam(sample)
         self._require_existing_file(input_bam, f"modkit input BAM for sample {sample}")
-        threads = int(common.get("threads", self.top_threads if self.top_threads > 0 else 4))
+        # Thread budget: `modkit.common.threads` is an explicit override; otherwise divide the run's
+        # thread budget by the number of concurrent pileups (`--jobs` x samples), instead of giving every
+        # concurrent modkit the whole budget (12 jobs x 48 threads on 48 cores).
+        if is_set(common.get("threads")):
+            threads = int(common.get("threads"))
+        else:
+            n_concurrent = max(1, min(self.jobs, len(self.samples)))
+            threads = max(1, (self.top_threads if self.top_threads > 0 else 4) // n_concurrent)
         flags = self._format_common_modkit_flags(common, sample=sample, which=f"modkit_{which}", threads=threads)
         cmd = [
             "modkit",
@@ -1407,6 +1503,34 @@ class ModulatorPipeline:
                 continue
             run_command(["bgzip", "-f", "-@", str(threads), str(bed_path)], cwd=self.root, label=f"bgzip[{bed_path.name}]", verbose=self.verbose)
             run_command(["tabix", "-f", "-p", "bed", str(bed_path) + ".gz"], cwd=self.root, label=f"tabix[{bed_path.name}.gz]", verbose=self.verbose)
+        self._write_sample_marker(done_marker)
+
+    def _sample_marker_ok(self, marker: Path) -> bool:
+        """True iff a per-sample completion marker exists and records the CURRENT config signature."""
+        try:
+            return marker.exists() and marker.read_text().strip() == self._config_sig()
+        except OSError:
+            return False
+
+    def _write_sample_marker(self, marker: Path) -> None:
+        try:
+            marker.parent.mkdir(parents=True, exist_ok=True)
+            marker.write_text(self._config_sig() + "\n")
+        except OSError:
+            pass
+
+    @staticmethod
+    def _modkit_sample_dir_complete(d: Path) -> bool:
+        if not d.is_dir():
+            return False
+        beds_gz = list(d.rglob("*.bed.gz"))
+        if not beds_gz:
+            return False
+        if any(not Path(str(b) + ".tbi").exists() for b in beds_gz):
+            return False
+        if any(b.name != "ungrouped.bed" for b in d.rglob("*.bed")):
+            return False
+        return True
 
     def stage_modkit_zn(self) -> None:
         if not as_bool(self.config.get("toggles", {}).get("enable_zn_pileup", True), True):
@@ -1508,6 +1632,8 @@ class ModulatorPipeline:
             "--out-prefix", str(self.paths.test_diffs / self.prefix),
             "--min-cov", str(self.config.get("test_diffs", {}).get("min_cov", self.config.get("min_cov_test", 20))),
             "--topk", str(self.config.get("test_diffs", {}).get("topk", self.config.get("topk", 10))),
+            # sites are independent -> per-site tests fan out over the thread budget (output identical)
+            "--jobs", str(max(1, self.top_threads)),
             "--verbose",
         ]
         td = self.config.get("test_diffs", {})
@@ -1517,10 +1643,10 @@ class ModulatorPipeline:
             args.extend(["--pseudocount", str(td["pseudocount"])])
         if is_set(td.get("alternative")):
             args.extend(["--alternative", str(td["alternative"])])
-        for gene in td.get("gene_filter") or []:
-            args.extend(["--gene-filter", str(gene)])
-        for mod in td.get("mod_filter") or []:
-            args.extend(["--mod-filter", str(mod)])
+        for gene in _as_list(td.get("gene_filter")):
+            args.extend(["--gene-filter", gene])
+        for mod in _as_list(td.get("mod_filter")):
+            args.extend(["--mod-filter", mod])
         self.run_python_script("test_stoichiometry_diffs.py", args, label="test_stoichiometry_diffs")
 
     def stage_classify_diffs(self) -> None:
@@ -1581,9 +1707,10 @@ class ModulatorPipeline:
             mod_filter = self.config.get("test_diffs", {}).get("mod_filter")
         # An empty/None mod_filter means classify ALL modifications -- the diff table
         # already carries every mod_code emitted upstream. Only restrict when set.
+        mod_filter = _as_list(mod_filter)
         if mod_filter:
             args.append("--mod-filter")
-            args.extend(str(m) for m in mod_filter)
+            args.extend(mod_filter)
         self.run_python_script("classify_diff_sites.py", args, label="classify_diff_sites")
 
     def stage_genotype(self) -> None:
@@ -1628,6 +1755,9 @@ class ModulatorPipeline:
         self._require_existing_file(self.paths.classification_summary, "classification summary TSV")
         self.paths.genotype.mkdir(parents=True, exist_ok=True)
 
+        # Association tests fan out over chromosomes (each worker holds ONE chromosome of the per-read
+        # tables, ~12 GiB on a deep human chr1), so this is a separate, memory-sized budget.
+        assoc_jobs = max(1, min(self.top_threads or 1, int(geno.get("assoc_jobs", 4))))
         # ---- Step 1: discover candidate SNPs (needs the full BAMs; already locus-restricted). ----
         if not self._geno_reuse(self.paths.geno_candidate_snps, "discover_candidate_snps"):
             self.run_python_script(
@@ -1728,6 +1858,12 @@ class ModulatorPipeline:
 
                 def _subset(in_bam: str) -> None:
                     out_bam = self.paths.geno_subset_bam(Path(in_bam))
+                    sub_marker = Path(str(out_bam) + ".subset.done")
+                    if (self._sample_marker_ok(sub_marker) and self._nonempty(out_bam)
+                            and self._bam_has_index(str(out_bam))):
+                        if self.verbose:
+                            print(f"[modulator]   genotype subset[{out_bam.name}]: complete, skipping", flush=True)
+                        return
                     if max_ff > 0:
                         regions_bam = f"{out_bam}.regions.bam"
                         run_command(
@@ -1753,6 +1889,7 @@ class ModulatorPipeline:
                         )
                         run_command(["samtools", "index", "-@", str(sam_threads), str(out_bam)],
                                     cwd=self.root, label=f"samtools_index[{out_bam.name}]", verbose=self.verbose)
+                    self._write_sample_marker(sub_marker)
 
                 run_parallel(
                     [(f"subset[{Path(b).name}]", (lambda b=b: _subset(b))) for b in sample_bams],
@@ -1805,6 +1942,9 @@ class ModulatorPipeline:
             "--candidate-sites-tsv", str(self.paths.geno_candidate_mod_sites),
             "--candidate-bed", str(self.paths.geno_candidate_mod_bed),
             "--read-assignments", str(read_assignments_path),
+            # pysam backend: per-read tags come straight from the BAM; this small table supplies the
+            # per-fragmentform metadata, so the genome-scale read-assignment table is never loaded here.
+            "--summary-tsv", str(self.paths.classification_summary),
             "--reference-fa", str(self.reference_fa),
             "--out-tsv", str(self.paths.geno_molecule_mod_calls),
             "--threads", str(max(1, self.top_threads)),
@@ -1872,6 +2012,7 @@ class ModulatorPipeline:
                 "--min-total-reads", str(int(geno.get("min_group_reads", 4))),
                 "--test", str(geno.get("test", "auto")),
                 "--pseudocount", str(float(geno.get("pseudocount", 0.5))),
+                "--jobs", str(assoc_jobs),
             ],
             label="test_snp_mod_assoc",
         )
@@ -1917,6 +2058,7 @@ class ModulatorPipeline:
                 "--min-total-reads", str(int(geno.get("min_group_reads", 4))),
                 "--test", str(geno.get("test", "auto")),
                 "--pseudocount", str(float(geno.get("pseudocount", 0.5))),
+                "--jobs", str(assoc_jobs),
             ],
             label="test_haplotype_associations",
         )
@@ -1936,6 +2078,7 @@ class ModulatorPipeline:
                     "--max-sites-per-read", str(int(colo.get("max_sites_per_read", 200))),
                     "--test", str(geno.get("test", "auto")),
                     "--pseudocount", str(float(geno.get("pseudocount", 0.5))),
+                    "--jobs", str(assoc_jobs),
                 ],
                 label="test_mod_mod_assoc",
             )
@@ -2122,7 +2265,7 @@ class ModulatorPipeline:
                        "--ref-df", str(int(cfg.get("ref_df", 10))),
                        "--site-weight", str(cfg.get("site_weight", "auto")),
                        "--min-samples-per-group", min_grp]
-        mod_filter = [str(m) for m in (cfg.get("mod_filter") or [])]
+        mod_filter = _as_list(cfg.get("mod_filter"))
         for c in self.contrasts:
             name = c["name"]
             common = ["--sample-metadata", str(self.paths.sample_metadata), "--column", c["column"],

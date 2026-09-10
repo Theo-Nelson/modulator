@@ -16,20 +16,17 @@ input (both dedupe; identical logic otherwise).
 import argparse
 import json
 import os
-import shutil
-import tempfile
 import numpy as np
 from pyroaring import BitMap
 import pandas as pd
 
 from genotype_utils import (add_heterogeneity_flag, benjamini_hochberg, binary_rate_delta,
-                            context_key_from_row, context_keys_from_snp_row,
-                            informative_strata, load_molecule_mods_for_pairing, mh_stratified_effect,
-                            run_contingency_test, shard_tsv_by_chrom, stratified_primary,
-                            stratum_heterogeneity, tsv_header)
+                            context_key_series, drop_unassigned_reads, informative_strata,
+                            mh_stratified_effect, open_chrom_table, run_contingency_test,
+                            snp_context_keys_lists, stratified_primary, stratum_heterogeneity)
 
 SNP_USECOLS = ["sample", "qname", "snp_id", "chrom", "pos1", "start0", "end0",
-               "allele_class", "gene_names", "metagene_indices"]
+               "allele_class", "gene_names", "metagene_indices", "ZM"]
 OUT_COLS = [
     "snp_id", "mod_site_id", "chrom", "pos1", "mod_start0", "mod_end0", "target_mod_code",
     "gene_names", "metagene_indices", "n_reads", "n_ref_reads", "n_alt_reads", "n_modified",
@@ -50,6 +47,10 @@ def parse_args():
     ap.add_argument("--min-total-reads", type=int, default=8)
     ap.add_argument("--test", choices=["auto", "fisher", "chi2"], default="auto")
     ap.add_argument("--pseudocount", type=float, default=0.5)
+    ap.add_argument("--jobs", type=int, default=1,
+                    help="Chromosomes processed in parallel (forked workers; results are concatenated in "
+                         "sorted-chromosome order, so the output is identical for any value). Each worker "
+                         "holds one chromosome of the tables, so size this to memory.")
     return ap.parse_args()
 
 
@@ -57,24 +58,49 @@ def _rk(df):
     return (df["sample"].astype(str) + "\x00" + df["qname"].astype(str))
 
 
-def _pairs_for_one_chrom(mod_path, snp_path, args):
-    """Boolean-bitset SNP x mod pairing for ONE chromosome's shard. Returns list of row dicts.
-    Loads only this chromosome, groups by metagene, and for each metagene builds boolean membership
-    vectors over its reads -- a cell count is then a vector AND + popcount (dedup by construction)."""
-    mod_df = load_molecule_mods_for_pairing(mod_path)
+def _load_mods_chrom(mod_tbl, chrom):
+    """load_molecule_mods_for_pairing() on ONE chromosome read straight out of the table (no shard copy):
+    same column pruning, usable / state_detail filters, unassigned-read drop and target_state."""
+    header = mod_tbl.header_cols
+    want = ["sample", "qname", "mod_site_id", "chrom", "start0", "end0",
+            "target_mod_code", "state_detail", "gene_name", "metagene_index"]
+    if "usable" in header:
+        want.append("usable")
+    else:
+        want.extend([c for c in ("fail", "within_alignment") if c in header])
+    mod_df = mod_tbl.read(chrom, usecols=[c for c in want if c in header])
+    if mod_df.empty:
+        return mod_df
+    if "usable" in mod_df.columns:
+        mod_df = mod_df[mod_df["usable"].fillna(False)].copy()
+    else:
+        mod_df = mod_df[(~mod_df["fail"].fillna(True)) & mod_df["within_alignment"].fillna(False)].copy()
+    mod_df = mod_df[mod_df["state_detail"].isin(["modified", "canonical", "other_mod"])].copy()
+    mod_df = drop_unassigned_reads(mod_df)
+    if not mod_df.empty:
+        mod_df["target_state"] = mod_df["state_detail"].eq("modified").astype(int)
+    return mod_df
+
+
+def _pairs_for_one_chrom(mod_tbl, snp_tbl, chrom, args):
+    """Boolean-bitset SNP x mod pairing for ONE chromosome. Returns list of row dicts.
+    Loads only this chromosome (a byte range of each table -- no temp copy), groups by metagene, and for
+    each metagene builds boolean membership vectors over its reads -- a cell count is then a vector AND +
+    popcount (dedup by construction)."""
+    mod_df = _load_mods_chrom(mod_tbl, chrom)
     if mod_df.empty:
         return []
-    snp_uc = [c for c in SNP_USECOLS if c in tsv_header(snp_path)]
-    snp_df = pd.read_csv(snp_path, sep="\t", usecols=snp_uc, low_memory=False)
+    snp_uc = [c for c in SNP_USECOLS if c in snp_tbl.header_cols]
+    snp_df = snp_tbl.read(chrom, usecols=snp_uc)
     snp_df = snp_df[snp_df["allele_class"].isin(["ref", "alt"])]
     if snp_df.empty:
         return []
-    mod_df["context_key"] = mod_df.apply(context_key_from_row, axis=1)
+    mod_df["context_key"] = context_key_series(mod_df)
     # Fan out each SNP over EVERY context (metagene) it spans, so a SNP overlapping >1 gene is paired
     # with modifications in each -- collapsing to one CHR: key silently drops multi-metagene SNPs
     # (0/123 reached snp_mod_assoc on real data before this).
     snp_df = snp_df.copy()
-    snp_df["context_key"] = snp_df.apply(context_keys_from_snp_row, axis=1)
+    snp_df["context_key"] = snp_context_keys_lists(snp_df)
     snp_df = snp_df.explode("context_key", ignore_index=True)
     snp_by_ctx = {k: v for k, v in snp_df.groupby("context_key", sort=False)}
 
@@ -201,21 +227,45 @@ def _pairs_for_one_chrom(mod_path, snp_path, args):
     return rows
 
 
+
+
+def _run_chroms(fn, chroms, jobs):
+    """Run fn(chrom) for every chrom, in parallel across forked workers when jobs > 1; returns the
+    results in `chroms` order (identical to the serial loop)."""
+    chroms = list(chroms)
+    jobs = max(1, min(int(jobs), len(chroms))) if chroms else 1
+    if jobs <= 1:
+        return [fn(c) for c in chroms]
+    import multiprocessing
+    from concurrent.futures import ProcessPoolExecutor
+    ctx = multiprocessing.get_context("fork")
+    with ProcessPoolExecutor(max_workers=jobs, mp_context=ctx) as ex:
+        return list(ex.map(fn, chroms))
+
+_G = {}
+
+
+def _snp_mod_task(chrom):
+    return _pairs_for_one_chrom(_G["mod"], _G["snp"], chrom, _G["args"])
+
+
 def main():
     args = parse_args()
     for p in (args.molecule_mods, args.molecule_snps):
         if not (os.path.exists(p) and os.path.getsize(p)):
             pd.DataFrame(columns=OUT_COLS).to_csv(args.out_tsv, sep="\t", index=False)
             return
-    tmp = tempfile.mkdtemp(prefix=".bitset_shards_", dir=os.path.dirname(args.out_tsv) or ".")
     rows = []
+    mod_tbl = open_chrom_table(args.molecule_mods)
+    snp_tbl = open_chrom_table(args.molecule_snps)
     try:
-        mod_shards = shard_tsv_by_chrom(args.molecule_mods, os.path.join(tmp, "mod"))
-        snp_shards = shard_tsv_by_chrom(args.molecule_snps, os.path.join(tmp, "snp"))
-        for chrom in sorted(set(mod_shards) & set(snp_shards)):
-            rows.extend(_pairs_for_one_chrom(mod_shards[chrom], snp_shards[chrom], args))
+        _G.update(mod=mod_tbl, snp=snp_tbl, args=args)
+        for r in _run_chroms(_snp_mod_task, sorted(set(mod_tbl.chroms) & set(snp_tbl.chroms)), args.jobs):
+            rows.extend(r)
     finally:
-        shutil.rmtree(tmp, ignore_errors=True)
+        for t in (mod_tbl, snp_tbl):
+            if hasattr(t, "close"):
+                t.close()
 
     out = pd.DataFrame(rows)
     if not out.empty:

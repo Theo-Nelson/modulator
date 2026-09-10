@@ -40,6 +40,7 @@ import argparse
 import tempfile
 import shutil
 import heapq
+import bisect
 from concurrent.futures import ProcessPoolExecutor
 from collections import defaultdict, namedtuple
 from typing import Dict, Tuple, List, Optional
@@ -538,6 +539,30 @@ def site_interval_1based(pos_start: int, pos_end: int):
     return [(s, e)]
 
 
+# Per-list (starts, max_len) index so assign_gene scans only the intervals that can overlap a site,
+# instead of every interval on the chromosome from index 0 (347 us/lookup on a chr1-scale index; the
+# stream engine calls this once per (sample, ZN) row at every site). Keyed by list identity; the lists
+# are built once per process by load_gene_intervals_from_gtf and never mutated.
+_SCAN_INDEX: dict = {}
+
+
+def _scan_window(lst, pos_start: int, pos_end: int):
+    """The sub-list of `lst` (sorted by .start) that can overlap [pos_start+1, pos_end] (1-based),
+    in the same order the full scan would visit it."""
+    if not lst:
+        return lst
+    idx = _SCAN_INDEX.get(id(lst))
+    if idx is None or idx[0] is not lst:
+        starts = [iv.start for iv in lst]
+        max_len = max((iv.end - iv.start for iv in lst), default=0)
+        idx = (lst, starts, max_len)
+        _SCAN_INDEX[id(lst)] = idx
+    _, starts, max_len = idx
+    lo = bisect.bisect_left(starts, pos_start + 1 - max_len)
+    hi = bisect.bisect_right(starts, pos_end)
+    return lst[lo:hi]
+
+
 def assign_gene(
     chrom: str,
     pos_start: int,
@@ -566,7 +591,7 @@ def assign_gene(
     best = None
     best_ov = -1
     for st in primary_strands:
-        for iv in tx_index.get((chrom, st), []):
+        for iv in _scan_window(tx_index.get((chrom, st), []), pos_start, pos_end):
             if iv.start > pos_end:
                 break
             if iv.end < (pos_start + 1):
@@ -583,7 +608,7 @@ def assign_gene(
     best = None
     best_ov = -1
     for st in primary_strands:
-        for iv in gene_index.get((chrom, st), []):
+        for iv in _scan_window(gene_index.get((chrom, st), []), pos_start, pos_end):
             if iv.start > pos_end:
                 break
             if iv.end < (pos_start + 1):
@@ -596,7 +621,7 @@ def assign_gene(
         return best.gene_id, best.gene_name
 
     for st in fallback_strands:
-        for iv in gene_index.get((chrom, st), []):
+        for iv in _scan_window(gene_index.get((chrom, st), []), pos_start, pos_end):
             if iv.start > pos_end:
                 break
             if iv.end < (pos_start + 1):

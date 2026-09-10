@@ -56,8 +56,9 @@ def parse_args():
 def _windows(fa, chrom, tes_1based, strand, up, down):
     """Return (upstream_seq, downstream_seq) in TRANSCRIPT orientation.
 
-    upstream_seq is 5'->3' ending immediately before the cleavage site; downstream_seq starts
-    immediately after it. Returns (None, None) if the window runs off the contig.
+    upstream_seq is 5'->3' and ends with the base BEFORE the TES base (a PAS hexamer must end at
+    least one transcribed base before the cleavage site); downstream_seq starts with the first
+    untranscribed base after the TES. Returns (None, None) if the window runs off the contig.
     """
     pos0 = int(tes_1based) - 1
     try:
@@ -81,7 +82,9 @@ def _windows(fa, chrom, tes_1based, strand, up, down):
 def _find_pas(upstream_seq, max_dist):
     """Closest PAS hexamer to the cleavage site. Canonical wins ties. -> (motif, distance) or (None, None).
 
-    upstream_seq ends at the cleavage site, so distance = nt from the hexamer's 3' end to the site.
+    upstream_seq ends one base before the TES base, so the distance from the hexamer's 3' end to the
+    cleavage site (which lies 3' of the TES base) is the number of bases after the hexamer in the
+    window PLUS the TES base. This matches `distance_to_3p` in the sequence-elements table.
     """
     best = None
     for motif in [PAS_CANONICAL] + PAS_VARIANTS:
@@ -90,7 +93,7 @@ def _find_pas(upstream_seq, max_dist):
             i = upstream_seq.find(motif, start)
             if i < 0:
                 break
-            dist = len(upstream_seq) - (i + len(motif))
+            dist = len(upstream_seq) - (i + len(motif)) + 1  # + the TES base
             if dist <= max_dist:
                 is_canon = motif == PAS_CANONICAL
                 # CLOSEST hexamer to the cleavage site wins; canonical breaks a distance TIE. (Was

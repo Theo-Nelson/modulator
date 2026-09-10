@@ -8,8 +8,8 @@ import numpy as np
 import pandas as pd
 
 from genotype_utils import (add_heterogeneity_flag, benjamini_hochberg, informative_strata, max_abs_distribution_shift,
-                            run_contingency_test, stratified_max_distribution_shift, stratified_primary,
-                            stratum_heterogeneity, tsv_header)
+                            open_chrom_table, run_contingency_test, stratified_max_distribution_shift,
+                            stratified_primary, stratum_heterogeneity)
 
 # Only these columns are used (grouping: sample/snp_id/allele_class/ZT; per-SNP metadata: the rest).
 # The molecule_snps table is ~1.7 GB / 7.5M rows on Huh7 mock, and reading all 21 object-dtype columns
@@ -42,80 +42,81 @@ def parse_args():
     return ap.parse_args()
 
 
-def main():
-    args = parse_args()
-    header = tsv_header(args.molecule_snps)
-    usecols = [c for c in WANTED_COLS if c in header]
-    dtype = {c: t for c, t in CATEGORICAL.items() if c in usecols}
-    df = pd.read_csv(args.molecule_snps, sep="\t", usecols=usecols, dtype=dtype, low_memory=False)
-    keep = df["allele_class"].isin(["ref", "alt"]) & df["ZT"].fillna("").astype(str).ne("")
-    df = df.loc[keep].copy()
+def _rows_for_chrom(df, args, rows):
+    """Per-SNP allele x transcript tables built with numpy on integer codes (the previous version ran
+    three pandas groupby/pivot_table calls per SNP -- ~30 ms each, 54 min on an 8-sample mosquito
+    chromosome set). Same numbers, same SNP order (first appearance), same sorted transcript columns
+    and sorted sample strata."""
+    if df.empty:
+        return
+    min_tx = int(args.min_transcript_reads)
+    min_al = int(args.min_allele_reads)
+    snp_codes, snp_ids = pd.factorize(df["snp_id"].astype(str))      # first-appearance order
+    order = np.argsort(snp_codes, kind="stable")
+    codes_sorted = snp_codes[order]
+    bounds = np.flatnonzero(np.r_[True, codes_sorted[1:] != codes_sorted[:-1], True])
+    zt_all = np.asarray(df["ZT"].astype(str).tolist(), dtype=object)
+    al_all = (df["allele_class"].astype(str).to_numpy() == "alt").astype(np.int64)
+    samp_all = np.asarray(df["sample"].astype(str).tolist(), dtype=object) if "sample" in df.columns else None
+    raw = {c: df[c].to_numpy() for c in ("chrom", "pos1", "ref", "alt", "gene_names", "gene_ids", "metagene_indices")
+           if c in df.columns}
 
-    rows = []
-    for snp_id, sub in df.groupby("snp_id", sort=False, observed=True):
-        grp = sub.groupby(["allele_class", "ZT"], as_index=False, observed=True).size()
-        tx_totals = grp.groupby("ZT", observed=True)["size"].sum()
-        keep_tx = sorted(tx_totals[tx_totals >= int(args.min_transcript_reads)].index)
-        if len(keep_tx) < 2:
+    for b in range(len(bounds) - 1):
+        idx = order[bounds[b]:bounds[b + 1]]
+        first_i = idx[0]                       # first row of this SNP in file order (idx is sorted, stable)
+        zt_b = zt_all[idx]
+        al_b = al_all[idx]
+        zt_u, zt_inv = np.unique(zt_b, return_inverse=True)    # sorted -> keep_tx sorted, as before
+        tot = np.bincount(zt_inv, minlength=zt_u.size)
+        keepm = tot >= min_tx
+        if int(keepm.sum()) < 2:
             continue
-        grp = grp[grp["ZT"].isin(keep_tx)].copy()
-        table = (
-            grp.pivot_table(index="allele_class", columns="ZT", values="size", fill_value=0, aggfunc="sum")
-               .reindex(index=["ref", "alt"], columns=keep_tx, fill_value=0)
-        )
-        allele_totals = table.sum(axis=1)
-        if allele_totals.get("ref", 0) < int(args.min_allele_reads):
+        keep_tx = [str(z) for z in zt_u[keepm]]
+        col = np.full(zt_u.size, -1, dtype=np.int64)
+        col[keepm] = np.arange(int(keepm.sum()))
+        c = col[zt_inv]
+        m = c >= 0
+        K = len(keep_tx)
+        table = np.zeros((2, K), dtype=np.int64)
+        np.add.at(table, (al_b[m], c[m]), 1)
+        n_ref = int(table[0].sum()); n_alt = int(table[1].sum())
+        if n_ref < min_al or n_alt < min_al:
             continue
-        if allele_totals.get("alt", 0) < int(args.min_allele_reads):
-            continue
-        tt = table.to_numpy(dtype=float)
+        tt = table.astype(float)
         # POOLED test (kept as *_pooled): pools reads across samples -> confounded by replicate.
         pooled_name, pooled_stat_name, pooled_stat, pooled_p = run_contingency_test(
             tt, test=args.test, pseudocount=args.pseudocount)
-        # SAMPLE-STRATIFIED CMH (primary): one 2 x len(keep_tx) allele x transcript table per sample,
-        # combined by the generalized (Landis-Koch) CMH general-association statistic. Transcript column
-        # order is FIXED (keep_tx) across strata; a sample lacking both alleles or >=2 transcripts is
-        # dropped as uninformative. Build per-sample tables ALWAYS (one sample -> one stratum).
+        # SAMPLE-STRATIFIED CMH (primary): one 2 x len(keep_tx) allele x transcript table per sample
+        # (sorted sample order; only samples with reads on a kept transcript, as before).
         strata = []
-        if "sample" in sub.columns:
-            sgrp = sub.groupby(["sample", "allele_class", "ZT"], as_index=False, observed=True).size()
-            sgrp = sgrp[sgrp["ZT"].isin(keep_tx)]
-            for _samp, ss in sgrp.groupby("sample", observed=True):
-                st = (ss.pivot_table(index="allele_class", columns="ZT", values="size",
-                                     fill_value=0, aggfunc="sum")
-                        .reindex(index=["ref", "alt"], columns=keep_tx, fill_value=0))
-                strata.append(st.to_numpy(dtype=float))
-        # PRIMARY from the INFORMATIVE strata: >=2 -> generalized CMH; exactly 1 -> the exact test on THAT
-        # stratum (never the fully-pooled allele x transcript table, which re-pools non-informative
-        # samples = the Simpson statistic); 0 -> NaN (leaves the BH family).
+        if samp_all is not None:
+            s_b = samp_all[idx][m]; al_m = al_b[m]; c_m = c[m]
+            s_u, s_inv = np.unique(s_b, return_inverse=True)
+            for k in range(s_u.size):
+                sel = s_inv == k
+                T = np.zeros((2, K), dtype=np.int64)
+                np.add.at(T, (al_m[sel], c_m[sel]), 1)
+                strata.append(T.astype(float))
         inf = informative_strata(strata)
         test_name, stat_name, stat_value, p_value, n_strata, _mode = stratified_primary(
             inf, lambda T: run_contingency_test(T, test=args.test, pseudocount=args.pseudocount))
-        # sample-stratified effect (max over transcripts of the coverage-weighted ref-alt fraction gap),
-        # from the same informative strata; NaN on the untestable path.
         eff_strat = stratified_max_distribution_shift(inf) if _mode != "none" else float("nan")
         _hstat, het_p, _hdf, _ = stratum_heterogeneity(inf)
         strata_heterogeneous = bool(np.isfinite(het_p) and het_p < 0.05)
-        per_tx = []
-        for tx in table.columns:
-            per_tx.append({
-                "ZT": tx,
-                "ref_reads": int(table.loc["ref", tx]),
-                "alt_reads": int(table.loc["alt", tx]),
-            })
-        first = sub.iloc[0]
+        per_tx = [{"ZT": tx, "ref_reads": int(table[0, jx]), "alt_reads": int(table[1, jx])}
+                  for jx, tx in enumerate(keep_tx)]
         rows.append({
-            "snp_id": snp_id,
-            "chrom": first.get("chrom", ""),
-            "pos1": int(first.get("pos1", 0)),
-            "ref": first.get("ref", ""),
-            "alt": first.get("alt", ""),
-            "gene_names": first.get("gene_names", ""),
-            "gene_ids": first.get("gene_ids", ""),
-            "metagene_indices": first.get("metagene_indices", ""),
+            "snp_id": snp_ids[b],
+            "chrom": raw["chrom"][first_i] if "chrom" in raw else "",
+            "pos1": int(raw["pos1"][first_i]) if "pos1" in raw else 0,
+            "ref": raw["ref"][first_i] if "ref" in raw else "",
+            "alt": raw["alt"][first_i] if "alt" in raw else "",
+            "gene_names": raw["gene_names"][first_i] if "gene_names" in raw else "",
+            "gene_ids": raw["gene_ids"][first_i] if "gene_ids" in raw else "",
+            "metagene_indices": raw["metagene_indices"][first_i] if "metagene_indices" in raw else "",
             "n_reads": int(tt.sum()),
-            "n_ref_reads": int(allele_totals.get("ref", 0)),
-            "n_alt_reads": int(allele_totals.get("alt", 0)),
+            "n_ref_reads": n_ref,
+            "n_alt_reads": n_alt,
             "n_transcripts_tested": int(tt.shape[1]),
             "n_strata_informative": int(n_strata),
             "strata_heterogeneous": bool(strata_heterogeneous),
@@ -131,6 +132,31 @@ def main():
             "effect_max_abs_tx_frac_diff_pooled": max_abs_distribution_shift(tt),
             "per_transcript_json": json.dumps(per_tx, separators=(",", ":")),
         })
+
+
+def main():
+    args = parse_args()
+    # One chromosome at a time (a byte range of the chrom-sorted table; 71 GiB when loaded whole on an
+    # 8-sample mosquito run). The table is written in sorted-chrom order with rows in position order, so
+    # concatenating per-chrom rows in that order reproduces the old first-appearance group order exactly.
+    tbl = open_chrom_table(args.molecule_snps)
+    usecols = [c for c in WANTED_COLS if c in tbl.header_cols]
+    dtype = {c: t for c, t in CATEGORICAL.items() if c in usecols}
+    rows = []
+    try:
+        for chrom in tbl.chroms:
+            df = tbl.read(chrom, usecols=usecols, dtype=dtype)
+            if df.empty:
+                continue
+            keep = df["allele_class"].isin(["ref", "alt"]) & df["ZT"].fillna("").astype(str).ne("")
+            df = df.loc[keep].copy()
+            if df.empty:
+                continue
+            _rows_for_chrom(df, args, rows)
+            del df
+    finally:
+        if hasattr(tbl, "close"):
+            tbl.close()
 
     out = pd.DataFrame(rows)
     if not out.empty:

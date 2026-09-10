@@ -40,7 +40,7 @@ python assemble_transcripts.py \
   --min-total-reads-for-mod 20
 """
 
-import argparse, os, sys, glob, re, gzip, math, random
+import argparse, os, sys, glob, re, gzip, math, random, heapq, bisect, gc
 from collections import defaultdict, Counter
 from concurrent.futures import ProcessPoolExecutor, as_completed
 
@@ -75,6 +75,22 @@ def _bgzf_coffset(fh):
         return max(0, int(fh.tell()) >> 16)
     except Exception:
         return 0
+
+
+def _raise_fd_limit():
+    """Raise the soft open-file limit to the hard limit. Every worker holds one handle (+index) per BAM,
+    so a many-sample run needs workers x samples descriptors; the common 1024 default is hit at
+    ~30 samples. Returns the resulting soft limit (or a conservative 1024 if unavailable)."""
+    try:
+        import resource
+        soft, hard = resource.getrlimit(resource.RLIMIT_NOFILE)
+        target = hard if hard != resource.RLIM_INFINITY else max(soft, 1 << 20)
+        if target > soft:
+            resource.setrlimit(resource.RLIMIT_NOFILE, (target, hard))
+            soft = target
+        return int(soft)
+    except Exception:
+        return 1024
 
 # --------------------------- utils ---------------------------
 
@@ -187,17 +203,33 @@ def cluster_positions(sorted_positions, window):
     # what keeps such 1-read artifacts out of the kept set. test_tes_clustering_invariant.py guards the
     # four axes that ARE fixed (bounded width, member coverage, exact partition, window-monotonicity) and
     # deliberately does NOT assert single-read stability.
+    # O(n log n) implementation of the mode-seeking rule above (the previous version rescanned the
+    # whole `remaining` dict for every seed: O(n^2) in distinct positions -- 104k distinct 3' ends took
+    # 140 s in one worker). Seed = max-heap on (count, -pos) with lazy deletion; members = a bisected
+    # window on the sorted distinct positions. Output is identical.
     counts = Counter(sorted_positions)
-    remaining = dict(counts)
+    if not counts:
+        return []
+    pos_sorted = sorted(counts)
+    cnt = [counts[p] for p in pos_sorted]
+    alive = [True] * len(pos_sorted)
+    heap = [(-c, p, i) for i, (p, c) in enumerate(zip(pos_sorted, cnt))]
+    heapq.heapify(heap)
     out = []
-    while remaining:
-        seed = max(remaining, key=lambda p: (remaining[p], -p))   # highest count; tie -> smallest pos
-        members = [p for p in remaining if abs(p - seed) <= window]
+    while heap:
+        _negc, seed, si = heapq.heappop(heap)
+        if not alive[si]:
+            continue
+        lo = bisect.bisect_left(pos_sorted, seed - window)
+        hi = bisect.bisect_right(pos_sorted, seed + window)
         positions = []
-        for p in members:
-            positions.extend([p] * counts[p])
-            del remaining[p]
-        out.append({"positions": sorted(positions), "rep": seed, "count": len(positions)})
+        for j in range(lo, hi):
+            if alive[j]:
+                alive[j] = False
+                positions.extend([pos_sorted[j]] * cnt[j])
+        out.append({"positions": positions, "rep": seed, "count": len(positions)})
+    out.sort(key=lambda d: d["rep"])   # stable downstream ordering
+    return out
     out.sort(key=lambda d: d["rep"])   # stable downstream ordering
     return out
 
@@ -563,12 +595,29 @@ def _regionize_chrom_worker(task):
             try: fh.close()
             except Exception: pass
 
+def _load_sample_assignments(path):
+    """qname -> (zt_label, gene_index, zn_index, metagene_index) from a per-sample assignment TSV."""
+    out = {}
+    if not path or not os.path.exists(path):
+        return out
+    with open(path) as fh:
+        for line in fh:
+            p = line.rstrip("\n").split("\t")
+            if len(p) >= 5:
+                out[p[0]] = (p[1], int(p[2]), int(p[3]), int(p[4]))
+    return out
+
+
 def _write_zt_tagged_sample(task):
     """Write one sample's ZT/ZN-tagged BAM (picklable ProcessPool entry point). Each sample re-reads
     its own original BAM and writes its own tagged BAM, so samples are independent -> parallelizable.
     BGZF read/write use compression threads (`threads=`), which is the main per-sample speedup."""
-    (in_path, out_path, sample_assign, primary_only, io_threads) = task
+    (in_path, out_path, assign_path, primary_only, io_threads) = task
     io_threads = max(1, int(io_threads))
+    # The read -> (ZT, ZG, ZN, ZM) map is loaded from THIS sample's assignment file (written by main()
+    # from the per-core assignment shards), so the parent never holds an all-samples qname dict and
+    # nothing large is pickled into the pool. Only assigned reads are listed.
+    sample_assign = _load_sample_assignments(assign_path)
     _seen_w = 0
     with pysam.AlignmentFile(in_path, "rb", threads=io_threads) as inp, \
          pysam.AlignmentFile(out_path, "wb", header=inp.header, threads=io_threads) as outw:
@@ -604,14 +653,33 @@ def _write_zt_tagged_sample(task):
 
 # --------------------------- per-core processing ---------------------------
 
+# Per-worker BAM handle cache. ProcessPool workers are long-lived and each processes thousands of
+# cores; every pysam open re-parses the .bai (9-16 MB, ~20 ms on a 35 GB BAM), so opening each BAM once
+# per worker instead of once per (core x BAM) removes ~1M opens on a 31-sample genome-wide run.
+_BAM_HANDLES = {}
+
+
+def _bam_handle(path):
+    fh = _BAM_HANDLES.get(path)
+    if fh is None:
+        fh = pysam.AlignmentFile(path, "rb")
+        _BAM_HANDLES[path] = fh
+    return fh
+
+
 def _process_core(core_args):
     """
     Fetch reads for a (chrom, s, e) core with padding; cluster TES; assign truncations.
     Only keep isoforms whose TES is within [s,e] (core span) to avoid duplicates.
-    Return list of isoform dicts (without annotation yet).
+
+    Returns (core_idx, isoforms). Each isoform carries only per-isoform AGGREGATES (counts, medians,
+    per-sample/per-chain counters, read-length stats) -- never the per-read member dicts, which cost
+    ~1.1 KB/read in the parent (69 GiB at 2 deep samples, 230 GiB at 6). The read -> isoform
+    assignment is written to `assign_dir/core_<idx>.tsv` as (sample, qname, local isoform index) and
+    resolved to tags by main() after labelling.
     """
 
-    (chrom, s, e, pad_bp, bam_paths, filters, iso_params) = core_args
+    (core_idx, chrom, s, e, pad_bp, bam_paths, filters, iso_params, assign_dir) = core_args
     apa_window = iso_params["apa_window"]
 
     # -----------------------------
@@ -623,213 +691,235 @@ def _process_core(core_args):
         if not os.path.exists(bam):
             continue
 
-        with pysam.AlignmentFile(bam, "rb") as fh:
-            s_fetch = max(0, s - pad_bp)
-            e_fetch = e + pad_bp
+        fh = _bam_handle(bam)
+        s_fetch = max(0, s - pad_bp)
+        e_fetch = e + pad_bp
 
-            try:
-                it = fh.fetch(contig=chrom, start=s_fetch, end=e_fetch)
-            except ValueError:
+        try:
+            it = fh.fetch(contig=chrom, start=s_fetch, end=e_fetch)
+        except ValueError:
+            continue
+
+        for aln in it:
+            if aln.is_unmapped:
+                continue
+            if filters["primary_only"] and (aln.is_secondary or aln.is_supplementary):
+                continue
+            if aln.mapping_quality < filters["min_mapq"]:
                 continue
 
-            for aln in it:
-                if aln.is_unmapped:
-                    continue
-                if filters["primary_only"] and (aln.is_secondary or aln.is_supplementary):
-                    continue
-                if aln.mapping_quality < filters["min_mapq"]:
-                    continue
+            tx = get_tx_strand(aln)
 
-                tx = get_tx_strand(aln)
+            sclen, tail = softclip3p_len_and_seq(aln, tx)
+            if filters["require_softclip3p"] > 0 and sclen < filters["require_softclip3p"]:
+                continue
 
-                sclen, tail = softclip3p_len_and_seq(aln, tx)
-                if filters["require_softclip3p"] > 0 and sclen < filters["require_softclip3p"]:
-                    continue
+            purity = polya_purity(tail, tx) if sclen > 0 else 0.0
 
-                purity = polya_purity(tail, tx) if sclen > 0 else 0.0
+            chain = intron_chain_1based(aln)
+            if len(chain) < filters["min_introns_read"]:
+                continue
 
-                chain = intron_chain_1based(aln)
-                if len(chain) < filters["min_introns_read"]:
-                    continue
+            chain_tx = chain_tx_order(chain, tx)
 
-                chain_tx = chain_tx_order(chain, tx)
+            rd_chrom = fh.get_reference_name(aln.reference_id)
+            if rd_chrom != chrom:
+                continue
 
-                rd_chrom = fh.get_reference_name(aln.reference_id)
-                if rd_chrom != chrom:
-                    continue
-
-                mem.append(dict(
-                    chrom=chrom,
-                    strand=tx,
-                    tes=tes_pos1(aln, tx),
-                    chain=chain,
-                    chain_tx=chain_tx,
-                    n_introns=len(chain),
-                    exons=exon_blocks_from_aln(aln),
-                    bam=os.path.basename(bam),
-                    sample=sample,
-                    qname=aln.query_name,
-                    mapq=aln.mapping_quality,
-                    read_length=query_len(aln),
-                    sclen=sclen,
-                    purity=purity
-                ))
+            mem.append(dict(
+                strand=tx,
+                tes=tes_pos1(aln, tx),
+                chain_tx=chain_tx,
+                exons=exon_blocks_from_aln(aln),
+                sample=sample,
+                qname=aln.query_name,
+                mapq=aln.mapping_quality,
+                read_length=query_len(aln),
+                sclen=sclen,
+                purity=purity
+            ))
 
     if not mem:
-        return []
+        return core_idx, []
 
     # -----------------------------
-    # Group by chrom + strand
+    # Group by strand (chrom is fixed)
     # -----------------------------
     by_cs = defaultdict(list)
     for r in mem:
-        by_cs[(r["chrom"], r["strand"])].append(r)
+        by_cs[(chrom, r["strand"])].append(r)
 
     isoforms = []
+    assign_fh = None
+    if assign_dir:
+        assign_fh = open(os.path.join(assign_dir, f"core_{core_idx:07d}.tsv"), "w")
 
-    # -----------------------------
-    # Process each strand separately
-    # -----------------------------
-    for (c, strand), rlist in by_cs.items():
+    try:
+        for (c, strand), rlist in by_cs.items():
 
-        positions = sorted(r["tes"] for r in rlist)
-        if not positions:
-            continue
-
-        clusters = cluster_positions(positions, apa_window)
-
-        for cl in clusters:
-
-            rep_pos = cl["rep"]
-
-            if not (s <= rep_pos <= e):
+            positions = sorted(r["tes"] for r in rlist)
+            if not positions:
                 continue
 
-            # Assign every read whose TES falls in THIS cluster's span, not just those within
-            # apa_window of the mode. cluster_positions() single-linkage-chains positions, so a
-            # cluster can be wider than apa_window; selecting by |tes-rep_pos|<=apa_window would
-            # silently drop the tail of such a cluster (those reads then match no other cluster
-            # either, since inter-cluster gaps exceed the window) -- losing reads and, if the tail
-            # is a real distinct 3' end, an entire APA isoform. Clusters are non-overlapping, so a
-            # read's TES belongs to exactly one span.
-            cl_lo, cl_hi = min(cl["positions"]), max(cl["positions"])
-            members = [r for r in rlist if cl_lo <= r["tes"] <= cl_hi]
-            if not members:
-                continue
+            clusters = cluster_positions(positions, apa_window)
+            # reads bucketed by 3' end once, instead of rescanning every read for every cluster
+            by_tes = defaultdict(list)
+            for i, r in enumerate(rlist):
+                by_tes[r["tes"]].append(i)
 
-            # --------------------------------------------------------
-            # TRUE 3′-ANCHORED SUFFIX COLLAPSE
-            # --------------------------------------------------------
+            for cl in clusters:
 
-            chain_to_idxs = defaultdict(list)
-            for i, m in enumerate(members):
-                chain_to_idxs[tuple(m["chain_tx"])].append(i)
+                rep_pos = cl["rep"]
 
-            exact_counts = Counter(tuple(m["chain_tx"]) for m in members)
-            chain_features = compute_chain_features(exact_counts)
-            for canon in chain_features:
-                chain_features[canon]["absorb_allowed"] = absorb_allowed_for_chain(
-                    chain_features[canon], iso_params
-                )
-            canons = canonical_order(
-                exact_counts,
-                chain_features,
-            )
-
-            assigned = set()
-
-            for canon in canons:
-
-                feat = chain_features[canon]
-                allow_suffix_absorb = feat["absorb_allowed"]
-                idxs = []
-
-                for ch, idxlist in chain_to_idxs.items():
-
-                    # strict suffix collapse (true 3′ anchoring)
-                    compatible = len(ch) <= len(canon) and canon[-len(ch):] == ch
-                    if not compatible:
-                        continue
-                    if ch != canon and not allow_suffix_absorb:
-                        continue
-                    # Introns of `canon` that lie 5' (in tx order) of this read's own chain. A clean 3'
-                    # truncation never reaches them; a read that ALIGNS contiguously across one retained
-                    # it (intron retention) and is a different structure -- do NOT absorb it here, leave
-                    # it for its own chain's canon (M9). Per-read: reads sharing `ch` can differ 5'.
-                    omitted = canon[:len(canon) - len(ch)]
-                    for i in idxlist:
-                        if i in assigned:
-                            continue
-                        if omitted and read_retains_any_intron(members[i]["exons"], omitted):
-                            continue
-                        idxs.append(i)
-
-                if not idxs:
+                if not (s <= rep_pos <= e):
                     continue
 
-                for i in idxs:
-                    assigned.add(i)
+                # Every read whose TES is one of this cluster's positions. Clusters partition the
+                # positions (mode-seeking, see cluster_positions), so this is exactly the set of reads
+                # in the cluster's span; indices are sorted to preserve the original rlist order.
+                idx = []
+                for p in set(cl["positions"]):
+                    idx.extend(by_tes.get(p, ()))
+                idx.sort()
+                members = [rlist[i] for i in idx]
+                if not members:
+                    continue
 
-                grp = [members[i] for i in idxs]
+                # --------------------------------------------------------
+                # TRUE 3'-ANCHORED SUFFIX COLLAPSE
+                # --------------------------------------------------------
 
-                full_len_members = [
-                    m for m in grp if tuple(m["chain_tx"]) == canon
-                ]
+                chain_to_idxs = defaultdict(list)
+                for i, m in enumerate(members):
+                    chain_to_idxs[tuple(m["chain_tx"])].append(i)
 
-                rep = max(
-                    full_len_members or grp,
-                    key=lambda m: (m["exons"][-1][1] - m["exons"][0][0])
+                exact_counts = Counter(tuple(m["chain_tx"]) for m in members)
+                chain_features = compute_chain_features(exact_counts)
+                for canon in chain_features:
+                    chain_features[canon]["absorb_allowed"] = absorb_allowed_for_chain(
+                        chain_features[canon], iso_params
+                    )
+                canons = canonical_order(
+                    exact_counts,
+                    chain_features,
                 )
 
-                rep_exons = list(rep["exons"])
-                tes = rep_pos
+                assigned = set()
 
-                # Enforce the TES boundary, keeping tes INSIDE the terminal exon. rep_pos (the cluster
-                # mode) can differ from the rep read's own TES; when it falls at/before the terminal
-                # exon's start (a terminal exon shorter than the difference), extending would invert the
-                # exon, so we fall back to the rep read's actual 3' end rather than reporting a tes that
-                # sits OUTSIDE the fragmentform's own exon span (previously left uncorrected).
-                if strand == "+":
-                    if tes > rep_exons[-1][0]:
-                        rep_exons[-1] = (rep_exons[-1][0], tes)
+                for canon in canons:
+
+                    feat = chain_features[canon]
+                    allow_suffix_absorb = feat["absorb_allowed"]
+                    idxs = []
+
+                    for ch, idxlist in chain_to_idxs.items():
+
+                        # strict suffix collapse (true 3' anchoring)
+                        compatible = len(ch) <= len(canon) and canon[-len(ch):] == ch
+                        if not compatible:
+                            continue
+                        if ch != canon and not allow_suffix_absorb:
+                            continue
+                        # Introns of `canon` that lie 5' (in tx order) of this read's own chain. A clean 3'
+                        # truncation never reaches them; a read that ALIGNS contiguously across one retained
+                        # it (intron retention) and is a different structure -- do NOT absorb it here, leave
+                        # it for its own chain's canon (M9). Per-read: reads sharing `ch` can differ 5'.
+                        omitted = canon[:len(canon) - len(ch)]
+                        for i in idxlist:
+                            if i in assigned:
+                                continue
+                            if omitted and read_retains_any_intron(members[i]["exons"], omitted):
+                                continue
+                            idxs.append(i)
+
+                    if not idxs:
+                        continue
+
+                    for i in idxs:
+                        assigned.add(i)
+
+                    grp = [members[i] for i in idxs]
+
+                    full_len_members = [
+                        m for m in grp if tuple(m["chain_tx"]) == canon
+                    ]
+
+                    rep = max(
+                        full_len_members or grp,
+                        key=lambda m: (m["exons"][-1][1] - m["exons"][0][0])
+                    )
+
+                    rep_exons = list(rep["exons"])
+                    tes = rep_pos
+
+                    # Enforce the TES boundary, keeping tes INSIDE the terminal exon. rep_pos (the cluster
+                    # mode) can differ from the rep read's own TES; when it falls at/before the terminal
+                    # exon's start (a terminal exon shorter than the difference), extending would invert the
+                    # exon, so we fall back to the rep read's actual 3' end rather than reporting a tes that
+                    # sits OUTSIDE the fragmentform's own exon span (previously left uncorrected).
+                    if strand == "+":
+                        if tes > rep_exons[-1][0]:
+                            rep_exons[-1] = (rep_exons[-1][0], tes)
+                        else:
+                            tes = rep_exons[-1][1]
                     else:
-                        tes = rep_exons[-1][1]
-                else:
-                    if tes < rep_exons[0][1]:
-                        rep_exons[0] = (tes, rep_exons[0][1])
-                    else:
-                        tes = rep_exons[0][0]
+                        if tes < rep_exons[0][1]:
+                            rep_exons[0] = (tes, rep_exons[0][1])
+                        else:
+                            tes = rep_exons[0][0]
 
-                polya_ok = sum(
-                    1 for m in grp
-                    if m["sclen"] >= iso_params["min_polya_length"]
-                    and m["purity"] >= iso_params["min_polya_purity"]
-                )
+                    polya_ok = sum(
+                        1 for m in grp
+                        if m["sclen"] >= iso_params["min_polya_length"]
+                        and m["purity"] >= iso_params["min_polya_purity"]
+                    )
 
-                polya_frac = polya_ok / len(grp) if grp else 0.0
+                    polya_frac = polya_ok / len(grp) if grp else 0.0
 
-                isoforms.append(dict(
-                    chrom=chrom,
-                    strand=strand,
-                    tes=tes,
-                    chain_tx=canon,
-                    n_introns=len(canon),
-                    members=grp,
-                    rep_exons=rep_exons,
-                    polya_frac=polya_frac,
-                    exact_chain_reads=exact_counts[canon],
-                    trunc_assigned_reads=len(grp) - exact_counts[canon],
-                    family_reachable_reads=feat["reachable_count"],
-                    anchor_reads=feat["anchor_reads"],
-                    anchor_frac=feat["anchor_frac"],
-                    absorb_allowed=int(allow_suffix_absorb),
-                    distal_unique_prefix=feat["unique_prefix"],
-                    distal_unique_5p_junction=feat["distal_unique_5p_junction"],
-                    exact_sample_ct=Counter(m["sample"] for m in full_len_members),
-                    assignment_mode="support_first",
-                ))
+                    # ---- per-isoform aggregates (exactly what main() used to derive from members) ----
+                    chain_counts = Counter(chain_to_str(tuple(m["chain_tx"])) for m in grp)
+                    read_lengths = [m["read_length"] for m in grp if m.get("read_length", 0) > 0]
+                    local_idx = len(isoforms)
+                    isoforms.append(dict(
+                        core=core_idx,
+                        local=local_idx,
+                        chrom=chrom,
+                        strand=strand,
+                        tes=tes,
+                        chain_tx=canon,
+                        n_introns=len(canon),
+                        count=len(grp),
+                        rep_exons=rep_exons,
+                        polya_frac=polya_frac,
+                        exact_chain_reads=exact_counts[canon],
+                        trunc_assigned_reads=len(grp) - exact_counts[canon],
+                        family_reachable_reads=feat["reachable_count"],
+                        anchor_reads=feat["anchor_reads"],
+                        anchor_frac=feat["anchor_frac"],
+                        absorb_allowed=int(allow_suffix_absorb),
+                        distal_unique_prefix=feat["unique_prefix"],
+                        distal_unique_5p_junction=feat["distal_unique_5p_junction"],
+                        exact_sample_ct=Counter(m["sample"] for m in full_len_members),
+                        assignment_mode="support_first",
+                        med_mapq=median([m["mapq"] for m in grp]),
+                        med_sclen=median([m["sclen"] for m in grp]),
+                        med_purity=median([m["purity"] for m in grp]),
+                        sample_ct=Counter(m["sample"] for m in grp),
+                        chain_counts=chain_counts,
+                        included_trunc=1 if any(len(tuple(m["chain_tx"])) < len(canon) for m in grp) else 0,
+                        rl_n=len(read_lengths),
+                        rl_sum=sum(read_lengths),
+                        rl_median=float(median(read_lengths)) if read_lengths else 0.0,
+                        rl_min=min(read_lengths) if read_lengths else 0,
+                        rl_max=max(read_lengths) if read_lengths else 0,
+                    ))
+                    if assign_fh is not None:
+                        assign_fh.writelines(f"{m['sample']}\t{m['qname']}\t{local_idx}\n" for m in grp)
+    finally:
+        if assign_fh is not None:
+            assign_fh.close()
 
-    return isoforms
+    return core_idx, isoforms
 
 def assign_metagene_partitions(final_kept):
     gene_records = {}
@@ -1054,7 +1144,8 @@ def main():
     if n_threads > 1 and len(regionize_tasks) > 1:
         # Each worker holds one open handle (+index) per BAM, so bound concurrency to keep the
         # total open-file count sane on many-sample runs (e.g. 64 threads x 6 BAMs = 384 fds).
-        max_workers = min(n_threads, len(regionize_tasks), max(1, 256 // max(1, len(bams))))
+        _fd_budget = max(64, _raise_fd_limit() - 128)
+        max_workers = min(n_threads, len(regionize_tasks), max(1, _fd_budget // max(1, len(bams))))
         try:
             with ProcessPoolExecutor(max_workers=max_workers) as ex:
                 for chrom, n_cores, kept in ex.map(_regionize_chrom_worker, regionize_tasks):
@@ -1107,37 +1198,49 @@ def main():
         min_distal_anchor_frac=float(args.min_distal_anchor_frac),
         min_exact_canonical_reads=int(args.min_exact_canonical_reads),
     )
+    need_assign = bool(args.write_zt_bams or args.emit_modkit_manifest or args.write_zt_tagged_sample_bams)
+    assign_dir = None
+    if need_assign:
+        assign_dir = os.path.join(os.path.dirname(args.out_gtf) or ".", f".assign_shards_{os.getpid()}")
+        os.makedirs(assign_dir, exist_ok=True)
     worker_args = [
-        (chrom, s, e, int(args.pad_fetch_bp), bams, filters, iso_params)
-        for (chrom, s, e) in cores_all
+        (ci, chrom, s, e, int(args.pad_fetch_bp), bams, filters, iso_params, assign_dir)
+        for ci, (chrom, s, e) in enumerate(cores_all)
     ]
 
-    # Process cores (parallel or serial)
+    # Process cores (parallel or serial). Workers return per-isoform aggregates only (see _process_core).
     kept_isoforms = []
     n_threads = max(1, int(args.threads or 0))
     print(f"[INFO] Processing {len(worker_args)} cores with threads={n_threads}", file=sys.stderr)
+    _n_done = 0
+    _report_every = max(1, len(worker_args) // 20)
+
+    def _collect(res):
+        nonlocal _n_done
+        _core_idx, out = res
+        kept_isoforms.extend(out)
+        _n_done += 1
+        if _n_done % _report_every == 0:
+            print(f"[INFO] cores done: {_n_done}/{len(worker_args)}", file=sys.stderr)
+
     if n_threads > 1:
         try:
             with ProcessPoolExecutor(max_workers=n_threads) as ex:
                 futs = [ex.submit(_process_core, wa) for wa in worker_args]
-                for i, fut in enumerate(as_completed(futs), 1):
-                    out = fut.result()
-                    kept_isoforms.extend(out)
-                    if i % max(1, len(worker_args)//20) == 0:
-                        print(f"[INFO] cores done: {i}/{len(worker_args)}", file=sys.stderr)
+                for fut in as_completed(futs):
+                    _collect(fut.result())
         except PermissionError as exc:
             print(f"[WARN] Falling back to serial core processing: {exc}", file=sys.stderr)
-            for i, wa in enumerate(worker_args, 1):
-                out = _process_core(wa)
-                kept_isoforms.extend(out)
-                if i % max(1, len(worker_args)//20) == 0:
-                    print(f"[INFO] cores done: {i}/{len(worker_args)}", file=sys.stderr)
+            for wa in worker_args:
+                _collect(_process_core(wa))
     else:
-        for i, wa in enumerate(worker_args, 1):
-            out = _process_core(wa)
-            kept_isoforms.extend(out)
-            if i % max(1, len(worker_args)//20) == 0:
-                print(f"[INFO] cores done: {i}/{len(worker_args)}", file=sys.stderr)
+        for wa in worker_args:
+            _collect(_process_core(wa))
+
+    # Deterministic order regardless of which worker finished first (as_completed order is not
+    # reproducible): every downstream tie-break (T1/T2 labels, metrics row order) now sees the same
+    # sequence run-to-run.
+    kept_isoforms.sort(key=lambda x: (x["chrom"], x["strand"], x["tes"], tuple(x["chain_tx"])))
 
     if not kept_isoforms:
         sys.exit("No candidate isoforms found")
@@ -1157,7 +1260,7 @@ def main():
     for iso in kept_isoforms:
         key = (iso["chrom"], iso["strand"], iso["tes"], tuple(iso["chain_tx"]))
         prev = _dedup.get(key)
-        if prev is None or len(iso["members"]) > len(prev["members"]):
+        if prev is None or iso["count"] > prev["count"]:
             _dedup[key] = iso
     if len(_dedup) != len(kept_isoforms):
         print(f"[INFO] collapsed {len(kept_isoforms) - len(_dedup)} duplicate fragmentform(s) "
@@ -1165,22 +1268,22 @@ def main():
     kept_isoforms = list(_dedup.values())
 
     # Global filtering + metrics (same as single-pass)
-    total_reads_used = sum(len(iso["members"]) for iso in kept_isoforms)
+    total_reads_used = sum(iso["count"] for iso in kept_isoforms)
     final_kept = []
     metrics_rows = []
     for iso in kept_isoforms:
         chrom = iso["chrom"]; strand = iso["strand"]; tes = iso["tes"]
         chain_tx = iso["chain_tx"]; n_introns = iso["n_introns"]
-        members = iso["members"]; rep_exons = iso["rep_exons"]; polya_frac = iso["polya_frac"]
-        count = len(members)
+        rep_exons = iso["rep_exons"]; polya_frac = iso["polya_frac"]
+        count = iso["count"]
         frac_global = count/total_reads_used if total_reads_used else 0.0
-        med_mapq = median([m["mapq"] for m in members])
-        med_sclen = median([m["sclen"] for m in members])
-        med_purity = median([m["purity"] for m in members])
-        sample_ct = Counter(m["sample"] for m in members)
-        chain_counts = Counter(chain_to_str(tuple(m["chain_tx"])) for m in members)
+        med_mapq = iso["med_mapq"]
+        med_sclen = iso["med_sclen"]
+        med_purity = iso["med_purity"]
+        sample_ct = iso["sample_ct"]
+        chain_counts = iso["chain_counts"]
         n_full_len_reads = chain_counts.get(chain_to_str(chain_tx), 0)
-        included_trunc = 1 if any(len(tuple(m["chain_tx"])) < len(chain_tx) for m in members) else 0
+        included_trunc = iso["included_trunc"]
 
         keep = True
         if count < args.min_reads or frac_global < args.min_frac: keep=False
@@ -1206,23 +1309,11 @@ def main():
         ])
 
         if keep:
-            final_kept.append(dict(
-                chrom=chrom, strand=strand, tes=tes, chain_tx=chain_tx,
-                n_introns=n_introns, members=members, rep_exons=rep_exons,
-                count=count, frac_global=frac_global, polya_frac=polya_frac,
+            iso.update(dict(
+                frac_global=frac_global,
                 med_mapq=med_mapq, med_sclen=med_sclen, med_purity=med_purity,
-                sample_ct=sample_ct, chain_counts=chain_counts,
-                exact_chain_reads=iso["exact_chain_reads"],
-                trunc_assigned_reads=iso["trunc_assigned_reads"],
-                family_reachable_reads=iso["family_reachable_reads"],
-                anchor_reads=iso["anchor_reads"],
-                anchor_frac=iso["anchor_frac"],
-                absorb_allowed=iso["absorb_allowed"],
-                distal_unique_prefix=iso["distal_unique_prefix"],
-                distal_unique_5p_junction=iso["distal_unique_5p_junction"],
-                exact_sample_ct=iso["exact_sample_ct"],
-                assignment_mode=iso["assignment_mode"],
             ))
+            final_kept.append(iso)
 
     prefix = args.out_prefix if args.out_prefix else args.out_gtf.replace(".gtf","")
     os.makedirs(os.path.dirname(args.out_gtf) or ".", exist_ok=True)
@@ -1274,23 +1365,43 @@ def main():
             for k in ks:
                 isos[k]["_novel_locus"] = (name, lid)
 
+    # A gene is one (gene_name, gene_id, chrom, strand). Keying by name/id alone merged a gene's copies
+    # on an alt contig (IGHG3 on chr14 + chr14_KI270846v1_alt, HLA-B/-C on chr6 alts) or in the PAR into
+    # one gene_index / metagene, so their exon spans, ZN colouring, the classifier's longest-3'UTR
+    # anchor and the genotype context all mixed coordinates from two contigs. Copies keep their gene_id;
+    # the DISPLAY name of a gene that occurs on >1 (chrom, strand) is suffixed with "@<chrom>" (plus
+    # "(<strand>)" if the same contig carries both strands) so every downstream grouping by gene_name
+    # stays contig-aware while the plain name is still a substring for searches.
     buckets = defaultdict(list)
     for iso in final_kept:
         ann = iso["annotation"]
         if ann["gene_name"] != "NA" and ann["gene_id"] != "NA":
-            gkey = (ann["gene_name"], ann["gene_id"])
+            gkey = (ann["gene_name"], ann["gene_id"], iso["chrom"], iso["strand"])
         else:
-            gkey = iso["_novel_locus"]
+            gkey = iso["_novel_locus"] + (iso["chrom"], iso["strand"])
         buckets[gkey].append(iso)
 
-    gene_keys_sorted = sorted(buckets.keys(), key=lambda x: (x[0], x[1]))
+    by_name = defaultdict(list)
+    for gk in buckets:
+        by_name[(gk[0], gk[1])].append(gk)
+    gene_label = {}
+    for (gn, gid), keys in by_name.items():
+        if len(keys) == 1:
+            gene_label[keys[0]] = gn
+        else:
+            per_chrom = Counter(k[2] for k in keys)
+            for k in keys:
+                gene_label[k] = f"{gn}@{k[2]}" + (f"({k[3]})" if per_chrom[k[2]] > 1 else "")
+    gene_keys_sorted = sorted(buckets.keys(), key=lambda x: (gene_label[x], x[1], x[2], x[3]))
     gene_index = {gk: i+1 for i, gk in enumerate(gene_keys_sorted)}
 
     for gk in gene_keys_sorted:
         iso_list = buckets[gk]
-        iso_list_sorted = sorted(iso_list, key=lambda x: (-x["count"], x["tes"]))
+        # chain string as the final tie-break: two fragmentforms of a gene with equal support and
+        # 3' end (different chains) otherwise take T1/T2 from list order.
+        iso_list_sorted = sorted(iso_list, key=lambda x: (-x["count"], x["tes"], chain_to_str(x["chain_tx"])))
         for tidx, iso in enumerate(iso_list_sorted, 1):
-            gn, gid = gk
+            gn, gid = gene_label[gk], gk[1]
             gidx = gene_index[gk]
             iso["gene_name_label"], iso["gene_id_label"] = gn, gid
             iso["gene_index"] = gidx
@@ -1330,7 +1441,9 @@ def main():
             s.write("\t".join(map(str,[
                 iso["zt_label"], iso["zt_label"], iso["gene_index"], iso["gene_tx_index"], iso["metagene_index"], iso["zn_index"], iso["metagene_partition_count"], iso["chrom"], iso["strand"], iso["tes"],
                 chain_to_str(iso["chain_tx"]),
-                ann["gene_id"], ann["gene_name"], ann["matched_tid"],
+                # gtf_gene_name carries the contig-aware display label (NAME@chrom for a gene present
+                # on >1 contig) so every downstream grouping by gene name keeps the copies apart.
+                ann["gene_id"], (iso["gene_name_label"] if ann["gene_name"] != "NA" else ann["gene_name"]), ann["matched_tid"],
                 ann["gtf_tes"], chain_to_str(ann["gtf_chain_tx"]), ann["tes_delta_bp"], ann["exon_overlap_bp"], ann["match_source"],
                 ann["classification"], iso["count"], iso["exact_chain_reads"], iso["trunc_assigned_reads"], iso["family_reachable_reads"],
                 iso["anchor_reads"], f"{iso['anchor_frac']:.4f}", iso["absorb_allowed"], chain_to_str(iso["distal_unique_prefix"]),
@@ -1347,10 +1460,14 @@ def main():
     import matplotlib.pyplot as plt
     from plot_utils import save_figure
 
-    all_samples = sorted({s for iso in final_kept for s in iso["sample_ct"].keys()})
-    tx_ids = [iso["zt_label"] for iso in final_kept]
+    # Every input BAM is a sample, even one with no kept reads (it must not silently vanish from
+    # tx_counts / per_sample_stats and desynchronise the samplesheet-driven stages).
+    all_samples = sorted({os.path.basename(b).replace(".bam", "") for b in bams})
+    # rows in GTF order (gene_index, transcript_index): deterministic and matches every other table
+    _fk_sorted = sorted(final_kept, key=lambda x: (x["gene_index"], x["gene_tx_index"]))
+    tx_ids = [iso["zt_label"] for iso in _fk_sorted]
     data = []
-    for iso in final_kept:
+    for iso in _fk_sorted:
         data.append([iso["sample_ct"].get(s, 0) for s in all_samples])
     counts_df = pd.DataFrame(data, index=tx_ids, columns=all_samples)
     counts_path = f"{prefix}_tx_counts.tsv"
@@ -1432,8 +1549,7 @@ def main():
     tx_read_length_rows = []
     partition_rows = []
     for iso in sorted(final_kept, key=lambda x: (x["gene_index"], x["gene_tx_index"])):
-        read_lengths = [m["read_length"] for m in iso["members"] if m.get("read_length", 0) > 0]
-        mean_len = (sum(read_lengths) / len(read_lengths)) if read_lengths else 0.0
+        mean_len = (iso["rl_sum"] / iso["rl_n"]) if iso["rl_n"] else 0.0
         tx_read_length_rows.append(dict(
             code=iso["zt_label"],
             zt_label=iso["zt_label"],
@@ -1446,11 +1562,11 @@ def main():
             gene_name=iso["gene_name_label"],
             chrom=iso["chrom"],
             strand=iso["strand"],
-            assigned_reads=len(read_lengths),
+            assigned_reads=iso["rl_n"],
             mean_read_length=round(mean_len, 2),
-            median_read_length=round(float(median(read_lengths)), 2) if read_lengths else 0.0,
-            min_read_length=min(read_lengths) if read_lengths else 0,
-            max_read_length=max(read_lengths) if read_lengths else 0,
+            median_read_length=round(iso["rl_median"], 2) if iso["rl_n"] else 0.0,
+            min_read_length=iso["rl_min"],
+            max_read_length=iso["rl_max"],
         ))
         partition_rows.append(dict(
             code=iso["zt_label"],
@@ -1477,19 +1593,38 @@ def main():
     partition_map_path = f"{prefix}_partition_map.tsv"
     pd.DataFrame(partition_rows).to_csv(partition_map_path, sep="\t", index=False)
 
-    # Optional ZT outputs
-    need_assign = bool(args.write_zt_bams or args.emit_modkit_manifest or args.write_zt_tagged_sample_bams)
-    assign = None
+    # Optional ZT outputs. Resolve the per-core (sample, qname, local isoform) shards into ONE
+    # assignment file per sample (qname, ZT, ZG, ZN, ZM) with a single streaming pass, so the parent
+    # never materialises an all-samples qname dict and each BAM writer loads only its own sample.
+    assign_paths = {}
     if need_assign:
-        assign = defaultdict(dict)
+        iso_tags = {}
         for iso in final_kept:
-            for m in iso["members"]:
-                assign[m["sample"]][m["qname"]] = (
-                    iso["zt_label"],
-                    iso["gene_index"],
-                    iso["zn_index"],
-                    iso["metagene_index"],
-                )
+            iso_tags[(iso["core"], iso["local"])] = (
+                iso["zt_label"], iso["gene_index"], iso["zn_index"], iso["metagene_index"])
+        writers = {}
+        for bam in bams:
+            sample = os.path.basename(bam).replace(".bam", "")
+            assign_paths[sample] = os.path.join(assign_dir, f"sample__{sample}.assign.tsv")
+            writers[sample] = open(assign_paths[sample], "w")
+        try:
+            for fn in sorted(os.listdir(assign_dir)):
+                if not (fn.startswith("core_") and fn.endswith(".tsv")):
+                    continue
+                core_idx = int(fn[5:-4])
+                with open(os.path.join(assign_dir, fn)) as fh:
+                    for line in fh:
+                        sample, qname, local = line.rstrip("\n").split("\t")
+                        tags = iso_tags.get((core_idx, int(local)))
+                        if tags is None:
+                            continue   # isoform dropped by the support filters / dedup -> unassigned
+                        w = writers.get(sample)
+                        if w is not None:
+                            w.write(f"{qname}\t{tags[0]}\t{tags[1]}\t{tags[2]}\t{tags[3]}\n")
+        finally:
+            for w in writers.values():
+                w.close()
+        del iso_tags
 
     if args.write_zt_bams or args.emit_modkit_manifest:
         out_dir = os.path.join(os.path.dirname(args.out_gtf) or ".", "zt_bams")
@@ -1507,6 +1642,7 @@ def main():
             elig_codes = {iso["zt_label"] for iso in final_kept if "eligible_samples" in iso and sample in iso["eligible_samples"]}
             if not elig_codes:
                 continue
+            sample_assign = _load_sample_assignments(assign_paths.get(sample))
             with pysam.AlignmentFile(bam, "rb") as inp:
                 writers = {}
                 try:
@@ -1517,7 +1653,7 @@ def main():
                         if aln.is_unmapped: continue
                         if args.primary_only and (aln.is_secondary or aln.is_supplementary): continue
                         qn = aln.query_name
-                        tup = assign.get(sample, {}).get(qn) if assign else None
+                        tup = sample_assign.get(qn)
                         if not tup: continue
                         zt, zg, zn, zm = tup
                         if zt not in writers: continue
@@ -1540,6 +1676,7 @@ def main():
                         try: pysam.index(out_bam)
                         except Exception: pass
                         manifest_rows.append([sample, code, out_bam])
+            del sample_assign
         if args.emit_modkit_manifest:
             mani = os.path.join(out_dir, "modkit_manifest.tsv")
             with open(mani, "w") as f:
@@ -1551,19 +1688,19 @@ def main():
     if args.write_zt_tagged_sample_bams:
         out_dir2 = os.path.join(os.path.dirname(args.out_gtf) or ".", "zt_tagged")
         os.makedirs(out_dir2, exist_ok=True)
-        # Parallelize the tagged-BAM writing across samples (was a serial for-loop; on genome-wide
-        # data each sample re-reads a ~100 GB BAM and writes a ~40 GB tagged BAM single-threaded --
-        # the dominant assemble tail). Samples are independent, so fan them out; each writer also
-        # gets BGZF compression threads. Output is byte-identical to the serial path.
+        # Parallelize the tagged-BAM writing across samples; each worker loads only its own sample's
+        # assignment file. gc.freeze() keeps the (now small) parent heap out of the children's GC so a
+        # fork does not copy-on-write it. Output is byte-identical to the serial path.
         n_threads = max(1, int(args.threads or 0))
         tasks = []
         for bam in bams:
             sample = os.path.basename(bam).replace(".bam", "")
             out_path = os.path.join(out_dir2, f"{sample}.zt_tagged.bam")
-            tasks.append((bam, out_path, (assign.get(sample, {}) if assign else {}),
+            tasks.append((bam, out_path, assign_paths.get(sample),
                           bool(args.primary_only), max(2, n_threads // max(1, 2 * len(bams)))))
         n_workers = min(len(tasks), n_threads)
         wrote = []
+        gc.collect(); gc.freeze()
         if n_workers > 1 and len(tasks) > 1:
             try:
                 with ProcessPoolExecutor(max_workers=n_workers) as ex:
@@ -1573,8 +1710,13 @@ def main():
                 wrote = []
         if not wrote:
             wrote = [_write_zt_tagged_sample(t) for t in tasks]
+        gc.unfreeze()
         for out_path in wrote:
             print(f"[OK] Wrote ZT/ZN-tagged sample BAM: {out_path}", file=sys.stderr)
+
+    if assign_dir:
+        import shutil
+        shutil.rmtree(assign_dir, ignore_errors=True)
 
     print(f"[OK] Wrote GTF: {args.out_gtf}", file=sys.stderr)
     print(f"[OK] Metrics: {metrics_path}", file=sys.stderr)

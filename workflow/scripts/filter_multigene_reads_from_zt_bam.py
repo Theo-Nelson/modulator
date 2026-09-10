@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 
 import argparse
+import bisect
 import gzip
 import os
 import re
@@ -151,6 +152,27 @@ def load_transcript_meta(gtf_path):
     return tx_meta
 
 
+# (starts, max_span) per gene list so each read scans only the genes that can overlap it, not every
+# gene on the chromosome from index 0 (78 us/read on a 2.5k-gene chromosome = ~40 min per 30M-read
+# sample). Keyed by list identity; the lists are built once by load_gene_exon_unions.
+_SPAN_INDEX = {}
+
+
+def _gene_window(lst, read_start, read_end):
+    if not lst:
+        return lst
+    idx = _SPAN_INDEX.get(id(lst))
+    if idx is None or idx[0] is not lst:
+        starts = [g["span_start"] for g in lst]
+        max_span = max((g["span_end"] - g["span_start"] for g in lst), default=0)
+        idx = (lst, starts, max_span)
+        _SPAN_INDEX[id(lst)] = idx
+    _, starts, max_span = idx
+    lo = bisect.bisect_left(starts, read_start - max_span)
+    hi = bisect.bisect_right(starts, read_end)
+    return lst[lo:hi]
+
+
 def find_overlapping_genes(read_exons, chrom, strand, gene_index, same_strand_only=True):
     """
     Return list of overlapping genes with positive exonic overlap.
@@ -164,7 +186,7 @@ def find_overlapping_genes(read_exons, chrom, strand, gene_index, same_strand_on
     candidates = []
     strands = [strand] if same_strand_only else ["+", "-"]
     for strand_key in strands:
-        for g in gene_index.get((chrom, strand_key), []):
+        for g in _gene_window(gene_index.get((chrom, strand_key), []), read_start, read_end):
             if g["span_start"] > read_end:
                 break
             if g["span_end"] < read_start:
@@ -214,6 +236,8 @@ def main():
              "keep: retain all multi-gene reads (legacy no-op). Reads resolved by their ZT tag "
              "(multi_gene_kept_by_zt) are always kept."
     )
+    ap.add_argument("--threads", type=int, default=1,
+                    help="BGZF (de)compression threads for the BAM reader and each writer")
     args = ap.parse_args()
 
     os.makedirs(os.path.dirname(args.out_clean_bam) or ".", exist_ok=True)
@@ -232,9 +256,10 @@ def main():
     per_scrap_tx_removed = Counter()
     per_scrap_tx_meta = {}
 
-    with pysam.AlignmentFile(args.bam, "rb") as inp, \
-         pysam.AlignmentFile(args.out_clean_bam, "wb", header=inp.header) as clean_out, \
-         pysam.AlignmentFile(args.out_scrap_bam, "wb", header=inp.header) as scrap_out, \
+    io_threads = max(1, int(args.threads))
+    with pysam.AlignmentFile(args.bam, "rb", threads=io_threads) as inp, \
+         pysam.AlignmentFile(args.out_clean_bam, "wb", header=inp.header, threads=io_threads) as clean_out, \
+         pysam.AlignmentFile(args.out_scrap_bam, "wb", header=inp.header, threads=io_threads) as scrap_out, \
          open(args.out_removed_tsv, "w") as removed_fh:
 
         removed_fh.write(

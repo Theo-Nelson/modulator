@@ -391,10 +391,29 @@ def read_tsv(path):
             return pd.DataFrame()
 
 
+def read_tsv_cols(path, cols, categorical=()):
+    """read_tsv restricted to `cols` (those present), with `categorical` columns as category dtype."""
+    if not path or not os.path.exists(path) or os.path.getsize(path) == 0:
+        return pd.DataFrame()
+    try:
+        hdr = [str(c).lstrip("#") for c in pd.read_csv(path, sep="\t", nrows=0).columns]
+        use = [c for c in hdr if c in set(cols)]
+        dtype = {c: "category" for c in categorical if c in use}
+        return clean_columns(pd.read_csv(path, sep="\t", usecols=use, dtype=dtype, low_memory=False,
+                                         on_bad_lines="warn"))
+    except Exception as e:
+        sys.stderr.write(f"[report] warning: column-pruned read of {path} failed ({e}); falling back\n")
+        return read_tsv(path)
+
+
 def read_summary_metrics(paths):
     rows = []
     for path in sorted(paths):
-        sample = os.path.basename(path).split(".")[0]
+        sample = os.path.basename(path)
+        for suf in (".multigene_filter_summary.tsv", ".tsv"):
+            if sample.endswith(suf):
+                sample = sample[:-len(suf)]
+                break
         metrics = {}
         with open(path) as fh:
             for line in fh:
@@ -427,13 +446,17 @@ def replicate_concordance(zn_long_df, meta_df, min_cov=20):
             or "condition" not in meta_df.columns or "sample" not in meta_df.columns):
         return {}
     cond = dict(zip(meta_df["sample"].astype(str), meta_df["condition"].astype(str)))
-    df = zn_long_df.copy()
-    df["_cond"] = df["sample"].astype(str).map(cond)
+    site_keys = [k for k in ["chrom", "start0", "strand", "mod_code", "ZN_transcript_index"] if k in zn_long_df.columns]
+    # only the columns needed (no whole-frame copy); plain str keys so groupby order does not depend on
+    # whether the input columns were categorical
+    df = pd.DataFrame({"sample": zn_long_df["sample"].astype(str)})
+    for k in site_keys:
+        df[k] = zn_long_df[k].astype(str).to_numpy()
+    df["_cond"] = df["sample"].map(cond)
+    df["_cov"] = pd.to_numeric(zn_long_df.get("Nvalid_cov"), errors="coerce").to_numpy()
+    df["_frac"] = pd.to_numeric(zn_long_df.get("frac_modified"), errors="coerce").to_numpy()
     df = df[df["_cond"].notna()]
-    df["_cov"] = pd.to_numeric(df.get("Nvalid_cov"), errors="coerce")
-    df["_frac"] = pd.to_numeric(df.get("frac_modified"), errors="coerce")
     df = df[(df["_cov"] >= min_cov) & df["_frac"].notna()]
-    site_keys = [k for k in ["chrom", "start0", "strand", "mod_code", "ZN_transcript_index"] if k in df.columns]
     out = {}
     for condition, cdf in df.groupby("_cond"):
         n_reps = cdf["sample"].nunique()
@@ -515,14 +538,42 @@ def _zn_int(z):
         return None
 
 
+def _iter_table_chroms(path, keep, chroms):
+    """Yield DataFrames restricted to `chroms` (and `keep` columns). Uses the chromosome byte-range
+    index sidecar (`<table>.chromidx.tsv`, built once) so only the wanted chromosomes are read; falls
+    back to a chunked full scan for a table without a chrom column."""
+    try:
+        from genotype_utils import open_chrom_table
+        tbl = open_chrom_table(path)
+        if "chrom" not in tbl.header_cols:
+            raise ValueError("no chrom column")
+    except Exception:
+        tbl = None
+    if tbl is None:
+        for chunk in pd.read_csv(path, sep="\t", usecols=lambda c: c in keep, chunksize=200000, low_memory=False):
+            if "chrom" in chunk.columns:
+                chunk = chunk[chunk["chrom"].astype(str).isin(chroms)]
+            yield chunk
+        return
+    try:
+        for chrom in sorted(chroms):
+            df = tbl.read(chrom, usecols=keep)
+            if not df.empty:
+                yield df
+    finally:
+        if hasattr(tbl, "close"):
+            tbl.close()
+
+
 def _scan_perff_by_allele(mol_mods_path, mol_snps_path, sites):
     """For each cis-SNP→mod hit, split every fragmentform's reads at the modified site BY the SNP allele
     the read carries. Returns {(chrom,start0,mod_code): {ZN: {allele: [n_modified, n_reads]}}} with
     allele in {'ref','alt','na'} ('na' = read covers the modification but not the SNP, or no SNP table).
 
-    Two chunked, site-filtered passes -- the per-read mod-call table (ZN + target_modified) and the
-    per-read SNP table (allele_class) -- joined by (sample, read id). Bounded at genome scale because
-    only the top-N hit sites are retained."""
+    Two site-filtered passes -- the per-read mod-call table (ZN + target_modified) and the per-read
+    SNP table (allele_class) -- joined by (sample, read id). Only the chromosomes carrying a target
+    site are read (chrom byte-range index) and only the top-N hit sites are retained, so this stays
+    bounded on a 31-sample genome-wide run."""
     acc = {}
     mod_want = {(str(c), int(s), str(mc)) for (_g, c, s, mc, _snp) in sites}
     site_snp = {(str(c), int(s), str(mc)): str(snp) for (_g, c, s, mc, snp) in sites}
@@ -531,19 +582,26 @@ def _scan_perff_by_allele(mol_mods_path, mol_snps_path, sites):
         return acc
     # pass 1: reads at each mod site -> {(sample,qname): (ZN_int, modified)}
     reads_at = {k: {} for k in mod_want}
+    wanted_chroms = {c for (c, _s, _m) in mod_want}
+    wanted_starts = {s for (_c, s, _m) in mod_want}
     keep = ["sample", "qname", "chrom", "start0", "target_mod_code", "target_modified", "ZN", "usable"]
     try:
-        for chunk in pd.read_csv(mol_mods_path, sep="\t", usecols=lambda c: c in keep,
-                                 chunksize=200000, low_memory=False):
+        for chunk in _iter_table_chroms(mol_mods_path, keep, wanted_chroms):
             if not {"chrom", "start0", "target_mod_code", "ZN", "qname"}.issubset(chunk.columns):
                 print("[report] WARNING: per-read mod table missing required columns "
                       "(need chrom/start0/target_mod_code/ZN/qname); allele-split figures skipped.",
                       file=sys.stderr, flush=True)
                 break
+            chunk = chunk[chunk["chrom"].astype(str).isin(wanted_chroms)]
+            if chunk.empty:
+                continue
             chunk = chunk.copy()
             chunk["start0"] = pd.to_numeric(chunk["start0"], errors="coerce")
             chunk = chunk.dropna(subset=["start0"])
             chunk["start0"] = chunk["start0"].astype(int)
+            chunk = chunk[chunk["start0"].isin(wanted_starts)]
+            if chunk.empty:
+                continue
             # coerce target_modified up front so a NaN/blank can never raise inside the row loop
             # (a raise there would drop the whole result and silently erase every allele-split figure).
             # A MISSING column must degrade to mod=0, not raise on a scalar .fillna (which the bare
@@ -558,16 +616,15 @@ def _scan_perff_by_allele(mol_mods_path, mol_snps_path, sites):
                 _u = chunk["usable"]
                 _ok = (pd.to_numeric(_u, errors="coerce") > 0) | _u.astype(str).str.strip().str.lower().eq("true")
                 chunk = chunk[_ok.fillna(False)]
-            for (c, s, mc), grp in chunk.groupby(["chrom", "start0", "target_mod_code"]):
-                key = (str(c), int(s), str(mc))
-                if key not in reads_at:
-                    continue
-                for _, r in grp.iterrows():
-                    zi = _zn_int(r["ZN"])
-                    if zi is None:
-                        continue
-                    sq = (str(r.get("sample", "")), str(r["qname"]))
-                    reads_at[key][sq] = (zi, int(r["_tmod"]))
+            _zn = pd.to_numeric(chunk["ZN"], errors="coerce")
+            chunk = chunk[_zn.notna()]
+            _zn = _zn[_zn.notna()].astype(int)
+            _smp = chunk["sample"].astype(str) if "sample" in chunk.columns else pd.Series("", index=chunk.index)
+            for c, s, mc, smp, q, zi, m in zip(chunk["chrom"].astype(str), chunk["start0"], chunk["target_mod_code"].astype(str),
+                                               _smp, chunk["qname"].astype(str), _zn, chunk["_tmod"]):
+                rmap = reads_at.get((c, int(s), mc))
+                if rmap is not None:
+                    rmap[(smp, q)] = (int(zi), int(m))
     except Exception:
         return acc
     # pass 2: allele_class per read at each wanted SNP -> {snp_id: {(sample,qname): 'ref'/'alt'}}
@@ -580,21 +637,25 @@ def _scan_perff_by_allele(mol_mods_path, mol_snps_path, sites):
               "'no SNP call' for all reads (SNP data absent, not a lack of stratification).",
               file=sys.stderr, flush=True)
     if mol_snps_path and os.path.exists(mol_snps_path) and snp_want:
-        skeep = ["sample", "qname", "snp_id", "allele_class"]
+        skeep = ["sample", "qname", "chrom", "snp_id", "allele_class"]
+        snp_chroms = {snp.split(":")[0] for snp in snp_want}
         _got_allele_rows = False
         try:
-            for chunk in pd.read_csv(mol_snps_path, sep="\t", usecols=lambda c: c in skeep,
-                                     chunksize=200000, low_memory=False):
+            for chunk in _iter_table_chroms(mol_snps_path, skeep, snp_chroms):
                 if not {"snp_id", "qname", "allele_class"}.issubset(chunk.columns):
                     print("[report] WARNING: SNP molecule table lacks an allele_class/snp_id/qname "
                           "column; allele-split figures show 'no SNP call' for all reads.",
                           file=sys.stderr, flush=True)
                     break
                 chunk = chunk[chunk["snp_id"].astype(str).isin(snp_want)]
-                for _, r in chunk.iterrows():
-                    # record the genotype for EVERY read covering the SNP (incl. third alleles), so the
-                    # join can tell "not covered" (→ na) apart from "covered but off-allele" (→ dropped).
-                    allele_at[str(r["snp_id"])][(str(r.get("sample", "")), str(r["qname"]))] = str(r["allele_class"]).lower()
+                if chunk.empty:
+                    continue
+                _smp = chunk["sample"].astype(str) if "sample" in chunk.columns else pd.Series("", index=chunk.index)
+                # record the genotype for EVERY read covering the SNP (incl. third alleles), so the
+                # join can tell "not covered" (→ na) apart from "covered but off-allele" (→ dropped).
+                for snp, smp, q, a in zip(chunk["snp_id"].astype(str), _smp, chunk["qname"].astype(str),
+                                          chunk["allele_class"].astype(str).str.lower()):
+                    allele_at[snp][(smp, q)] = a
                     _got_allele_rows = True
         except Exception:
             allele_at = {snp: {} for snp in snp_want}
@@ -2162,7 +2223,12 @@ def main():
     read_stats_df = read_tsv(args.read_stats)
     tx_lengths_df = read_tsv(args.tx_lengths)
     partition_map_df = read_tsv(args.partition_map)
-    zn_long_df = read_tsv(args.zn_long)
+    # The ZN long table is the one genome-scale input the report touches (31 samples ~ 25M rows); only
+    # the columns the two consumers below use are read, with the repeated strings as categoricals.
+    zn_long_df = read_tsv_cols(args.zn_long,
+                               ["sample", "chrom", "start0", "end0", "strand", "mod_code",
+                                "ZN_transcript_index", "Nvalid_cov", "Nmod", "frac_modified", "gene_name"],
+                               categorical=("sample", "chrom", "strand", "mod_code", "gene_name"))
     zt_long_df = read_tsv(args.zt_long)
     # Per-fragmentform (per-ZN) exon models, for the cis-SNP→mod stoichiometry per-fragmentform graphs.
     snp_mod_iso = {}
@@ -2243,7 +2309,11 @@ def main():
     # raise KeyError out of main() and write NO report at all, instead of degrading this one section.
     if not zn_long_df.empty and {"gene_name", "chrom", "start0", "end0", "strand", "mod_code"}.issubset(zn_long_df.columns):
         top_gene_sites_df = (
-            zn_long_df.assign(site_key=zn_long_df[["chrom", "start0", "end0", "strand", "mod_code"]].astype(str).agg(":".join, axis=1))
+            pd.DataFrame({"gene_name": zn_long_df["gene_name"].astype(str).to_numpy(),
+                          "mod_code": zn_long_df["mod_code"].astype(str).to_numpy(),
+                          "site_key": (zn_long_df["chrom"].astype(str) + ":" + zn_long_df["start0"].astype(str)
+                                       + ":" + zn_long_df["end0"].astype(str) + ":" + zn_long_df["strand"].astype(str)
+                                       + ":" + zn_long_df["mod_code"].astype(str)).to_numpy()})
             .groupby(["gene_name", "mod_code"], as_index=False)["site_key"].nunique()
             .rename(columns={"site_key": "n_sites"})
             .sort_values("n_sites", ascending=False)
@@ -2479,7 +2549,7 @@ def main():
 
     sec_diff = section(
         "Sites with Differential Epitranscriptomic Modification Between Fragmentforms",
-        diff_html + diff_fig_html,
+        sig_box + diff_html + diff_fig_html,
         intro="Positions where the modification stoichiometry differs between the fragmentforms of a gene "
               "(across all detected mod codes; sample-stratified Cochran-Mantel-Haenszel with "
               f"Benjamini-Hochberg FDR). The table shows sites at <b>FDR&lt;{_DIFF_FDR:g} and |Δ|≥{_eff_pct}</b> "
@@ -2568,7 +2638,7 @@ def main():
     if args.polya_fragmentform or args.taillength_diffs or args.taillength_mod:
         sec_polya = build_polya_section(polya_frag_df, taillength_diffs_df, taillength_mod_df, args.top_genes,
                                         diff_figs_dir=args.taillength_diff_figs, mod_figs_dir=args.taillength_mod_figs,
-                                        max_figs=int(getattr(args, "max_snp_figs", 12)))
+                                        max_figs=int(getattr(args, "max_snp_figs", 12)), top_note=sig_box)
 
     # --- Between-condition comparisons (conditional) ---
     sec_between = build_between_conditions_section(args.between_conditions_dir, args.top_genes, top_note=sig_box) if args.between_conditions_dir else None

@@ -160,7 +160,8 @@ def _stats_for_one_sample(task):
     Picklable ProcessPool entry point. Each sample is independent (reads only its own BAMs and
     returns a small dict of scalars), so results are identical to the serial path.
     """
-    (bam, zt_tagged_dir, primary_only, min_mapq, min_introns_read, require_softclip3p) = task
+    (bam, zt_tagged_dir, primary_only, min_mapq, min_introns_read, require_softclip3p, io_threads) = task
+    io_threads = max(1, int(io_threads))
 
     sample = os.path.basename(bam).replace(".bam", "")
     zt_bam = os.path.join(zt_tagged_dir, f"{sample}.zt_tagged.bam")
@@ -178,7 +179,7 @@ def _stats_for_one_sample(task):
     fail_counts = {k: 0 for k in FAIL_KEYS}
 
     # Scan original BAM
-    with pysam.AlignmentFile(bam, "rb") as fh:
+    with pysam.AlignmentFile(bam, "rb", threads=io_threads) as fh:
         for aln in safe_fetch_all(fh):
             # G2: count READS, not records. A secondary/supplementary alignment is an extra record of a
             # read already represented by its primary; including them made total_n a RECORD count while
@@ -228,7 +229,7 @@ def _stats_for_one_sample(task):
     zt_mapped_unassigned_n = 0
 
     if os.path.exists(zt_bam):
-        with pysam.AlignmentFile(zt_bam, "rb") as fh:
+        with pysam.AlignmentFile(zt_bam, "rb", threads=io_threads) as fh:
             for aln in safe_fetch_all(fh):
                 zt_total_records += 1
                 if aln.is_unmapped:
@@ -328,6 +329,8 @@ def main():
     ap.add_argument("--require-softclip3p", type=int, default=0)
     ap.add_argument("--jobs", type=int, default=1,
                     help="Number of samples to scan in parallel (default 1 = serial, single-core safe).")
+    ap.add_argument("--threads", type=int, default=1,
+                    help="BGZF decompression threads per BAM reader.")
 
     args = ap.parse_args()
 
@@ -337,7 +340,7 @@ def main():
 
     tasks = [
         (bam, args.zt_tagged_dir, bool(args.primary_only), int(args.min_mapq),
-         int(args.min_introns_read), int(args.require_softclip3p))
+         int(args.min_introns_read), int(args.require_softclip3p), int(args.threads))
         for bam in bam_paths
     ]
 

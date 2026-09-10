@@ -223,7 +223,8 @@ Partition tags are hard-coded to split reads by fragment assignment:
 Merges the per-`ZN` modkit bedMethyl into long tables and per-gene/per-mod pivots.
 
 > **Site-keeping rule (when `filter_enable`):** a row **fails** if
-> `Ndiff > count_diff_factor·Nvalid_cov` **or** `Nmod ≤ Nfail + mod_fail_margin`.
+> `Ndiff > count_diff_factor·Nvalid_cov` **or** `Nmod ≤ nfail_score_k·Nfail` (the NFail-SCORE
+> k-ratio; `nfail_score_k: 0` disables the second term, `1` reproduces the old `Nmod > Nfail` rule).
 > A **site is kept** in *FILTERED* outputs if **any** row at that site passes;
 > when kept, **all** rows for that site (every ZN/sample) are retained. `min_cov`
 > only zeroes the displayed `frac_modified` (`Nvalid_cov < min_cov`); it does not
@@ -235,11 +236,11 @@ Merges the per-`ZN` modkit bedMethyl into long tables and per-gene/per-mod pivot
 | `jobs` | int | `12` | ZN | Per-chromosome parallelism for the streaming engine. |
 | `filter_enable` | bool | `true` | ZN/ZT | Enable the site-keeping rule above. |
 | `count_diff_factor` | float | `3.0` | ZN/ZT | Factor for the `Ndiff` fail term. |
-| `mod_fail_margin` | int | `1` | ZN/ZT | Extra margin on `Nfail` in the `Nmod` fail rule. |
+| `nfail_score_k` | float or map | `1.0` | ZN/ZT | Per-modification k in the `Nmod ≤ k·Nfail` fail term (a `{mod_code: k}` map is accepted). `mod_fail_margin` is deprecated and ignored. |
 | `emit_raw` | bool | `false`* | ZN/ZT | Write *RAW* (pre-filter) outputs. *Disabled by default to bound disk; the RAW long table is unconsumed downstream.* |
 | `emit_filtered` | bool | `true` | ZN/ZT | Write *FILTERED* outputs. |
 | `write_long` | bool | `true` | ZN/ZT | Emit the long TSV (one row per site × sample × fragment × mod). |
-| `write_pivots` | bool | `true` | ZN/ZT | Emit per-gene × mod pivots (coverage, fraction, Nmod). |
+| `write_pivots` | `auto`/`on`/`off` | `auto` | ZN/ZT | Emit per-gene × mod pivots (coverage, fraction, Nmod). `auto` writes them unless the run exceeds `pivot_max_groups` (2000) gene×mod groups. |
 | `write_raw_per_gene` | bool | `false` | ZN | Per-gene tables for *RAW*. |
 | `write_filtered_per_gene` | bool | `true` | ZN | Per-gene tables for *FILTERED*. |
 | `min_cov` | int | `0` | ZN/ZT | Zero `frac_modified` when `Nvalid_cov < min_cov` (row kept). |
@@ -307,7 +308,8 @@ association layers. Enable with `--set genotype.enable=true`.
 | `min_alt_frac` / `max_alt_frac` | float | `0.10` / `0.90` | Alt-allele fraction window for segregating SNPs. |
 | `min_baseq` / `min_mapq` | int | `20` / `10` | Quality floors for discovery / molecule extraction. |
 | `mod_sites_require_snp_link` | bool | `true` | Keep only mod sites whose context_key matches a candidate SNP. Lossless for the SNP-linked analyses (SNP-mod, haplotype-mod) and bounds memory on deep genome-wide data, but it **also restricts the non-SNP molecule analyses** — tail×mod, mod×mod and hierarchical_stoich only see SNP-linked mod sites (measured: 2078→763 sites on the reference run). Set `false` for genome-wide coverage of those analyses, at higher memory. |
-| `mod_jobs` | int | `8` | Concurrent `modkit extract calls` in the mod-table step (each streams a chromosome — bounds memory). |
+| `mod_jobs` | int | `16` | Concurrent `modkit extract calls` in the mod-table step (each streams a chromosome to a disk shard — bounds memory; capped at `threads`). |
+| `assoc_jobs` | int | `4` | Chromosomes tested in parallel by the SNP×mod, haplotype and mod×mod association tests (capped at `threads`; each worker holds one chromosome of the per-read tables). Output is identical for any value. |
 | `min_mod_site_cov` | int | `1` | Minimum aggregated mod-site coverage for SNP-mod testing. |
 | `min_group_reads` | int | `4` | Minimum group support for association/dependency tests. |
 | `min_haplotype_reads` | int | `4` | Minimum read support for a haplotype to be tested vs collapsed into `OTHER`. |
@@ -504,7 +506,7 @@ Relevant knobs:
 | `report.top_transcripts` / `report.top_genes` | `20` | Rows shown in the various tables. |
 | `report.max_diff_figs` | `6` | Differential-site figures embedded. |
 | `report.gene_browser` | `true` | Also build the interactive gene browser. |
-| `report.browser_max_genes` | `4000` | Genes embedded in the browser payload (largest by read support first), keeping the file responsive. |
+| `report.browser_max_genes` | all reference genes | Genes embedded in the browser payload (largest by read support first). Defaults to the number of genes in the reference GTF so every gene is lookup-able; set a smaller number to keep the file lighter. |
 | `report.max_class_figs_per_category` | `10` | Per-category classification figures embedded. |
 | `report.max_snp_figs` | `12` | Per-example SNP/haplotype figures per genotype section. |
 

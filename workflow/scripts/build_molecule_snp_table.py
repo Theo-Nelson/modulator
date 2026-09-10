@@ -2,12 +2,20 @@
 
 import argparse
 import os
+import shutil
 import sys
+import tempfile
 
 import pandas as pd
 import pysam
 
-from genotype_utils import run_process_jobs, sample_name_from_bam, safe_int
+from genotype_utils import run_process_jobs, sample_name_from_bam, safe_int, write_chrom_index
+
+OUT_COLS = [
+    "sample", "qname", "snp_id", "chrom", "pos1", "start0", "end0", "ref", "alt",
+    "observed_base", "allele_class", "baseq", "mapq", "strand",
+    "ZT", "ZG", "ZN", "ZM", "gene_names", "gene_ids", "metagene_indices"
+]
 
 
 def parse_args():
@@ -53,15 +61,21 @@ def extract_rows_from_bam(
     min_mapq: int,
     primary_only: bool,
     verbose: bool = False,
+    shard_dir=None,
 ):
+    """Scan one (BAM x chromosome) and write its rows to a pickle shard; returns (chrom, path, n).
+    Rows are never returned to the parent (162 GiB of dicts on an 8-sample mosquito run); the parent
+    assembles the output one chromosome at a time."""
     sample = sample_name_from_bam(bam)
     if verbose:
         print(f"[info] molecule SNP start: {sample}", file=sys.stderr, flush=True)
 
     rows = []
+    chrom_done = ""
     with pysam.AlignmentFile(bam, "rb") as fh:
         bam_contigs = set(fh.references)
         for chrom, pos_map in cand_by_chrom.items():
+            chrom_done = chrom
             # A candidate SNP's contig may be absent from THIS sample's BAM header (e.g. samples aligned
             # to different references); pileup() on an unknown contig raises and would abort the scan.
             # Nothing to extract for this (bam, chrom), so skip it.
@@ -69,6 +83,12 @@ def extract_rows_from_bam(
                 continue
             windows = build_windows(pos_map.keys())
             for win_start1, win_end1 in windows:
+                # Per-alignment cache of the decoded sequence / qualities / tags: pileup hands the same
+                # alignment back at every column it covers, and each `query_sequence` /
+                # `query_qualities` access re-decodes the whole read (2 kb) -- at a 10k-deep SNP that is
+                # 20 MB of decoding per column. Keyed by (qname, flag, start) so distinct records of one
+                # read (primary_only=False) never share an entry. Bounded to one window.
+                cache = {}
                 for col in fh.pileup(
                     chrom,
                     win_start1 - 1,
@@ -94,11 +114,21 @@ def extract_rows_from_bam(
                             continue
                         if aln.mapping_quality < min_mapq:
                             continue
+                        ck = (aln.query_name, aln.flag, aln.reference_start)
+                        c = cache.get(ck)
+                        if c is None:
+                            c = cache[ck] = (
+                                aln.query_sequence, aln.query_qualities, int(aln.mapping_quality),
+                                "-" if aln.is_reverse else "+",
+                                str(safe_get_tag(aln, "ZT", "")), safe_int(safe_get_tag(aln, "ZG", "")),
+                                safe_int(safe_get_tag(aln, "ZN", "")), safe_int(safe_get_tag(aln, "ZM", "")),
+                            )
+                        seq, quals, mapq, strand, zt, zg, zn, zm = c
                         qpos = pr.query_position
-                        bq = int(aln.query_qualities[qpos]) if aln.query_qualities is not None else 0
+                        bq = int(quals[qpos]) if quals is not None else 0
                         if bq < min_baseq:
                             continue
-                        base = aln.query_sequence[qpos].upper()
+                        base = seq[qpos].upper()
                         if len(base) != 1:
                             continue
                         allele_class = "other"
@@ -108,7 +138,7 @@ def extract_rows_from_bam(
                             allele_class = "alt"
                         rows.append({
                             "sample": sample,
-                            "qname": aln.query_name,
+                            "qname": ck[0],
                             "snp_id": cand_row["snp_id"],
                             "chrom": chrom,
                             "pos1": pos1,
@@ -119,12 +149,12 @@ def extract_rows_from_bam(
                             "observed_base": base,
                             "allele_class": allele_class,
                             "baseq": bq,
-                            "mapq": int(aln.mapping_quality),
-                            "strand": "-" if aln.is_reverse else "+",
-                            "ZT": str(safe_get_tag(aln, "ZT", "")),
-                            "ZG": safe_int(safe_get_tag(aln, "ZG", "")),
-                            "ZN": safe_int(safe_get_tag(aln, "ZN", "")),
-                            "ZM": safe_int(safe_get_tag(aln, "ZM", "")),
+                            "mapq": mapq,
+                            "strand": strand,
+                            "ZT": zt,
+                            "ZG": zg,
+                            "ZN": zn,
+                            "ZM": zm,
                             "gene_names": cand_row.get("gene_names", ""),
                             "gene_ids": cand_row.get("gene_ids", ""),
                             "metagene_indices": cand_row.get("metagene_indices", ""),
@@ -132,22 +162,23 @@ def extract_rows_from_bam(
 
     if verbose:
         print(f"[info] molecule SNP done: {sample} rows={len(rows)}", file=sys.stderr, flush=True)
-    return rows
+    if not rows:
+        return chrom_done, None, 0
+    path = os.path.join(shard_dir, f"{sample}.{chrom_done}.pkl")
+    pd.DataFrame(rows)[OUT_COLS].to_pickle(path)
+    return chrom_done, path, len(rows)
 
 
 def main():
     args = parse_args()
     cand = pd.read_csv(args.candidate_snps, sep="\t", low_memory=False)
+    os.makedirs(os.path.dirname(args.out_tsv) or ".", exist_ok=True)
     if cand.empty:
-        out = pd.DataFrame(columns=[
-            "sample", "qname", "snp_id", "chrom", "pos1", "start0", "end0", "ref", "alt",
-            "observed_base", "allele_class", "baseq", "mapq", "strand",
-            "ZT", "ZG", "ZN", "ZM", "gene_names", "gene_ids", "metagene_indices"
-        ])
-        os.makedirs(os.path.dirname(args.out_tsv) or ".", exist_ok=True)
+        out = pd.DataFrame(columns=OUT_COLS)
         _tmp = args.out_tsv + ".tmp"           # atomic write (see build_read_assignment_table)
         out.to_csv(_tmp, sep="\t", index=False)
         os.replace(_tmp, args.out_tsv)
+        write_chrom_index(args.out_tsv, [])
         return
 
     cand_by_chrom = {}
@@ -157,51 +188,54 @@ def main():
             pos_map[int(row["pos1"])] = row
         cand_by_chrom[chrom] = pos_map
 
-    # Shard per (BAM x chromosome) for genome-level parallelism; results concat and
-    # drop_duplicates by (sample,qname,snp_id), so per-shard pieces merge identically.
-    task_args = [
-        (bam, {chrom: pos_map}, args.min_baseq, args.min_mapq, args.primary_only, args.verbose)
-        for bam in args.bams
-        for chrom, pos_map in cand_by_chrom.items()
-    ]
-    jobs = max(1, min(int(args.jobs), len(task_args)))
-    rows = []
-    if jobs == 1:
-        for item in task_args:
-            rows.extend(extract_rows_from_bam(*item))
-    else:
-        for result in run_process_jobs(
-            extract_rows_from_bam,
-            task_args,
-            jobs,
-            verbose=args.verbose,
-            label="build_molecule_snp_table",
-        ):
-            rows.extend(result)
+    shard_dir = tempfile.mkdtemp(prefix=".molsnp_shards.", dir=os.path.dirname(args.out_tsv) or ".")
+    try:
+        # Shard per (BAM x chromosome) for genome-level parallelism; results are assembled per
+        # chromosome (sort + dedup), which reproduces the global sort exactly because chrom is the
+        # primary sort key.
+        task_args = [
+            (bam, {chrom: pos_map}, args.min_baseq, args.min_mapq, args.primary_only, args.verbose, shard_dir)
+            for bam in args.bams
+            for chrom, pos_map in cand_by_chrom.items()
+        ]
+        jobs = max(1, min(int(args.jobs), len(task_args)))
+        if jobs == 1:
+            results = [extract_rows_from_bam(*item) for item in task_args]
+        else:
+            results = run_process_jobs(
+                extract_rows_from_bam, task_args, jobs, verbose=args.verbose, label="build_molecule_snp_table")
 
-    df = pd.DataFrame(rows)
-    if not df.empty:
-        # Sort BEFORE dedup so keep="first" is deterministic. Parallel (BAM x chrom) shards return rows
-        # in nondeterministic order, and a read with >1 alignment over a SNP yields >1 row (possibly with
-        # different observed_base); sorting -- with the allele as a tiebreak -- makes the retained call
-        # reproducible instead of order-dependent. This order is also what haplotype blocks consume.
-        _sort_cols = ["chrom", "pos1", "snp_id", "sample", "qname"]
-        if "observed_base" in df.columns:
-            _sort_cols.append("observed_base")
-        df = (df.sort_values(_sort_cols)
-                .drop_duplicates(["sample", "qname", "snp_id"], keep="first")
-                .reset_index(drop=True))
-    else:
-        df = pd.DataFrame(columns=[
-            "sample", "qname", "snp_id", "chrom", "pos1", "start0", "end0", "ref", "alt",
-            "observed_base", "allele_class", "baseq", "mapq", "strand",
-            "ZT", "ZG", "ZN", "ZM", "gene_names", "gene_ids", "metagene_indices"
-        ])
+        by_chrom = {}
+        for chrom, path, n in results:
+            if path is not None:
+                by_chrom.setdefault(chrom, []).append(path)
 
-    os.makedirs(os.path.dirname(args.out_tsv) or ".", exist_ok=True)
-    _tmp = args.out_tsv + ".tmp"               # atomic write (see build_read_assignment_table)
-    df.to_csv(_tmp, sep="\t", index=False)
-    os.replace(_tmp, args.out_tsv)
+        _tmp = args.out_tsv + ".tmp"               # atomic write (see build_read_assignment_table)
+        blocks = []
+        with open(_tmp, "w") as out:
+            wrote_header = False
+            if not by_chrom:
+                pd.DataFrame(columns=OUT_COLS).to_csv(out, sep="\t", index=False)
+                wrote_header = True
+            for chrom in sorted(by_chrom):
+                df = pd.concat([pd.read_pickle(p) for p in by_chrom[chrom]], ignore_index=True)
+                # Sort BEFORE dedup so keep="first" is deterministic. Parallel (BAM x chrom) shards
+                # return rows in nondeterministic order, and a read with >1 alignment over a SNP yields
+                # >1 row (possibly with different observed_base); sorting -- with the allele as a
+                # tiebreak -- makes the retained call reproducible instead of order-dependent.
+                df = (df.sort_values(["chrom", "pos1", "snp_id", "sample", "qname", "observed_base"])
+                        .drop_duplicates(["sample", "qname", "snp_id"], keep="first")
+                        .reset_index(drop=True))
+                off = out.tell()
+                df.to_csv(out, sep="\t", index=False, header=not wrote_header)
+                wrote_header = True
+                out.flush()
+                blocks.append((chrom, off, out.tell() - off))
+                del df
+        os.replace(_tmp, args.out_tsv)
+        write_chrom_index(args.out_tsv, blocks, header_in_first_block=(len(blocks) > 0))
+    finally:
+        shutil.rmtree(shard_dir, ignore_errors=True)
 
 
 if __name__ == "__main__":

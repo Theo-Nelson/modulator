@@ -75,6 +75,23 @@ def _read(path):
     return df
 
 
+_SITE_COLS = ["gene_name", "chrom", "start0", "strand", "mod_code", "ZN_transcript_index", "Nvalid_cov", "Nmod"]
+
+
+def _read_sites(path):
+    """The per-site x fragmentform x sample table: read only the eight columns the browser uses, with
+    the repeated strings as categoricals (the groupby below uses observed=True; with sort=False a
+    categorical grouper keeps first-appearance order, so the payload is unchanged)."""
+    if not path or not os.path.exists(path) or os.path.getsize(path) == 0:
+        return pd.DataFrame()
+    hdr = [str(c).lstrip("#") for c in pd.read_csv(path, sep="\t", nrows=0).columns]
+    use = [c for c in hdr if c in set(_SITE_COLS)]
+    dtype = {c: "category" for c in ("gene_name", "chrom", "strand", "mod_code") if c in use}
+    df = pd.read_csv(path, sep="\t", usecols=use, dtype=dtype, low_memory=False)
+    df.columns = [str(c).lstrip("#") for c in df.columns]
+    return df
+
+
 # Fragmentform id suffix: "G<gene_index>.T<tx_index>". Anchored at end-of-string so a dotted gene
 # name in the prefix cannot match. This is the dot-safe join key between the GTF and the annotation
 # tables (see _fragkey in main()).
@@ -126,7 +143,7 @@ def main():
     if args.verbose:
         print(f"[browser] {sum(len(v) for v in genes.values()):,} fragmentforms in {len(genes):,} genes", flush=True)
 
-    sites = _read(args.sites_long)
+    sites = _read_sites(args.sites_long)
     diffs = _read(args.diff_results)
     summ = _read(args.classification_summary)
     apa = _read(args.apa_motifs)
@@ -168,15 +185,17 @@ def main():
     if not sites.empty:
         need = {"gene_name", "chrom", "start0", "strand", "mod_code", "Nvalid_cov", "Nmod"}
         if need.issubset(sites.columns):
-            s = sites.copy()
+            s = sites
             keys = ["gene_name", "chrom", "start0", "strand", "mod_code"]
             if "ZN_transcript_index" in s.columns:
                 keys_zt = keys + ["ZN_transcript_index"]
-                g = s.groupby(keys_zt, sort=False)[["Nvalid_cov", "Nmod"]].sum().reset_index()
+                g = s.groupby(keys_zt, sort=False, observed=True)[["Nvalid_cov", "Nmod"]].sum().reset_index()
             else:
-                g = s.groupby(keys, sort=False)[["Nvalid_cov", "Nmod"]].sum().reset_index()
+                g = s.groupby(keys, sort=False, observed=True)[["Nvalid_cov", "Nmod"]].sum().reset_index()
                 g["ZN_transcript_index"] = -1
             g["frac"] = (g["Nmod"] / g["Nvalid_cov"].replace(0, np.nan)).round(4)
+            for c in keys:
+                g[c] = g[c].astype(str)
             for gene, gg in g.groupby("gene_name", sort=False):
                 site_by_gene[str(gene)] = gg
 

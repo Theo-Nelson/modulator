@@ -27,6 +27,7 @@ Output is content-identical to aggregate_by_gene.py (validate with a sorted diff
 from __future__ import annotations
 
 import argparse
+import heapq
 import os
 import shutil
 import sys
@@ -43,6 +44,19 @@ _TX = None
 _GENE = None
 _BEDS = None
 _CFG = None
+
+
+def _raise_fd_limit():
+    """One open tabix handle per (sample x ZN) bed per worker: ~1,300 at 31 samples, above the common
+    1024 soft limit. Raise the soft limit to the hard limit (inherited by forked workers)."""
+    try:
+        import resource
+        soft, hard = resource.getrlimit(resource.RLIMIT_NOFILE)
+        target = hard if hard != resource.RLIM_INFINITY else max(soft, 1 << 20)
+        if target > soft:
+            resource.setrlimit(resource.RLIMIT_NOFILE, (target, hard))
+    except Exception:
+        pass
 
 
 def _init_worker(gtf_path, beds, cfg):
@@ -131,13 +145,19 @@ def process_chrom(chrom):
     k_per_mod = cfg.get("k_per_mod", {})
     filter_enable = cfg["filter_enable"]
 
-    # one position-sorted iterator per bed that has this chrom
+    # one position-sorted iterator per bed that has this chrom; a heap of (head start0, stream idx)
+    # replaces the old min()-over-all-streams scan (O(k) per position: 194 us/step at k=1271 beds =
+    # 31 samples x 41 ZN partitions; the heap is 34x faster). Ties pop in stream (bed) order, so the
+    # rows-at-a-start sequence -- and therefore every output byte -- is unchanged.
     streams = []
+    heap = []
     for (_root, sample, path, zn) in beds:
         it = _bed_rows_for_chrom(path, chrom)
         head = next(it, None)
         if head is not None:
+            heap.append((head["start0"], len(streams)))
             streams.append([head, it, sample, str(int(zn))])
+    heapq.heapify(heap)
 
     n_sites = 0
     emit_raw = cfg["emit_raw"]
@@ -153,20 +173,19 @@ def process_chrom(chrom):
     dedup_filt = open(dedup_filt_p, "w") if filter_enable else None
 
     try:
-        while streams:
-            min_start = min(s[0]["start0"] for s in streams)
+        while heap:
+            min_start = heap[0][0]
             rows_at_start = []  # (rec, sample, zn)
-            still = []
-            for s in streams:
+            while heap and heap[0][0] == min_start:
+                _, si = heapq.heappop(heap)
+                s = streams[si]
                 head, it, sample, zn = s
-                if head is not None and head["start0"] == min_start:
-                    while head is not None and head["start0"] == min_start:
-                        rows_at_start.append((head, sample, zn))
-                        head = next(it, None)
-                    s[0] = head
-                if s[0] is not None:
-                    still.append(s)
-            streams = still
+                while head is not None and head["start0"] == min_start:
+                    rows_at_start.append((head, sample, zn))
+                    head = next(it, None)
+                s[0] = head
+                if head is not None:
+                    heapq.heappush(heap, (head["start0"], si))
 
             # sub-group rows at this start into sites = (end0, strand, mod_code)
             sites = defaultdict(list)
@@ -189,9 +208,13 @@ def process_chrom(chrom):
                 buf_dedup = []
                 buf_long = []
                 s0 = str(min_start); e0 = str(end0)
+                gene_by_zn = {}   # assign_gene depends only on (site, ZN): resolve once per ZN, not per sample
                 for (sample, zn) in sorted(ag_counts, key=lambda t: (t[0], int(t[1]))):
                     cov, nmod, ncan, nother, ndel, nfail, ndiff, nnoc = ag_counts[(sample, zn)]
-                    gid, gname = agg.assign_gene(chrom, min_start, end0, strand, int(zn), tx, gene)
+                    gg = gene_by_zn.get(zn)
+                    if gg is None:
+                        gg = gene_by_zn[zn] = agg.assign_gene(chrom, min_start, end0, strand, int(zn), tx, gene)
+                    gid, gname = gg
                     frac = agg.frac_modified(nmod, cov, min_cov)
                     buf_dedup.append("\t".join([
                         sample, zn, chrom, s0, e0, strand, mod, gid, gname,
@@ -295,6 +318,7 @@ def parse_args():
 
 def main():
     args = parse_args()
+    _raise_fd_limit()
     base = args.out_prefix
     agg.ensure_dir(os.path.dirname(base) or ".")
     # Stable per-prefix workdir (holds per-chrom partials, which can be large) so re-runs resume

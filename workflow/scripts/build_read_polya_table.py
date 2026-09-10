@@ -10,11 +10,18 @@ Output is one row per (sample, qname) assigned read with its tail length pre-joi
 fragmentform, so downstream steps group tail lengths by fragmentform / gene / metagene / sample and
 join to ``molecule_mod_calls`` (same ``(sample, qname)`` key) for tail x modification. Mirrors
 build_read_assignment_table.py (per-BAM x chrom sharding, run_process_jobs, atomic write).
+
+MEMORY: each (BAM x chrom) worker writes its rows to a pickle shard and the parent assembles the
+table ONE CHROMOSOME at a time (a cohort's assigned reads as Python dicts in one process is >100 GiB).
+The table therefore carries a trailing ``chrom`` column, is sorted by (chrom, sample, qname), and gets
+a ``.chromidx.tsv`` byte-range sidecar so consumers (test_taillength_mod) can read one chromosome.
 """
 import argparse
 import os
 import re
+import shutil
 import sys
+import tempfile
 
 import pandas as pd
 import pysam
@@ -25,10 +32,12 @@ from genotype_utils import (
     run_process_jobs,
     sample_name_from_bam,
     safe_int,
+    write_chrom_index,
 )
 
 OUT_COLS = ["sample", "qname", "strand", "tail_len", "tail_estimated",
-            "ZT", "ZG", "ZN", "ZM", "gene_name", "metagene_index", "transcript_index", "classification"]
+            "ZT", "ZG", "ZN", "ZM", "gene_name", "metagene_index", "transcript_index", "classification",
+            "chrom"]
 
 
 def gene_from_zt(zt: str, gene_id: str = "") -> str:
@@ -72,11 +81,14 @@ def bam_chroms_with_reads(bam: str):
         return []
 
 
-def collect_rows_from_bam(bam: str, primary_only: bool, verbose: bool = False, region=None):
+def collect_rows_from_bam(bam: str, primary_only: bool, verbose: bool = False, region=None, shard_dir=None):
+    """Scan one (BAM x chromosome); write the rows to a pickle shard. Returns
+    (chrom, shard_path_or_None, n_rows, distinct ZT labels)."""
     sample = sample_name_from_bam(bam)
     if verbose:
         print(f"[info] polya scan start: {sample} {region or 'all'}", file=sys.stderr, flush=True)
     rows = []
+    zts = set()
     with pysam.AlignmentFile(bam, "rb") as fh:
         for aln in (fh.fetch(contig=region) if region else fh.fetch()):
             if aln.is_unmapped:
@@ -87,6 +99,7 @@ def collect_rows_from_bam(bam: str, primary_only: bool, verbose: bool = False, r
             if not zt:
                 continue  # assigned reads only -- unassigned reads have no fragmentform
             tail = safe_int(safe_get_tag(aln, "pt", 0))
+            zts.add(zt)
             rows.append({
                 "sample": sample,
                 "qname": aln.query_name,
@@ -97,43 +110,36 @@ def collect_rows_from_bam(bam: str, primary_only: bool, verbose: bool = False, r
                 "ZG": safe_int(safe_get_tag(aln, "ZG", "")),
                 "ZN": safe_int(safe_get_tag(aln, "ZN", "")),
                 "ZM": safe_int(safe_get_tag(aln, "ZM", "")),
+                "chrom": fh.get_reference_name(aln.reference_id),
             })
     if verbose:
         print(f"[info] polya scan done: {sample} assigned_rows={len(rows)}", file=sys.stderr, flush=True)
-    return rows
+    if not rows:
+        return region or "", None, 0, zts
+    path = os.path.join(shard_dir, f"{sample}.{region or 'all'}.pkl")
+    pd.DataFrame(rows).to_pickle(path)
+    return region or "", path, len(rows), zts
 
 
-def main():
-    args = parse_args()
-    task_args = []
-    for bam in args.bams:
-        chroms = bam_chroms_with_reads(bam)
-        if chroms:
-            task_args.extend((bam, args.primary_only, args.verbose, c) for c in chroms)
-        else:
-            task_args.append((bam, args.primary_only, args.verbose, None))
-    jobs = max(1, min(int(args.jobs), len(task_args)))
-    rows = []
-    if jobs == 1:
-        for item in task_args:
-            rows.extend(collect_rows_from_bam(*item))
-    else:
-        for result in run_process_jobs(collect_rows_from_bam, task_args, jobs,
-                                       verbose=args.verbose, label="build_read_polya_table"):
-            rows.extend(result)
+def _meta_frame(summary_tsv):
+    summ = robust_load_summary(summary_tsv) if summary_tsv else pd.DataFrame()
+    if summ.empty or "zt_label" not in summ.columns:
+        return None
+    keep = [c for c in ["zt_label", "gtf_gene_name", "gtf_gene_id", "gene_index",
+                        "transcript_index", "metagene_index", "classification"] if c in summ.columns]
+    return summ[keep].drop_duplicates("zt_label").rename(columns={
+        "zt_label": "ZT", "gtf_gene_name": "gene_name"})
 
-    df = pd.DataFrame(rows)
-    if df.empty:
-        df = pd.DataFrame(columns=["sample", "qname", "strand", "tail_len", "tail_estimated", "ZT", "ZG", "ZN", "ZM"])
 
+def _finish_frame(df: pd.DataFrame, meta, cast_float_cols):
     # Join gene_name / metagene_index / transcript_index / fragmentform classification from the summary.
-    summ = robust_load_summary(args.summary_tsv) if args.summary_tsv else pd.DataFrame()
-    if not summ.empty and "zt_label" in summ.columns:
-        keep = [c for c in ["zt_label", "gtf_gene_name", "gtf_gene_id", "gene_index",
-                            "transcript_index", "metagene_index", "classification"] if c in summ.columns]
-        meta = summ[keep].drop_duplicates("zt_label").rename(columns={
-            "zt_label": "ZT", "gtf_gene_name": "gene_name"})
+    if meta is not None:
         df = df.merge(meta, on="ZT", how="left")
+        # per-chrom assembly: keep the merged integer columns float64 across every block whenever any
+        # read in the whole table failed the merge (a whole-table merge would have made them float)
+        for c in cast_float_cols:
+            if c in df.columns:
+                df[c] = df[c].astype("float64")
     # Back-fill from the read's OWN ZT/ZM tags for any row the summary did not cover (a ZT present in
     # the BAM but absent from classification_summary merges to NaN). Without this, those reads carry a
     # NaN metagene_index and are silently dropped from the between-fragmentform tail test, since its
@@ -162,17 +168,69 @@ def main():
         if c not in df.columns:
             df[c] = pd.NA
     df = df[OUT_COLS]
-
     if not df.empty:
-        df = df.sort_values([c for c in ["sample", "qname"] if c in df.columns]).reset_index(drop=True)
+        df = df.sort_values(["chrom", "sample", "qname"]).reset_index(drop=True)
+    return df
 
+
+def main():
+    args = parse_args()
     out_dir = os.path.dirname(args.out_tsv) or "."
     os.makedirs(out_dir, exist_ok=True)
-    _tmp = args.out_tsv + ".tmp"
-    df.to_csv(_tmp, sep="\t", index=False)
-    os.replace(_tmp, args.out_tsv)
-    if args.verbose:
-        print(f"[info] wrote {len(df)} assigned-read tail rows -> {args.out_tsv}", file=sys.stderr, flush=True)
+    shard_dir = tempfile.mkdtemp(prefix=".polya_shards.", dir=out_dir)
+    try:
+        task_args = []
+        for bam in args.bams:
+            chroms = bam_chroms_with_reads(bam)
+            if chroms:
+                task_args.extend((bam, args.primary_only, args.verbose, c, shard_dir) for c in chroms)
+            else:
+                task_args.append((bam, args.primary_only, args.verbose, None, shard_dir))
+        jobs = max(1, min(int(args.jobs), len(task_args)))
+        if jobs == 1:
+            results = [collect_rows_from_bam(*item) for item in task_args]
+        else:
+            results = run_process_jobs(collect_rows_from_bam, task_args, jobs,
+                                       verbose=args.verbose, label="build_read_polya_table")
+
+        by_chrom = {}
+        all_zts = set()
+        for chrom, path, n, zts in results:
+            all_zts |= zts
+            if path is not None:
+                by_chrom.setdefault(chrom, []).append(path)
+
+        meta = _meta_frame(args.summary_tsv)
+        cast_float_cols = []
+        if meta is not None and (all_zts - set(meta["ZT"].astype(str))):
+            cast_float_cols = [c for c in meta.columns if c != "ZT" and pd.api.types.is_integer_dtype(meta[c])]
+
+        _tmp = args.out_tsv + ".tmp"
+        blocks = []
+        n_total = 0
+        with open(_tmp, "w") as out:
+            wrote_header = False
+            if not by_chrom:
+                df = _finish_frame(pd.DataFrame(columns=["sample", "qname", "strand", "tail_len", "tail_estimated",
+                                                         "ZT", "ZG", "ZN", "ZM", "chrom"]), meta, cast_float_cols)
+                df.to_csv(out, sep="\t", index=False)
+                wrote_header = True
+            for chrom in sorted(by_chrom):
+                df = pd.concat([pd.read_pickle(p) for p in by_chrom[chrom]], ignore_index=True)
+                df = _finish_frame(df, meta, cast_float_cols)
+                off = out.tell()
+                df.to_csv(out, sep="\t", index=False, header=not wrote_header)
+                wrote_header = True
+                out.flush()
+                blocks.append((chrom, off, out.tell() - off))
+                n_total += len(df)
+                del df
+        os.replace(_tmp, args.out_tsv)
+        write_chrom_index(args.out_tsv, blocks)
+        if args.verbose:
+            print(f"[info] wrote {n_total} assigned-read tail rows -> {args.out_tsv}", file=sys.stderr, flush=True)
+    finally:
+        shutil.rmtree(shard_dir, ignore_errors=True)
 
 
 if __name__ == "__main__":

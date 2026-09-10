@@ -84,7 +84,14 @@ def main():
         pd.DataFrame(columns=OUT_COLS).to_csv(args.out_tsv, sep="\t", index=False)
         return
     feat_col = "ZT" if args.level == "fragmentform" else "gene_name"
-    df = df[df[feat_col].astype(str).ne("")]
+    if "gene_name" in df.columns and "ZT" in df.columns:
+        # A read whose gene_name is missing (NaN) must not vanish at --level gene while its
+        # fragmentform is tested: back-fill from the ZT label ({gene}.{gene_id}.G<n>.T<n>).
+        _blank = df["gene_name"].isna() | df["gene_name"].astype(str).str.strip().isin(("", "nan"))
+        if _blank.any():
+            df.loc[_blank, "gene_name"] = df.loc[_blank, "ZT"].astype(str).str.replace(
+                r"\.G\d+\.T\d+$", "", regex=True)
+    df = df[df[feat_col].notna() & df[feat_col].astype(str).ne("")]
 
     # One summary per (feature, replicate); the replicate is the unit of analysis.
     gene_untestable = []       # gene level: genes dropped by the common-fragmentform restriction

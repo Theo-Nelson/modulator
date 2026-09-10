@@ -250,6 +250,7 @@ genotype:
     pad: 0        # bases to widen each candidate site before merging (0 is lossless; reads need only overlap)
     max_reads_per_fragmentform: 0   # 0 = off (full depth). N>0 caps each ZT fragmentform (isoform) to N reads by a SEEDED subsample after region-subsetting, so deep highly-expressed loci can't saturate modkit memory in build_molecule_mod_table. Every isoform keeps up to N reads. Changes results (subsampled) but deterministic for a fixed seed. ~400 is ample for the per-isoform mod/stoichiometry + association tests.
     subsample_seed: 12345
+  assoc_jobs: 4                      # chromosomes processed in parallel by the snp x mod / haplotype / mod x mod association tests; each worker holds one chromosome of the per-read tables (~12 GiB on a deep human chr1), so size to memory. Output is identical for any value.
   mod_jobs: 16                       # max concurrent modkit `extract calls` in build_molecule_mod_table (decoupled from genotype.jobs; capped at `threads`). The substep now streams shards to disk so the parent RSS is bounded and this can run wide.
   mod_scan_window_bp: 1000000        # split each chrom's candidate mod sites into windows of this span so heavy chromosomes shard into many balanced modkit extracts instead of one monolith.
   mod_interval_size: 20000           # modkit extract --interval-size: bounds each modkit process's own peak RSS (independent of the parent). Raise for fewer/larger chunks (faster, more modkit RAM).

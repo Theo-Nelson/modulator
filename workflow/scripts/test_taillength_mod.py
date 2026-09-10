@@ -73,7 +73,7 @@ def weighted_within_stratum_median_diff(strata):
         den += w
     return num / den if den > 0 else 0.0
 
-from genotype_utils import benjamini_hochberg, shard_tsv_by_chrom, tsv_header
+from genotype_utils import benjamini_hochberg, open_chrom_table, shard_tsv_by_chrom, tsv_header
 from plot_utils import save_figure
 
 _MOD_WANT = ["sample", "qname", "mod_site_id", "chrom", "target_mod_code", "target_modified",
@@ -171,10 +171,16 @@ def _plot_site(mod_t, unmod_t, meta, path, per_ff=None):
     return True
 
 
+_TAIL_COLS = ["sample", "qname", "tail_len", "tail_estimated"]
+
+
 def _load_tail_map(path, min_tail):
     """(sample,qname) -> tail_len for reads with an ESTIMATED tail (pt:i:0 = no estimate, excluded)."""
-    cols = ["sample", "qname", "tail_len", "tail_estimated"]
-    df = pd.read_csv(path, sep="\t", low_memory=False, usecols=lambda c: c in cols)
+    df = pd.read_csv(path, sep="\t", low_memory=False, usecols=lambda c: c in _TAIL_COLS)
+    return _tail_map_from_frame(df, min_tail)
+
+
+def _tail_map_from_frame(df, min_tail):
     if df.empty:
         return {}
     # pt:i:0 is dorado's "no estimate" sentinel, not a 0-nt tail: require an actual estimate.
@@ -188,9 +194,8 @@ def _load_tail_map(path, min_tail):
     return dict(zip(key, df["tail_len"].astype(float)))
 
 
-def _site_rows_for_chrom(mod_path, tail_map, args):
-    hdr = tsv_header(mod_path)
-    mod = pd.read_csv(mod_path, sep="\t", low_memory=False, usecols=[c for c in _MOD_WANT if c in hdr])
+def _site_rows_for_chrom(mod, tail_map, args):
+    """`mod` = one chromosome of the per-read mod table (DataFrame)."""
     if mod.empty:
         return [], []
     if "usable" in mod.columns:
@@ -321,27 +326,49 @@ def main():
             and os.path.exists(args.tail_tsv) and os.path.getsize(args.tail_tsv)):
         pd.DataFrame(columns=OUT_COLS).to_csv(args.out_tsv, sep="\t", index=False)
         return
-    tail_map = _load_tail_map(args.tail_tsv, args.min_tail)
-    if args.verbose:
-        print(f"[taillength_mod] {len(tail_map)} reads with a tail estimate", flush=True)
-    if not tail_map:
-        pd.DataFrame(columns=OUT_COLS).to_csv(args.out_tsv, sep="\t", index=False)
-        return
+    # The tail table now carries a `chrom` column (build_read_polya_table writes it chrom-sorted with a
+    # byte-range sidecar), so the (sample,qname)->tail map is built ONE CHROMOSOME at a time instead of
+    # one dict of every read in the cohort; the mod table is read per chromosome through the same range
+    # reader (no temp copy of the tens-of-GB table). A legacy tail table without `chrom` falls back to
+    # the global map.
+    tail_tab = open_chrom_table(args.tail_tsv) if "chrom" in tsv_header(args.tail_tsv) else None
+    global_tail_map = None
+    if tail_tab is None:
+        global_tail_map = _load_tail_map(args.tail_tsv, args.min_tail)
+        if args.verbose:
+            print(f"[taillength_mod] {len(global_tail_map)} reads with a tail estimate", flush=True)
+        if not global_tail_map:
+            pd.DataFrame(columns=OUT_COLS).to_csv(args.out_tsv, sep="\t", index=False)
+            return
 
     keep = max(1, 4 * int(args.top_k))  # bound the figure-candidate stash to ~4*top_k sites' raw arrays
-    tmp = tempfile.mkdtemp(prefix=".tailmod_", dir=os.path.dirname(args.out_tsv) or ".")
     rows, fig_cands = [], []
+    mod_tab = open_chrom_table(args.mod_tsv)
+    n_tail_reads = 0
     try:
-        shards = shard_tsv_by_chrom(args.mod_tsv, os.path.join(tmp, "mod"))
-        for chrom in sorted(shards):
-            r, c = _site_rows_for_chrom(shards[chrom], tail_map, args)
+        for chrom in mod_tab.chroms:
+            if tail_tab is not None:
+                tail_map = _tail_map_from_frame(tail_tab.read(chrom, usecols=_TAIL_COLS), args.min_tail)
+                n_tail_reads += len(tail_map)
+                if not tail_map:
+                    continue
+            else:
+                tail_map = global_tail_map
+            mod = mod_tab.read(chrom, usecols=_MOD_WANT)
+            r, c = _site_rows_for_chrom(mod, tail_map, args)
+            del mod
             rows.extend(r)
             if c:
                 fig_cands.extend(c)
                 fig_cands.sort(key=lambda x: x[0])   # smallest p first (== smallest p_adj; BH is monotonic)
                 del fig_cands[keep:]
     finally:
-        shutil.rmtree(tmp, ignore_errors=True)
+        if hasattr(mod_tab, "close"):
+            mod_tab.close()
+        if tail_tab is not None and hasattr(tail_tab, "close"):
+            tail_tab.close()
+    if args.verbose and tail_tab is not None:
+        print(f"[taillength_mod] {n_tail_reads} reads with a tail estimate (over the mod table's chromosomes)", flush=True)
 
     out = pd.DataFrame(rows)
     if not out.empty:

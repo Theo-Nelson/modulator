@@ -14,7 +14,18 @@ import numpy as np
 import pandas as pd
 import pysam
 
-from genotype_utils import load_read_assignments, normalize_string_series, run_process_jobs, sample_name_from_bam, safe_float, safe_int
+from genotype_utils import (load_read_assignments, normalize_string_series, robust_load_summary,
+                            run_process_jobs, sample_name_from_bam, safe_float, safe_int, write_chrom_index)
+
+# Column order of the populated table (== what the read_assignments join used to produce).
+FINAL_COLUMNS = [
+    "sample", "qname", "mod_site_id", "chrom", "start0", "end0", "strand",
+    "target_mod_code", "call_code", "state_detail", "target_modified",
+    "call_prob", "canonical_base", "modified_primary_base", "fail",
+    "within_alignment", "gene_id", "gene_name", "metagene_index",
+    "ZT", "ZG", "ZN", "ZM", "assigned", "assignment_gene_id", "assignment_gene_name",
+    "gene_index", "transcript_index", "assignment_metagene_index", "classification", "usable",
+]
 
 
 OUTPUT_COLUMNS = [
@@ -105,6 +116,10 @@ def parse_args():
     ap.add_argument("--candidate-sites-tsv", required=True, help="Candidate mod site TSV")
     ap.add_argument("--candidate-bed", required=True, help="Candidate mod BED for modkit include-bed")
     ap.add_argument("--read-assignments", required=True, help="Read assignment TSV")
+    ap.add_argument("--summary-tsv", default="",
+                    help="Classification summary TSV (zt_label -> gene/metagene/classification). With the "
+                         "pysam backend the per-read ZT/ZG/ZN/ZM tags are read from the BAM and joined to "
+                         "this small table instead of loading the whole read-assignment table.")
     ap.add_argument("--reference-fa", required=True, help="Reference FASTA")
     ap.add_argument("--out-tsv", required=True, help="Output TSV")
     ap.add_argument("--modkit-bin", default="modkit", help="modkit executable")
@@ -400,40 +415,88 @@ def parse_extracted_calls(sample, calls_tsv, lookup, shard_dir, chunk_rows, verb
     return [(ch, d["parts"], d["n"]) for ch, d in by_chrom.items()]
 
 
-def extract_rows_pysam(bam, chrom_lookup, chrom, shard_path, chunk_rows, verbose=False):
+def _aligned_qr(read):
+    """Query and reference positions of the aligned (M/=/X) bases as sorted int64 arrays -- the same
+    (query index -> reference position) map as get_reference_positions(full_length=True) restricted to
+    aligned bases, built per CIGAR op instead of per base."""
+    q = 0
+    r = read.reference_start
+    qs = []
+    rs = []
+    for op, ln in (read.cigartuples or ()):
+        if op == 0 or op == 7 or op == 8:
+            qs.append(np.arange(q, q + ln)); rs.append(np.arange(r, r + ln)); q += ln; r += ln
+        elif op == 1 or op == 4:      # I, S consume the query only
+            q += ln
+        elif op == 2 or op == 3:      # D, N consume the reference only
+            r += ln
+    if not qs:
+        return None, None
+    return np.concatenate(qs), np.concatenate(rs)
+
+
+def _read_tags(read):
+    def _g(tag, default=""):
+        try:
+            return read.get_tag(tag)
+        except Exception:
+            return default
+    return (str(_g("ZT", "")), safe_int(_g("ZG", "")), safe_int(_g("ZN", "")), safe_int(_g("ZM", "")))
+
+
+def extract_rows_pysam(bam, chrom_lookup, chrom, shard_path, chunk_rows, verbose=False, window_bp=1_000_000):
     """Stream one chromosome of a modBAM with pysam and emit the same per-(read, candidate site) rows
     the modkit path produces -- one read at a time, so peak RSS is ~100MB regardless of BAM/chrom size
     (never OOMs). Reproduces modkit `extract calls --no-filtering --mapped-only` semantics -- INCLUDING
     implicit-canonical calls (unlisted canonical bases of an implicit MM group), which the previous
     version dropped, inflating every modified fraction on real ONT data (BLOCKER-4). Namely:
     call_prob=(ML+0.5)/256 (float32), canonical=1-sum(mod_probs), call_code=argmax, strand-aware.
-    Flushes to numbered pickle parts every chunk_rows. Returns (chrom, [parts], nrows)."""
+
+    Only the candidate sites inside each read's span are visited (searchsorted into the chromosome's
+    sorted candidate positions + a per-CIGAR-op query/reference map), instead of every base of every
+    read. The read's ZT/ZG/ZN/ZM tags are carried on each row so the read-assignment table is no
+    longer joined. Rows are flushed to pickle parts bucketed by `window_bp` of start0, so the parent
+    can sort one window (all samples) at a time. Returns (chrom, {window: [parts]}, nrows)."""
     sample = sample_name_from_bam(bam)
+    window_bp = max(1, int(window_bp))
     rows = []
-    parts = []
+    parts_by_win = defaultdict(list)
 
     def _flush():
         if not rows:
             return
-        p = f"{shard_path}.{len(parts)}.pkl"
-        pd.DataFrame(rows).to_pickle(p)
-        parts.append(p)
+        df = pd.DataFrame(rows)
+        wins = df["start0"].to_numpy() // window_bp
+        for w in np.unique(wins):
+            w = int(w)
+            p = f"{shard_path}.w{w}.{len(parts_by_win[w])}.pkl"
+            df[wins == w].to_pickle(p)
+            parts_by_win[w].append(p)
         rows.clear()
 
     f32 = np.float32
     total = 0
     n_mm_parse_fail = 0
+    cand_arr = np.array(sorted(p for (_c, p) in chrom_lookup.keys()), dtype=np.int64)
     bamf = pysam.AlignmentFile(bam, "rb")
     # A candidate site's contig may be absent from THIS sample's BAM header (multi-sample runs where a
     # contig -- e.g. a viral/alt chrom -- has reads in one sample but not another). fetch() on an
     # unknown contig raises ValueError and would abort the whole genotype stage; there is simply nothing
     # to extract for this (bam, chrom), so skip it.
-    if chrom not in bamf.references:
+    if chrom not in bamf.references or cand_arr.size == 0:
         bamf.close()
-        return chrom, [], 0
+        return chrom, {}, 0
+    call_prob1 = float(str(f32(1.0)))
     for read in bamf.fetch(chrom):
         if read.is_unmapped or read.is_secondary or read.is_supplementary:
             continue
+        r_end = read.reference_end
+        if r_end is None:
+            continue
+        lo = int(np.searchsorted(cand_arr, read.reference_start))
+        hi = int(np.searchsorted(cand_arr, r_end))
+        if lo == hi:
+            continue          # no candidate site inside this read's span -> nothing to emit
         # Parse MM FIRST (not read.modified_bases): a read that is entirely canonical for an implicit
         # group still has MM but an empty modified_bases, and its unmodified observations must be kept.
         mm_groups, mm_has_listed = parse_mm_groups(read)
@@ -452,166 +515,174 @@ def extract_rows_pysam(bam, chrom_lookup, chrom, shard_path, chunk_rows, verbose
         seq = read.query_sequence
         if seq is None:
             continue
+        qs, rsa = _aligned_qr(read)
+        if qs is None:
+            continue
+        cand = cand_arr[lo:hi]
+        pi = np.searchsorted(rsa, cand)
+        ok = pi < rsa.size
+        pi = pi[ok]; cand = cand[ok]
+        hit = rsa[pi] == cand
+        if not hit.any():
+            continue
+        cand_q = dict(zip(qs[pi[hit]].tolist(), cand[hit].tolist()))   # query pos -> ref pos (ascending)
         qname = read.query_name
         ref_strand = "-" if read.is_reverse else "+"
-        refpos = read.get_reference_positions(full_length=True)  # per query_sequence position -> ref pos
-        nrp = len(refpos)
+        zt, zg, zn, zm = _read_tags(read)
+        nseq = len(seq)
         pos_mods = {}
         pos_base = {}
         for (base, _mstrand, mod_code), calls in mb.items():
             code = str(mod_code)
             for read_pos, ml in calls:
-                d = pos_mods.get(read_pos)
-                if d is None:
-                    d = pos_mods[read_pos] = {}
-                d[code] = ml
-                pos_base[read_pos] = base
-        emitted = set()  # query positions handled as a LISTED call (so the implicit pass skips them)
-        for read_pos, mods in pos_mods.items():
-            if read_pos >= nrp:
-                continue
-            start0 = refpos[read_pos]
-            if start0 is None:
-                continue
+                if read_pos in cand_q:
+                    d = pos_mods.get(read_pos)
+                    if d is None:
+                        d = pos_mods[read_pos] = {}
+                    d[code] = ml
+                    pos_base[read_pos] = base
+        for read_pos, start0 in cand_q.items():
             sites = chrom_lookup.get((chrom, start0))
             if not sites:
                 continue
-            emitted.add(read_pos)
-            mod_sum = 0.0
-            best_code = None
-            best_prob = -1.0
-            for code, ml in mods.items():
-                p = (ml + 0.5) / 256.0
-                mod_sum += p
-                if p > best_prob:
-                    best_prob = p
-                    best_code = code
-            canon = 1.0 - mod_sum
-            # Round-trip through float32's short repr so the emitted double matches what the
-            # modkit path writes+parses (modkit prints float32; build parses it back to a double).
-            if canon >= best_prob:
-                call_code = "-"
-                call_prob = float(str(f32(canon)))
-            else:
-                call_code = best_code
-                call_prob = float(str(f32(best_prob)))
-            base = str(pos_base[read_pos])
-            for site in sites:
-                site_strand = str(site.get("strand", ""))
-                if site_strand and ref_strand and ref_strand not in {".", "?"} and site_strand != ref_strand:
-                    continue
-                target_mod = str(site["mod_code"])
-                # BLOCKER-5: emit a row for target_mod ONLY if the read actually ASSESSED target_mod at
-                # this position -- either it LISTED target_mod here (target_mod in mods), or it declared an
-                # IMPLICIT group for target_mod on this base (so an unlisted position is a real canonical
-                # observation, mm_groups[(base,target_mod)] is True). A read that declared only A+a. must
-                # NOT get a fabricated 17596 "canonical" row at an A it never assessed for inosine -- the
-                # implicit pass already rejects that per (base,code), and the listed pass was guarding only
-                # with the 11-entry _base_mismatch allowlist, fabricating unmodified observations for every
-                # sibling code that shares the base (a/17596/69426, m/19228, 17802/19227). This subsumes
-                # _base_mismatch (a declared group implies the base carries the mod); an explicit-but-
-                # unlisted or entirely-undeclared mod gets no call.
-                if target_mod not in mods and not mm_groups.get((base.upper(), target_mod), False):
-                    continue
-                if call_code == target_mod:
-                    state_detail = "modified"
-                    target_modified = 1
-                elif call_code == "-":
-                    state_detail = "canonical"
-                    target_modified = 0
+            mods = pos_mods.get(read_pos)
+            if mods is not None:
+                # ---- LISTED call at a candidate site ----
+                mod_sum = 0.0
+                best_code = None
+                best_prob = -1.0
+                for code, ml in mods.items():
+                    p = (ml + 0.5) / 256.0
+                    mod_sum += p
+                    if p > best_prob:
+                        best_prob = p
+                        best_code = code
+                canon = 1.0 - mod_sum
+                # Round-trip through float32's short repr so the emitted double matches what the
+                # modkit path writes+parses (modkit prints float32; build parses it back to a double).
+                if canon >= best_prob:
+                    call_code = "-"
+                    call_prob = float(str(f32(canon)))
                 else:
-                    state_detail = "other_mod"
-                    target_modified = 0
-                rows.append({
-                    "sample": sample,
-                    "qname": qname,
-                    "mod_site_id": site["mod_site_id"],
-                    "chrom": chrom,
-                    "start0": start0,
-                    "end0": safe_int(site.get("end0", start0 + 1), default=start0 + 1),
-                    "strand": site_strand or ref_strand,
-                    "target_mod_code": target_mod,
-                    "call_code": call_code,
-                    "state_detail": state_detail,
-                    "target_modified": target_modified,
-                    "call_prob": call_prob,
-                    "canonical_base": base,
-                    "modified_primary_base": base,
-                    "fail": False,
-                    "within_alignment": True,
-                    "gene_id": str(site.get("gene_id", "")),
-                    "gene_name": str(site.get("gene_name", "")),
-                    "metagene_index": str(site.get("metagene_index", "")),
-                })
-                total += 1
-                if len(rows) >= chunk_rows:
-                    _flush()
-
-        # ---- IMPLICIT-CANONICAL pass (BLOCKER-4) ----
-        # A candidate site the read covers at an UNLISTED position of an IMPLICIT MM group is a real
-        # unmodified observation that modkit emits and the old pysam backend dropped. Iterate the read's
-        # aligned positions; for each candidate site not already emitted as a listed call, if the read's
-        # transcript-oriented base is the mod's canonical base and that mod's MM group is implicit, emit a
-        # canonical row. read_pos indexes query_sequence and mb `base` is transcript-oriented, so for a
-        # reverse read the stored base is complemented to get the transcript base.
-        for q in range(nrp):
-            if q in emitted:
-                continue
-            start0 = refpos[q]
-            if start0 is None:
-                continue
-            sites = chrom_lookup.get((chrom, start0))
-            if not sites:
-                continue
-            qb = seq[q].upper() if q < len(seq) else ""
-            if not qb:
-                continue
-            tb = _COMP.get(qb, qb) if read.is_reverse else qb   # transcript-oriented read base
-            call_prob1 = float(str(f32(1.0)))
-            for site in sites:
-                site_strand = str(site.get("strand", ""))
-                if site_strand and ref_strand and ref_strand not in {".", "?"} and site_strand != ref_strand:
+                    call_code = best_code
+                    call_prob = float(str(f32(best_prob)))
+                base = str(pos_base[read_pos])
+                for site in sites:
+                    site_strand = str(site.get("strand", ""))
+                    if site_strand and ref_strand and ref_strand not in {".", "?"} and site_strand != ref_strand:
+                        continue
+                    target_mod = str(site["mod_code"])
+                    # BLOCKER-5: emit a row for target_mod ONLY if the read actually ASSESSED target_mod at
+                    # this position -- either it LISTED target_mod here (target_mod in mods), or it declared an
+                    # IMPLICIT group for target_mod on this base (so an unlisted position is a real canonical
+                    # observation, mm_groups[(base,target_mod)] is True). A read that declared only A+a. must
+                    # NOT get a fabricated 17596 "canonical" row at an A it never assessed for inosine.
+                    if target_mod not in mods and not mm_groups.get((base.upper(), target_mod), False):
+                        continue
+                    if call_code == target_mod:
+                        state_detail = "modified"
+                        target_modified = 1
+                    elif call_code == "-":
+                        state_detail = "canonical"
+                        target_modified = 0
+                    else:
+                        state_detail = "other_mod"
+                        target_modified = 0
+                    rows.append({
+                        "sample": sample,
+                        "qname": qname,
+                        "mod_site_id": site["mod_site_id"],
+                        "chrom": chrom,
+                        "start0": start0,
+                        "end0": safe_int(site.get("end0", start0 + 1), default=start0 + 1),
+                        "strand": site_strand or ref_strand,
+                        "target_mod_code": target_mod,
+                        "call_code": call_code,
+                        "state_detail": state_detail,
+                        "target_modified": target_modified,
+                        "call_prob": call_prob,
+                        "canonical_base": base,
+                        "modified_primary_base": base,
+                        "fail": False,
+                        "within_alignment": True,
+                        "gene_id": str(site.get("gene_id", "")),
+                        "gene_name": str(site.get("gene_name", "")),
+                        "metagene_index": str(site.get("metagene_index", "")),
+                        "ZT": zt, "ZG": zg, "ZN": zn, "ZM": zm,
+                    })
+                    total += 1
+                    if len(rows) >= chunk_rows:
+                        _flush()
+            else:
+                # ---- IMPLICIT-CANONICAL call (BLOCKER-4) ----
+                # A candidate site the read covers at an UNLISTED position of an IMPLICIT MM group is a real
+                # unmodified observation that modkit emits. read_pos indexes query_sequence and mb `base` is
+                # transcript-oriented, so for a reverse read the stored base is complemented.
+                qb = seq[read_pos].upper() if read_pos < nseq else ""
+                if not qb:
                     continue
-                target_mod = str(site["mod_code"])
-                # MAJOR-1: look the group up by (read-base, code). This IS the base check -- it fires for
-                # ANY code (the old _base_mismatch was gated on an 11-entry allowlist, so an out-of-list
-                # code emitted a canonical row at every base). Emit only if the read has an IMPLICIT group
-                # for this mod ON this read's actual base; a mismatched base / explicit group / unassessed
-                # mod all fall through with no call.
-                if not mm_groups.get((tb, target_mod), False):
-                    continue
-                rows.append({
-                    "sample": sample,
-                    "qname": qname,
-                    "mod_site_id": site["mod_site_id"],
-                    "chrom": chrom,
-                    "start0": start0,
-                    "end0": safe_int(site.get("end0", start0 + 1), default=start0 + 1),
-                    "strand": site_strand or ref_strand,
-                    "target_mod_code": target_mod,
-                    "call_code": "-",
-                    "state_detail": "canonical",
-                    "target_modified": 0,
-                    "call_prob": call_prob1,
-                    "canonical_base": tb,
-                    "modified_primary_base": tb,
-                    "fail": False,
-                    "within_alignment": True,
-                    "gene_id": str(site.get("gene_id", "")),
-                    "gene_name": str(site.get("gene_name", "")),
-                    "metagene_index": str(site.get("metagene_index", "")),
-                })
-                total += 1
-                if len(rows) >= chunk_rows:
-                    _flush()
+                tb = _COMP.get(qb, qb) if read.is_reverse else qb   # transcript-oriented read base
+                for site in sites:
+                    site_strand = str(site.get("strand", ""))
+                    if site_strand and ref_strand and ref_strand not in {".", "?"} and site_strand != ref_strand:
+                        continue
+                    target_mod = str(site["mod_code"])
+                    # MAJOR-1: look the group up by (read-base, code). Emit only if the read has an IMPLICIT
+                    # group for this mod ON this read's actual base; a mismatched base / explicit group /
+                    # unassessed mod all fall through with no call.
+                    if not mm_groups.get((tb, target_mod), False):
+                        continue
+                    rows.append({
+                        "sample": sample,
+                        "qname": qname,
+                        "mod_site_id": site["mod_site_id"],
+                        "chrom": chrom,
+                        "start0": start0,
+                        "end0": safe_int(site.get("end0", start0 + 1), default=start0 + 1),
+                        "strand": site_strand or ref_strand,
+                        "target_mod_code": target_mod,
+                        "call_code": "-",
+                        "state_detail": "canonical",
+                        "target_modified": 0,
+                        "call_prob": call_prob1,
+                        "canonical_base": tb,
+                        "modified_primary_base": tb,
+                        "fail": False,
+                        "within_alignment": True,
+                        "gene_id": str(site.get("gene_id", "")),
+                        "gene_name": str(site.get("gene_name", "")),
+                        "metagene_index": str(site.get("metagene_index", "")),
+                        "ZT": zt, "ZG": zg, "ZN": zn, "ZM": zm,
+                    })
+                    total += 1
+                    if len(rows) >= chunk_rows:
+                        _flush()
     _flush()
+    bamf.close()
     if verbose:
         print(f"[info] pysam extract done: {sample} {chrom} rows={total}", file=sys.stderr, flush=True)
     if n_mm_parse_fail:
         print(f"[warn] pysam extract: {sample} {chrom}: skipped {n_mm_parse_fail} read(s) whose MM tag "
               f"declared listed calls but htslib returned none (unparsable MM, e.g. low-complexity reads "
               f"missing a canonical base) -- NOT called canonical", file=sys.stderr, flush=True)
-    return chrom, parts, total
+    return chrom, dict(parts_by_win), total
+
+
+def _meta_by_zt(summary_tsv):
+    """zt_label -> the assignment columns the read-assignment join used to supply (same names, and the
+    integer columns as float64 so the CSV renders exactly as the old left-join did)."""
+    summ = robust_load_summary(summary_tsv) if summary_tsv else pd.DataFrame()
+    if summ.empty or "zt_label" not in summ.columns:
+        return None
+    keep = [c for c in ["zt_label", "gtf_gene_id", "gtf_gene_name", "gene_index", "transcript_index",
+                        "metagene_index", "classification"] if c in summ.columns]
+    meta = summ[keep].drop_duplicates("zt_label").rename(columns={
+        "zt_label": "ZT", "gtf_gene_id": "assignment_gene_id", "gtf_gene_name": "assignment_gene_name",
+        "metagene_index": "assignment_metagene_index"})
+    for c in ("gene_index", "transcript_index", "assignment_metagene_index"):
+        if c in meta.columns and pd.api.types.is_integer_dtype(meta[c]):
+            meta[c] = meta[c].astype("float64")
+    return meta.set_index("ZT")
 
 
 def _empty_output(out_tsv):
@@ -663,7 +734,7 @@ def main():
                 for chrom in chroms:
                     shard_path = os.path.join(shard_dir, f"{sample}.{chrom}.pkl")
                     task_args.append((bam, chrom_lookups[chrom], chrom, shard_path,
-                                      args.chunk_rows, args.verbose))
+                                      args.chunk_rows, args.verbose, args.window_bp))
             if jobs == 1:
                 results = [extract_rows_pysam(*item) for item in task_args]
             else:
@@ -698,59 +769,87 @@ def main():
                     verbose=args.verbose, label="build_molecule_mod_table",
                 )
 
-        # A: group shard files by chromosome. total_rows tells us whether anything survived.
-        shards_by_chrom = defaultdict(list)
+        # Group shard files by chromosome and window. total_rows tells us whether anything survived.
+        shards_by_chrom = defaultdict(lambda: defaultdict(list))   # chrom -> window -> [parts]
         total_rows = 0
         for chrom, parts, nrows in results:
             total_rows += int(nrows or 0)
-            for p in (parts or []):
-                shards_by_chrom[chrom].append(p)
+            if isinstance(parts, dict):
+                for w, pl in parts.items():
+                    shards_by_chrom[chrom][int(w)].extend(pl)
+            else:
+                shards_by_chrom[chrom][0].extend(parts or [])
 
         if total_rows == 0:
             _empty_output(args.out_tsv)
             return
 
-        # Load read assignments ONCE (kept out of the fork so the ~22GB/70GB-in-pandas table never
-        # gets COW-copied across the worker pool). Index by (sample, qname) so the per-chrom join is
-        # an index lookup, not a re-hash of the whole table each chromosome.
-        assignments = load_read_assignments(args.read_assignments)
-        keep_assign_cols = [c for c in [
-            "sample", "qname", "ZT", "ZG", "ZN", "ZM", "assigned", "gene_id", "gene_name",
-            "gene_index", "transcript_index", "metagene_index", "classification"
-        ] if c in assignments.columns]
-        assignments = assignments[keep_assign_cols].drop_duplicates(["sample", "qname"])
-        assignments = assignments.rename(columns={
-            col: f"assignment_{col}"
-            for col in ["gene_id", "gene_name", "metagene_index"]
-            if col in assignments.columns
-        })
-        assignments = assignments.set_index(["sample", "qname"])
+        # The pysam backend carries each read's ZT/ZG/ZN/ZM on the row, so the (genome-scale)
+        # read-assignment table is never loaded; the per-fragmentform metadata comes from the small
+        # classification summary instead. The modkit / pre-extracted paths keep the old join.
+        use_tags = bool(args.pysam) and not args.pre_extracted and bool(args.summary_tsv)
+        assignments = None
+        meta = None
+        if use_tags:
+            meta = _meta_by_zt(args.summary_tsv)
+        else:
+            # Load read assignments ONCE (kept out of the fork so the table never gets COW-copied across
+            # the worker pool). Index by (sample, qname) so the per-chrom join is an index lookup.
+            assignments = load_read_assignments(args.read_assignments)
+            keep_assign_cols = [c for c in [
+                "sample", "qname", "ZT", "ZG", "ZN", "ZM", "assigned", "gene_id", "gene_name",
+                "gene_index", "transcript_index", "metagene_index", "classification"
+            ] if c in assignments.columns]
+            assignments = assignments[keep_assign_cols].drop_duplicates(["sample", "qname"])
+            assignments = assignments.rename(columns={
+                col: f"assignment_{col}"
+                for col in ["gene_id", "gene_name", "metagene_index"]
+                if col in assignments.columns
+            })
+            assignments = assignments.set_index(["sample", "qname"])
 
         os.makedirs(os.path.dirname(args.out_tsv) or ".", exist_ok=True)
         tmp_out = args.out_tsv + ".tmp"
         wrote_header = False
+        blocks = []
         with open(tmp_out, "w") as out_fh:
-            # A: stream chromosome-by-chromosome in sorted order. Each chrom's rows are joined + sorted
-            # in isolation and appended; because `chrom` is the primary sort key and the full sort key
-            # (chrom,start0,mod_site_id,sample,qname) is unique per (site,read,sample), appending
-            # per-chrom-sorted blocks reproduces the global sort byte-for-byte -- without ever holding
-            # every chromosome's rows (or a whole-table sort) in memory at once.
+            # Stream chromosome-by-chromosome, window-by-window, in sorted order. Each (chrom, window)
+            # block's rows are joined + sorted in isolation and appended; because (chrom, start0) lead the
+            # sort key and windows partition start0, appending per-window-sorted blocks reproduces the
+            # global sort byte-for-byte -- while holding one window of all samples in memory, never a
+            # whole chromosome (chr1 of a 31-sample cohort is tens of GB of rows).
             for chrom in sorted(shards_by_chrom):
-                parts = [pd.read_pickle(p) for p in shards_by_chrom[chrom]]
-                df = pd.concat(parts, ignore_index=True)
-                df = df.join(assignments, on=["sample", "qname"], how="left")
-                for col in ["gene_id", "gene_name", "metagene_index"]:
-                    assign_col = f"assignment_{col}"
-                    if col in df.columns and assign_col in df.columns:
-                        primary = normalize_string_series(df[col])
-                        fallback = normalize_string_series(df[assign_col])
-                        df[col] = primary.where(primary.ne(""), fallback)
-                df["usable"] = (~df["fail"].fillna(True)) & df["within_alignment"].fillna(False)
-                df = df.sort_values(["chrom", "start0", "mod_site_id", "sample", "qname"]).reset_index(drop=True)
-                df.to_csv(out_fh, sep="\t", index=False, header=not wrote_header)
-                wrote_header = True
-                del df, parts
+                off_chrom = out_fh.tell()
+                for w in sorted(shards_by_chrom[chrom]):
+                    parts = [pd.read_pickle(p) for p in shards_by_chrom[chrom][w]]
+                    df = pd.concat(parts, ignore_index=True)
+                    if use_tags:
+                        df["assigned"] = normalize_string_series(df["ZT"]).ne("")
+                        if meta is not None:
+                            df = df.join(meta, on="ZT")
+                        for c in ("assignment_gene_id", "assignment_gene_name", "gene_index",
+                                  "transcript_index", "assignment_metagene_index", "classification"):
+                            if c not in df.columns:
+                                df[c] = np.nan
+                    else:
+                        df = df.join(assignments, on=["sample", "qname"], how="left")
+                    for col in ["gene_id", "gene_name", "metagene_index"]:
+                        assign_col = f"assignment_{col}"
+                        if col in df.columns and assign_col in df.columns:
+                            primary = normalize_string_series(df[col])
+                            fallback = normalize_string_series(df[assign_col])
+                            df[col] = primary.where(primary.ne(""), fallback)
+                    df["usable"] = (~df["fail"].fillna(True)) & df["within_alignment"].fillna(False)
+                    df = df.sort_values(["chrom", "start0", "mod_site_id", "sample", "qname"]).reset_index(drop=True)
+                    if use_tags:
+                        df = df[[c for c in FINAL_COLUMNS if c in df.columns]]
+                    df.to_csv(out_fh, sep="\t", index=False, header=not wrote_header)
+                    wrote_header = True
+                    del df, parts
+                out_fh.flush()
+                blocks.append((chrom, off_chrom, out_fh.tell() - off_chrom))
         os.replace(tmp_out, args.out_tsv)
+        write_chrom_index(args.out_tsv, blocks)
     finally:
         shutil.rmtree(shard_dir, ignore_errors=True)
 

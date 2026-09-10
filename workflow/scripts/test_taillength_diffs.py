@@ -144,6 +144,10 @@ def main():
         df = df[df["ZT"].astype(str).ne("")]
         if args.gene_filter:
             df = df[df["gene_name"].isin(set(args.gene_filter))]
+        # Make the result independent of the tail table's row order: the per-fragmentform arrays feed
+        # floating-point sums (means, rank statistics, the heterogeneity Q), whose last bits depend on
+        # summation order. Fix the order to (sample, qname) -- the order the table used to be written in.
+        df = df.sort_values(["sample", "qname"], kind="stable").reset_index(drop=True)
 
     if df.empty:
         pd.DataFrame(columns=FRAG_COLS).to_csv(frag_out, sep="\t", index=False)

@@ -30,6 +30,8 @@ import os
 import sys
 import json
 import argparse
+import multiprocessing
+from concurrent.futures import ProcessPoolExecutor
 from itertools import combinations
 
 import numpy as np
@@ -97,6 +99,11 @@ def parse_args():
     ap.add_argument(
         "--verbose", action="store_true",
         help="Verbose logging to stderr."
+    )
+    ap.add_argument(
+        "--jobs", type=int, default=1,
+        help="Worker processes for the per-site tests (sites are independent; output is identical "
+             "for any value). Default 1 = serial."
     )
     return ap.parse_args()
 
@@ -367,6 +374,158 @@ def summarize_site(df_site, min_cov, which_test, pseudocount, alternative):
     }
 
 
+def _fisher_2x2(tab, alternative):
+    odds, p = fisher_exact(tab.astype(int), alternative=alternative)
+    odds = float(odds) if np.isfinite(odds) else float("inf")
+    return "fisher_exact_2x2", "fisher_odds", odds, float(p)
+
+
+def _chi2_rx2(tab, pc):
+    tab_pc = tab + pc
+    chi2, p, dof, _ = chi2_contingency(tab_pc, correction=False)
+    return f"chi2_{tab.shape[0]}x{tab.shape[1]}_pc{pc:g}", "chi2", float(chi2), float(p)
+
+
+def summarize_site_arrays(zn, samp, cov, nmod, sample_names, min_cov, which_test, pseudocount, alternative):
+    """summarize_site() on plain arrays for ONE site: `zn` (int), `samp` (int codes into
+    `sample_names`, which is lexicographically sorted), `cov`/`nmod` (int). Reproduces the DataFrame
+    version's numbers exactly -- per-ZN sums, the coverage filter, the pooled test, the per-sample
+    strata (in sorted sample order, one stratum per sample present at the site), the stratified
+    primary/heterogeneity and the per-transcript block -- without a pandas groupby per site (36 ms/site
+    at 31 samples; this is ~1 ms)."""
+    # per-transcript totals (sorted by ZN), Nmod clipped to coverage
+    zn_u, inv = np.unique(zn, return_inverse=True)
+    cov_t = np.bincount(inv, weights=cov, minlength=zn_u.size).astype(np.int64)
+    nmod_t = np.bincount(inv, weights=nmod, minlength=zn_u.size).astype(np.int64)
+    nmod_t = np.minimum(nmod_t, cov_t)
+    keep = cov_t >= min_cov
+    if int(keep.sum()) < 2:
+        return None
+    tz = zn_u[keep]; tc = cov_t[keep]; tm = nmod_t[keep]
+    table = np.stack([tm, tc - tm], axis=1).astype(float)
+
+    nrows = table.shape[0]
+    if not ((table.sum(axis=0) > 0).all() and (table.sum(axis=1) > 0).all()):
+        used_test, stat_name, stat_value, pval = "untestable", "none", float("nan"), float("nan")
+    elif which_test == "auto":
+        if nrows == 2:
+            used_test, stat_name, stat_value, pval = _fisher_2x2(table, alternative)
+        else:
+            used_test, stat_name, stat_value, pval = _chi2_rx2(table, pseudocount)
+    elif which_test == "fisher":
+        if nrows == 2:
+            used_test, stat_name, stat_value, pval = _fisher_2x2(table, alternative)
+        else:
+            used_test, stat_name, stat_value, pval = _chi2_rx2(table, pseudocount)
+    else:
+        used_test, stat_name, stat_value, pval = _chi2_rx2(table, pseudocount)
+
+    # pooled effect (same as frac = Nmod / Nvalid_cov.replace(0, nan) -> fillna(0))
+    frac = np.where(tc > 0, tm / np.where(tc > 0, tc, 1), 0.0).astype(float)
+    max_diff_pooled = 0.0
+    for i in range(len(frac)):
+        for j in range(i + 1, len(frac)):
+            max_diff_pooled = max(max_diff_pooled, float(abs(frac[i] - frac[j])))
+
+    # per-sample strata over the tested transcripts, in sorted sample order (== groupby("sample"))
+    tested_zn = [int(z) for z in tz.tolist()]
+    zn_pos = {z: i for i, z in enumerate(tested_zn)}
+    strata = []
+    samp_u = np.unique(samp)
+    for sc in samp_u:
+        m = samp == sc
+        z_s = zn[m]; c_s = cov[m]; n_s = nmod[m]
+        zs_u, inv_s = np.unique(z_s, return_inverse=True)
+        c_sum = np.bincount(inv_s, weights=c_s, minlength=zs_u.size)
+        n_sum = np.bincount(inv_s, weights=n_s, minlength=zs_u.size)
+        T = np.zeros((len(tested_zn), 2))
+        for k, z in enumerate(zs_u.tolist()):
+            z = int(z)
+            if z in zn_pos:
+                cv = float(c_sum[k]); md = min(float(n_sum[k]), cv)
+                T[zn_pos[z]] = (md, cv - md)
+        strata.append(T)
+    inf = informative_strata(strata)
+    n_strata = len(inf)
+    if n_strata >= 2:
+        cmh_stat, cmh_p, _cmh_df, _ = cmh_general_association(inf)
+        primary_test = "cmh_2x2" if len(tested_zn) == 2 else f"cmh_general_{len(tested_zn)}x2"
+        primary_stat_name, primary_stat, primary_p = "cmh_chi2", cmh_stat, cmh_p
+        primary_eff = mh_max_abs_rate_diff(inf)
+    elif n_strata == 1:
+        T1 = inf[0]
+        primary_test, primary_stat_name, primary_stat, primary_p = (
+            _fisher_2x2(T1, alternative) if T1.shape[0] == 2 else montecarlo_exact_test(T1))
+        primary_eff = mh_max_abs_rate_diff(inf)
+    else:
+        primary_test, primary_stat_name = "untestable", "none"
+        primary_stat, primary_p, primary_eff = float("nan"), float("nan"), float("nan")
+    _hstat, het_p, _hdf, _ = stratum_heterogeneity(inf)
+    strata_heterogeneous = bool(np.isfinite(het_p) and het_p < 0.05)
+
+    per_tx = []
+    for z, ncv, nmd in zip(tested_zn, tc.tolist(), tm.tolist()):
+        ncv = int(ncv); nmd = int(nmd)
+        per_tx.append({"ZN": int(z), "Ncov": ncv, "Nmod": nmd,
+                       "frac": 0.0 if ncv == 0 else float(nmd / ncv)})
+
+    return {
+        "n_tx_tested": int(len(tested_zn)),
+        "test_name": primary_test,
+        "stat_name": primary_stat_name,
+        "stat_value": primary_stat,
+        "p_value": primary_p,
+        "n_strata_informative": int(n_strata),
+        "strata_heterogeneous": bool(strata_heterogeneous),
+        "strata_heterogeneity_p": round(het_p, 6) if np.isfinite(het_p) else float("nan"),
+        "effect_max_abs_frac_diff": round(primary_eff, 6),
+        "test_name_pooled": used_test,
+        "stat_value_pooled": stat_value,
+        "p_value_pooled": pval,
+        "effect_max_abs_frac_diff_pooled": round(max_diff_pooled, 6),
+        "per_transcript": per_tx,
+    }
+
+
+# ---- worker state for the parallel site loop (set once before forking; nothing large is pickled) ----
+_W = {}
+
+
+def _init_worker_arrays(arrays):
+    _W.update(arrays)
+
+
+def _run_site_range(task):
+    """Test the sites [lo, hi) (site ids are contiguous in the sorted arrays). Returns the result
+    dicts in site order, so concatenating chunk results reproduces the serial order exactly."""
+    lo, hi = task
+    zn = _W["zn"]; samp = _W["samp"]; cov = _W["cov"]; nmod = _W["nmod"]
+    offs = _W["offsets"]; names = _W["sample_names"]; keys = _W["keys"]
+    p = _W["params"]
+    out = []
+    for sid in range(lo, hi):
+        a, b = offs[sid], offs[sid + 1]
+        res = summarize_site_arrays(zn[a:b], samp[a:b], cov[a:b], nmod[a:b], names,
+                                    p["min_cov"], p["test"], p["pseudocount"], p["alternative"])
+        if res is None:
+            continue
+        g, m, chrom, s0, e0, st = keys[sid]
+        out.append({
+            "gene_name": g, "mod_code": m, "chrom": chrom, "start0": int(s0), "end0": int(e0), "strand": st,
+            "n_tx_tested": res["n_tx_tested"],
+            "test_name": res["test_name"], "stat_name": res["stat_name"], "stat_value": res["stat_value"],
+            "p_value": res["p_value"], "n_strata_informative": res["n_strata_informative"],
+            "strata_heterogeneous": res["strata_heterogeneous"],
+            "strata_heterogeneity_p": res["strata_heterogeneity_p"],
+            "effect_max_abs_frac_diff": res["effect_max_abs_frac_diff"],
+            "test_name_pooled": res["test_name_pooled"], "stat_value_pooled": res["stat_value_pooled"],
+            "p_value_pooled": res["p_value_pooled"],
+            "effect_max_abs_frac_diff_pooled": res["effect_max_abs_frac_diff_pooled"],
+            "per_transcript_json": json.dumps(res["per_transcript"], separators=(",", ":")),
+        })
+    return out
+
+
 def make_plot(df_site, per_tx, title, out_png):
     """
     Two-panel figure:
@@ -503,16 +662,18 @@ def main():
               f"BH family mixes sidedness. Use --alternative two-sided for a homogeneous family.",
               file=sys.stderr, flush=True)
 
-    # Load
-    df = pd.read_csv(args.in_tsv, sep="\t", low_memory=False)
-
+    # Load only the columns used, with the repeated string columns as categoricals (a 31-sample long
+    # table is ~25M rows; object dtypes cost ~10 GB where categoricals cost <1 GB).
     required = {
         "gene_name", "mod_code", "chrom", "start0", "end0", "strand",
         "ZN_transcript_index", "sample", "Nvalid_cov", "Nmod",
     }
-    missing = required - set(df.columns)
+    hdr = pd.read_csv(args.in_tsv, sep="\t", nrows=0).columns
+    missing = required - set(hdr)
     if missing:
         sys.exit(f"Missing columns in --in-tsv: {sorted(missing)}")
+    _cat = {c: "category" for c in ("gene_name", "mod_code", "chrom", "strand", "sample")}
+    df = pd.read_csv(args.in_tsv, sep="\t", low_memory=False, usecols=sorted(required), dtype=_cat)
 
     # Optional filters (tolerate nullish strings)
     if args.gene_filter and not (len(args.gene_filter) == 1 and is_nullish(args.gene_filter[0])):
@@ -541,50 +702,51 @@ def main():
         print(f"[info] --in-tsv has no usable data rows; wrote empty {out_tsv} and continuing.")
         return
 
-    # Build keys (fix for "Cannot set a DataFrame with multiple columns...")
-    df["site_key"] = df.apply(site_key_tuple, axis=1)
-    df["site_key_str"] = df["site_key"].map(site_key_str_from_tuple)
-
-    # Group by site
-    site_groups = df.groupby("site_key", sort=False)
+    # Site ids in FIRST-APPEARANCE order (== the old groupby(site_key, sort=False) iteration order),
+    # computed vectorised instead of a row-wise apply building a tuple per row.
+    key_cols = ["gene_name", "mod_code", "chrom", "start0", "end0", "strand"]
+    for c in ("gene_name", "mod_code", "chrom", "strand"):
+        df[c] = df[c].astype(str)
+    site_id = df.groupby(key_cols, sort=False, observed=True).ngroup().to_numpy()
+    n_sites = int(site_id.max()) + 1 if site_id.size else 0
+    order = np.argsort(site_id, kind="stable")
+    df = df.iloc[order].reset_index(drop=True)
+    site_id = site_id[order]
+    offsets = np.flatnonzero(np.r_[True, site_id[1:] != site_id[:-1], True])
+    first = offsets[:-1]
+    keys = list(zip(df["gene_name"].to_numpy()[first], df["mod_code"].to_numpy()[first],
+                    df["chrom"].to_numpy()[first], df["start0"].to_numpy()[first],
+                    df["end0"].to_numpy()[first], df["strand"].to_numpy()[first]))
+    sample_names = sorted(df["sample"].astype(str).unique().tolist())
+    samp_codes = pd.Categorical(df["sample"].astype(str), categories=sample_names).codes.astype(np.int32)
+    arrays = dict(
+        zn=df["ZN_transcript_index"].to_numpy(dtype=np.int64),
+        samp=samp_codes,
+        cov=df["Nvalid_cov"].to_numpy(dtype=np.int64),
+        nmod=df["Nmod"].to_numpy(dtype=np.int64),
+        offsets=offsets, sample_names=sample_names, keys=keys,
+        params=dict(min_cov=args.min_cov, test=args.test, pseudocount=args.pseudocount,
+                    alternative=args.alternative),
+    )
     if args.verbose:
-        print(f"[info] evaluating {len(site_groups)} sites with min_cov={args.min_cov}, test={args.test}", file=sys.stderr)
+        print(f"[info] evaluating {n_sites} sites with min_cov={args.min_cov}, test={args.test}, jobs={args.jobs}",
+              file=sys.stderr)
 
+    jobs = max(1, int(args.jobs))
+    chunk = max(500, min(20000, n_sites // (jobs * 4) + 1))
+    tasks = [(lo, min(lo + chunk, n_sites)) for lo in range(0, n_sites, chunk)]
     results = []
-    for sk, df_site in site_groups:
-        res = summarize_site(
-            df_site,
-            min_cov=args.min_cov,
-            which_test=args.test,
-            pseudocount=args.pseudocount,
-            alternative=args.alternative,
-        )
-        if res is None:
-            continue
-
-        g, m, chrom, s0, e0, st = sk
-        results.append({
-            "gene_name": g,
-            "mod_code": m,
-            "chrom": chrom,
-            "start0": int(s0),
-            "end0": int(e0),
-            "strand": st,
-            "n_tx_tested": res["n_tx_tested"],
-            "test_name": res["test_name"],
-            "stat_name": res["stat_name"],
-            "stat_value": res["stat_value"],
-            "p_value": res["p_value"],
-            "n_strata_informative": res["n_strata_informative"],
-            "strata_heterogeneous": res["strata_heterogeneous"],
-            "strata_heterogeneity_p": res["strata_heterogeneity_p"],
-            "effect_max_abs_frac_diff": res["effect_max_abs_frac_diff"],
-            "test_name_pooled": res["test_name_pooled"],
-            "stat_value_pooled": res["stat_value_pooled"],
-            "p_value_pooled": res["p_value_pooled"],
-            "effect_max_abs_frac_diff_pooled": res["effect_max_abs_frac_diff_pooled"],
-            "per_transcript_json": json.dumps(res["per_transcript"], separators=(",", ":")),
-        })
+    if jobs > 1 and len(tasks) > 1:
+        # fork so the arrays are inherited, not pickled; results come back in task order
+        ctx = multiprocessing.get_context("fork")
+        _init_worker_arrays(arrays)
+        with ProcessPoolExecutor(max_workers=min(jobs, len(tasks)), mp_context=ctx) as ex:
+            for out in ex.map(_run_site_range, tasks):
+                results.extend(out)
+    else:
+        _init_worker_arrays(arrays)
+        for t in tasks:
+            results.extend(_run_site_range(t))
 
     if not results:
         # Single-isoform loci (e.g. mitochondrial chrM genes) have no site with >=2
@@ -619,8 +781,9 @@ def main():
     os.makedirs(figs_dir, exist_ok=True)
     topk = int(min(args.topk, len(res_df)))
 
-    # Fast index by tuple key for re-slice
-    df_site_index = df.set_index("site_key")
+    # Rows of a site are contiguous in the sorted frame: slice by site id instead of indexing a
+    # tuple column over the whole table.
+    key_to_sid = {k: i for i, k in enumerate(keys)}
 
     for i in range(topk):
         r = res_df.iloc[i]
@@ -628,11 +791,11 @@ def main():
             str(r["gene_name"]), str(r["mod_code"]), str(r["chrom"]),
             int(r["start0"]), int(r["end0"]), str(r["strand"])
         )
-        try:
-            df_site = df_site_index.loc[[key_tuple]].reset_index(drop=True)
-        except KeyError:
-            # should not happen, but be defensive
+        sid = key_to_sid.get(key_tuple)
+        if sid is None:
             continue
+        df_site = df.iloc[offsets[sid]:offsets[sid + 1]].reset_index(drop=True)
+        df_site = df_site.assign(sample=df_site["sample"].astype(str))
 
         per_tx = json.loads(r["per_transcript_json"])
         title = (

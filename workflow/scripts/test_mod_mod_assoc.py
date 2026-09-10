@@ -12,17 +12,15 @@ import argparse
 import json
 import math
 import os
-import shutil
 import sys
-import tempfile
 import numpy as np
 import pandas as pd
 from pyroaring import BitMap
 
 from genotype_utils import (add_heterogeneity_flag, benjamini_hochberg, binary_rate_delta,
-                            context_key_from_row, drop_unassigned_reads, informative_strata, mh_common_odds_ratio,
-                            mh_stratified_effect, run_contingency_test, shard_tsv_by_chrom,
-                            stratified_primary, stratum_heterogeneity, tsv_header)
+                            context_key_series, drop_unassigned_reads, informative_strata, mh_common_odds_ratio,
+                            mh_stratified_effect, open_chrom_table, run_contingency_test,
+                            stratified_primary, stratum_heterogeneity)
 
 # Columns the current test_mod_mod_assoc uses (incl. strand, and gene_name/metagene_index for context_key).
 _MOD_WANT = ["sample", "qname", "mod_site_id", "chrom", "start0", "strand", "target_mod_code",
@@ -56,6 +54,10 @@ def parse_args():
     ap.add_argument("--max-sites-per-read", type=int, default=200)
     ap.add_argument("--test", choices=["auto", "fisher", "chi2"], default="auto")
     ap.add_argument("--pseudocount", type=float, default=0.5)
+    ap.add_argument("--jobs", type=int, default=1,
+                    help="Chromosomes processed in parallel (forked workers; results are concatenated in "
+                         "sorted-chromosome order, so the output is identical for any value). Each worker "
+                         "holds one chromosome of the tables, so size this to memory.")
     return ap.parse_args()
 
 
@@ -154,9 +156,9 @@ def _pair_row(sid_a, sid_b, counts, site_meta, args, strata_counts=None):
     }
 
 
-def _modmod_for_chrom(mod_path, args):
-    hdr = tsv_header(mod_path)
-    mod_df = pd.read_csv(mod_path, sep="\t", low_memory=False, usecols=[c for c in _MOD_WANT if c in hdr])
+def _modmod_for_chrom(mod_tbl, chrom, args):
+    hdr = mod_tbl.header_cols
+    mod_df = mod_tbl.read(chrom, usecols=[c for c in _MOD_WANT if c in hdr])
     if mod_df.empty:
         return [], 0, 0
     # same usability + state filter as the production test
@@ -169,7 +171,7 @@ def _modmod_for_chrom(mod_path, args):
     if mod_df.empty:
         return [], 0, 0
     mod_df["target_state"] = mod_df["state_detail"].eq("modified").astype(int)
-    mod_df["context_key"] = mod_df.apply(context_key_from_row, axis=1)
+    mod_df["context_key"] = context_key_series(mod_df)
     gene_col = "gene_names" if "gene_names" in mod_df.columns else ("gene_name" if "gene_name" in mod_df.columns else None)
 
     rows = []
@@ -241,22 +243,44 @@ def _modmod_for_chrom(mod_path, args):
     return rows, n_skipped_dense, n_same_base
 
 
+
+
+def _run_chroms(fn, chroms, jobs):
+    """Run fn(chrom) for every chrom, in parallel across forked workers when jobs > 1; returns the
+    results in `chroms` order (identical to the serial loop)."""
+    chroms = list(chroms)
+    jobs = max(1, min(int(jobs), len(chroms))) if chroms else 1
+    if jobs <= 1:
+        return [fn(c) for c in chroms]
+    import multiprocessing
+    from concurrent.futures import ProcessPoolExecutor
+    ctx = multiprocessing.get_context("fork")
+    with ProcessPoolExecutor(max_workers=jobs, mp_context=ctx) as ex:
+        return list(ex.map(fn, chroms))
+
+_G = {}
+
+
+def _modmod_task(chrom):
+    return _modmod_for_chrom(_G["mod"], chrom, _G["args"])
+
+
 def main():
     args = parse_args()
     if not (os.path.exists(args.molecule_mods) and os.path.getsize(args.molecule_mods)):
         pd.DataFrame(columns=OUT_COLS).to_csv(args.out_tsv, sep="\t", index=False)
         return
-    tmp = tempfile.mkdtemp(prefix=".modmod_bs_", dir=os.path.dirname(args.out_tsv) or ".")
     rows = []
     n_skipped = 0
     n_same_base = 0
+    mod_tbl = open_chrom_table(args.molecule_mods)
     try:
-        mod_shards = shard_tsv_by_chrom(args.molecule_mods, os.path.join(tmp, "mod"))
-        for chrom in sorted(mod_shards):
-            r, nsk, nsb = _modmod_for_chrom(mod_shards[chrom], args)
+        _G.update(mod=mod_tbl, args=args)
+        for r, nsk, nsb in _run_chroms(_modmod_task, mod_tbl.chroms, args.jobs):
             rows.extend(r); n_skipped += nsk; n_same_base += nsb
     finally:
-        shutil.rmtree(tmp, ignore_errors=True)
+        if hasattr(mod_tbl, "close"):
+            mod_tbl.close()
     if n_same_base:
         print(f"[mod_mod] excluded {n_same_base:,} same-base pair(s) (two modification codes on ONE "
               f"base: mutually exclusive by construction, not co-occurrence)", file=sys.stderr, flush=True)

@@ -156,9 +156,16 @@ def main():
     K = np.minimum(K, tot)   # defensive: a feature count can never exceed its gene total
     gidx = np.array([0 if s in ref_s else 1 for s in samples], dtype=int)
 
-    # NOTE: requiring EVERY sample >= min_gene_reads (not >= min_samples_per_group covered per group)
-    # silently drops features covered in most-but-not-all replicates; documented in the stress report.
-    keep = (tot.min(axis=1) >= args.min_gene_reads)
+    # Require the gene-read floor in at least min_samples_per_group samples WITHIN EACH group, NOT in
+    # every sample (mirrors test_condition_mod_diffs): one shallow library among many otherwise removed
+    # the gene from every usage test. A sample below the floor contributes no usable denominator, so
+    # its counts are zeroed and beta_binomial_diff drops it as n<=0 (it already handles that).
+    _ok = tot >= args.min_gene_reads
+    _nref = _ok[:, gidx == 0].sum(axis=1)
+    _ntest = _ok[:, gidx == 1].sum(axis=1)
+    keep = (_nref >= args.min_samples_per_group) & (_ntest >= args.min_samples_per_group)
+    tot = np.where(_ok, tot, 0.0)
+    K = np.where(_ok, K, 0.0)
     # a feature that is the gene's ONLY one is 100% by construction -> nothing to compare. Use an EXACT
     # integer compare (K == tot): np.isclose's default rtol=1e-5 would wrongly drop a feature that is
     # 99.999% (off by 1-2 reads) at very high coverage.

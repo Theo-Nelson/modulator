@@ -20,6 +20,7 @@ stdlib only (the package's sole dependency is PyYAML).
 from __future__ import annotations
 
 import csv
+import re
 import glob as _glob
 import os
 from pathlib import Path
@@ -32,9 +33,27 @@ class SamplesheetError(ValueError):
     """Raised for a malformed samplesheet -- always names the offending row/value."""
 
 
-def _sniff_delimiter(path: Path) -> str:
+def _is_comment_line(line: str) -> bool:
+    """A leading '#' line that is NOT a commented header ('#sample<tab>bam' is accepted as the header)."""
+    body = line.lstrip("#").strip()
+    if not line.lstrip().startswith("#") or not body:
+        return bool(line.lstrip().startswith("#"))
+    tokens = {t.strip().lower() for t in re.split(r"[\t,]", body)}
+    return not all(c in tokens for c in REQUIRED_COLUMNS)
+
+
+def _sheet_lines(path: Path) -> list[str]:
+    """File lines with leading comment/blank lines removed so the first line is the header."""
     with open(path, newline="") as fh:
-        first = fh.readline()
+        lines = fh.readlines()
+    i = 0
+    while i < len(lines) and (not lines[i].strip() or _is_comment_line(lines[i])):
+        i += 1
+    return lines[i:]
+
+
+def _sniff_delimiter(lines: list[str]) -> str:
+    first = lines[0] if lines else ""
     return "\t" if "\t" in first else ","
 
 
@@ -44,31 +63,31 @@ def read_samplesheet(path: str | Path) -> list[dict]:
     if not path.exists():
         raise SamplesheetError(f"samplesheet not found: {path}")
     rows: list[dict] = []
-    with open(path, newline="") as fh:
-        reader = csv.DictReader(fh, delimiter=_sniff_delimiter(path))
-        if reader.fieldnames is None:
-            raise SamplesheetError(f"samplesheet {path} is empty")
-        fields = [(f or "").strip().lstrip("#") for f in reader.fieldnames]
-        missing = [c for c in REQUIRED_COLUMNS if c not in fields]
-        if missing:
+    lines = _sheet_lines(path)
+    reader = csv.DictReader(lines, delimiter=_sniff_delimiter(lines))
+    if reader.fieldnames is None:
+        raise SamplesheetError(f"samplesheet {path} is empty")
+    fields = [(f or "").strip().lstrip("#") for f in reader.fieldnames]
+    missing = [c for c in REQUIRED_COLUMNS if c not in fields]
+    if missing:
+        raise SamplesheetError(
+            f"samplesheet {path} is missing required column(s): {', '.join(missing)}. "
+            f"Found: {', '.join(fields)}")
+    for i, raw in enumerate(reader, start=2):  # header is line 1
+        row = {(k or "").strip().lstrip("#"): (v.strip() if isinstance(v, str) else v)
+               for k, v in raw.items() if k is not None}
+        if not any((v or "") for v in row.values()):
+            continue  # blank line
+        sample = row.get("sample") or ""
+        if not sample:
+            raise SamplesheetError(f"{path} line {i}: empty 'sample'")
+        if any(ch in sample for ch in "/\\ \t"):
             raise SamplesheetError(
-                f"samplesheet {path} is missing required column(s): {', '.join(missing)}. "
-                f"Found: {', '.join(fields)}")
-        for i, raw in enumerate(reader, start=2):  # header is line 1
-            row = {(k or "").strip().lstrip("#"): (v.strip() if isinstance(v, str) else v)
-                   for k, v in raw.items() if k is not None}
-            if not any((v or "") for v in row.values()):
-                continue  # blank line
-            sample = row.get("sample") or ""
-            if not sample:
-                raise SamplesheetError(f"{path} line {i}: empty 'sample'")
-            if any(ch in sample for ch in "/\\ \t"):
-                raise SamplesheetError(
-                    f"{path} line {i}: sample id {sample!r} must not contain spaces or path separators "
-                    "(it becomes a filename)")
-            if not (row.get("bam") or ""):
-                raise SamplesheetError(f"{path} line {i}: empty 'bam' for sample {sample!r}")
-            rows.append(row)
+                f"{path} line {i}: sample id {sample!r} must not contain spaces or path separators "
+                "(it becomes a filename)")
+        if not (row.get("bam") or ""):
+            raise SamplesheetError(f"{path} line {i}: empty 'bam' for sample {sample!r}")
+        rows.append(row)
     if not rows:
         raise SamplesheetError(f"samplesheet {path} has no data rows")
     seen: dict[str, int] = {}
@@ -143,7 +162,13 @@ def stage_bams(rows: list[dict], staging_dir: str | Path, bams_dir: str | Path) 
     for link in staging.glob("*.bam*"):
         if not link.is_symlink():
             continue
-        stem = link.name.split(".bam")[0]
+        name = link.name
+        for ext in (".bam.bai", ".bam.csi", ".bam"):
+            if name.endswith(ext):
+                stem = name[:-len(ext)]
+                break
+        else:
+            continue  # not a BAM/index link
         if stem not in keep:
             try:
                 link.unlink()

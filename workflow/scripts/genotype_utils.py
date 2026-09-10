@@ -2,6 +2,7 @@
 
 from concurrent.futures import ProcessPoolExecutor, as_completed
 import gzip
+import io
 import math
 import os
 import sys
@@ -820,6 +821,285 @@ def shard_tsv_by_chrom(path: str, out_dir: str, chrom_col: str = "chrom") -> Dic
     for w in writers.values():
         w.close()
     return dict(sorted(paths.items()))
+
+
+# --------------------------------------------------------------------------------------
+# Chromosome byte-range index for the big per-read tables.
+#
+# The association tests used to `shard_tsv_by_chrom` the whole molecule_mod_calls table (32 GB at 2
+# samples, ~500 GB at 31) into a temp dir -- five consumers, five full copies. The producers write the
+# table in chromosome blocks, so they record (chrom, byte offset, length) in a `<file>.chromidx.tsv`
+# sidecar and consumers read one chromosome straight out of the file through a range reader: no copy,
+# and peak memory is one chromosome's rows. A table without a sidecar (older run, or a file that is
+# not chromosome-contiguous such as molecule_haplotypes) gets indexed by one streaming pass that
+# records every contiguous run of a chrom, so the reader works for any row order.
+# --------------------------------------------------------------------------------------
+
+def chrom_index_path(path: str) -> str:
+    return str(path) + ".chromidx.tsv"
+
+
+def write_chrom_index(path: str, blocks, header_in_first_block: bool = True) -> None:
+    """`blocks` = [(chrom, offset, length)] in file order (a chrom may repeat). The first block's
+    range starts at the header line when the producer measured it that way; the reader always
+    prepends the real header and skips a duplicate header line inside a block."""
+    try:
+        size = os.path.getsize(path)
+        with open(chrom_index_path(path), "w") as fh:
+            fh.write(f"#size\t{size}\n")
+            for chrom, off, ln in blocks:
+                fh.write(f"{chrom}\t{int(off)}\t{int(ln)}\n")
+    except OSError:
+        pass
+
+
+def load_chrom_index(path: str):
+    """{chrom: [(offset, length), ...]} from the sidecar, or None if absent / stale (size mismatch)."""
+    ip = chrom_index_path(path)
+    if not os.path.exists(ip):
+        return None
+    try:
+        size = os.path.getsize(path)
+        out: Dict[str, list] = {}
+        with open(ip) as fh:
+            first = fh.readline()
+            if not first.startswith("#size\t") or int(first.split("\t")[1]) != size:
+                return None
+            for line in fh:
+                p = line.rstrip("\n").split("\t")
+                if len(p) >= 3:
+                    out.setdefault(p[0], []).append((int(p[1]), int(p[2])))
+        return out
+    except (OSError, ValueError):
+        return None
+
+
+def build_chrom_index(path: str, chrom_col: str = "chrom"):
+    """One streaming pass recording every contiguous run of `chrom_col`; writes the sidecar when the
+    directory is writable. Handles .gz/.bgz input by NOT indexing (returns None -> caller shards)."""
+    if str(path).endswith((".gz", ".bgz")):
+        return None
+    out: Dict[str, list] = {}
+    blocks = []
+    with open(path, "rb") as fh:
+        header = fh.readline()
+        if not header:
+            return out
+        cols = header.rstrip(b"\n").split(b"\t")
+        try:
+            ci = cols.index(chrom_col.encode())
+        except ValueError:
+            raise ValueError(f"build_chrom_index: no {chrom_col!r} column in {path}")
+        off = len(header)
+        cur = None
+        cur_off = off
+        while True:
+            line = fh.readline()
+            if not line:
+                break
+            parts = line.split(b"\t", ci + 1)
+            chrom = parts[ci] if len(parts) > ci else b""
+            if chrom != cur:
+                if cur is not None:
+                    blocks.append((cur.decode("utf-8", "replace"), cur_off, off - cur_off))
+                cur = chrom
+                cur_off = off
+            off += len(line)
+        if cur is not None:
+            blocks.append((cur.decode("utf-8", "replace"), cur_off, off - cur_off))
+    for chrom, o, ln in blocks:
+        out.setdefault(chrom, []).append((o, ln))
+    write_chrom_index(path, blocks, header_in_first_block=False)
+    return out
+
+
+class _RangeReader(io.RawIOBase):
+    """Read-only file-like over `header` + the given byte ranges of `path` (in order)."""
+
+    def __init__(self, path, header: bytes, ranges):
+        self._fh = open(path, "rb")
+        self._header = header
+        self._ranges = list(ranges)
+        self._ri = -1                    # -1 = header pending
+        self._left = len(header)
+        self._hpos = 0
+        self._skip_header_once = header
+
+    def readable(self):
+        return True
+
+    def _advance(self):
+        self._ri += 1
+        if self._ri >= len(self._ranges):
+            self._left = 0
+            return False
+        off, ln = self._ranges[self._ri]
+        self._fh.seek(off)
+        self._left = ln
+        # a block that starts with the header line (first block of a producer-written file): skip it
+        if self._skip_header_once and ln >= len(self._skip_header_once):
+            peek = self._fh.read(len(self._skip_header_once))
+            if peek == self._skip_header_once:
+                self._left -= len(peek)
+            else:
+                self._fh.seek(off)
+        return True
+
+    def readinto(self, b):
+        n = len(b)
+        if n == 0:
+            return 0
+        if self._ri == -1:
+            k = min(n, len(self._header) - self._hpos)
+            b[:k] = self._header[self._hpos:self._hpos + k]
+            self._hpos += k
+            if self._hpos >= len(self._header):
+                self._advance()
+            return k
+        while self._left == 0:
+            if not self._advance():
+                return 0
+        k = min(n, self._left)
+        data = self._fh.read(k)
+        if not data:
+            return 0
+        b[:len(data)] = data
+        self._left -= len(data)
+        return len(data)
+
+    def close(self):
+        try:
+            self._fh.close()
+        finally:
+            super().close()
+
+
+class ChromTable:
+    """Per-chromosome access to a big TSV without copying it. `chroms` is sorted; `read(chrom,
+    usecols=..., dtype=...)` returns that chromosome's rows as a DataFrame (empty frame with the
+    header's columns when the chrom is absent)."""
+
+    def __init__(self, path: str, chrom_col: str = "chrom"):
+        self.path = str(path)
+        self.header_cols = tsv_header(self.path) if os.path.getsize(self.path) else []
+        idx = load_chrom_index(self.path)
+        if idx is None:
+            idx = build_chrom_index(self.path, chrom_col)
+        self.index = idx or {}
+        self.chroms = sorted(self.index)
+        with open(self.path, "rb") as fh:
+            self._header_bytes = fh.readline()
+
+    def read(self, chrom: str, usecols=None, dtype=None, **kw) -> pd.DataFrame:
+        ranges = self.index.get(chrom)
+        if usecols is not None:
+            usecols = [c for c in usecols if c in self.header_cols]
+        if not ranges:
+            cols = usecols if usecols is not None else self.header_cols
+            return pd.DataFrame(columns=cols)
+        reader = io.BufferedReader(_RangeReader(self.path, self._header_bytes, ranges), buffer_size=1 << 20)
+        try:
+            return pd.read_csv(reader, sep="\t", usecols=usecols, dtype=dtype, low_memory=False, **kw)
+        finally:
+            reader.close()
+
+
+def open_chrom_table(path: str, chrom_col: str = "chrom"):
+    """ChromTable for a plain TSV; for a gzip/bgzip file falls back to a physical per-chrom sharding
+    in a temp dir next to it (the caller keeps using .read(chrom))."""
+    if str(path).endswith((".gz", ".bgz")):
+        import tempfile
+        tmp = tempfile.mkdtemp(prefix=".chrom_shards_", dir=os.path.dirname(str(path)) or ".")
+        shards = shard_tsv_by_chrom(path, tmp, chrom_col)
+
+        class _Sharded:
+            def __init__(self):
+                self.chroms = sorted(shards)
+                self.header_cols = tsv_header(shards[self.chroms[0]]) if self.chroms else []
+                self.tmp = tmp
+
+            def read(self, chrom, usecols=None, dtype=None, **kw):
+                p = shards.get(chrom)
+                if p is None:
+                    return pd.DataFrame(columns=usecols or self.header_cols)
+                uc = [c for c in usecols if c in self.header_cols] if usecols is not None else None
+                return pd.read_csv(p, sep="\t", usecols=uc, dtype=dtype, low_memory=False, **kw)
+
+            def close(self):
+                import shutil
+                shutil.rmtree(tmp, ignore_errors=True)
+        return _Sharded()
+    return ChromTable(path, chrom_col)
+
+
+# --------------------------------------------------------------------------------------
+# Vectorised context keys (the row-wise `df.apply(context_key_from_row, axis=1)` costs ~50 us/row --
+# minutes per chromosome on the per-read mod table). Same semantics as the scalar functions.
+# --------------------------------------------------------------------------------------
+
+def normalize_text_series(s: pd.Series, *, numeric: bool = False) -> pd.Series:
+    t = s.astype(str).str.strip()
+    t = t.where(~t.str.lower().isin(["", "nan", "none", "null"]), "")
+    if numeric:
+        num = pd.to_numeric(t, errors="coerce")
+        isint = np.isfinite(num.to_numpy(dtype=float)) & (num.to_numpy(dtype=float) == np.floor(num.to_numpy(dtype=float)))
+        isint &= (t != "").to_numpy()
+        if isint.any():
+            t = t.copy()
+            t[isint] = num[isint].astype(np.int64).astype(str)
+    return t
+
+
+def context_key_series(df: pd.DataFrame, *, chrom_key: str = "chrom",
+                       metagene_keys: Iterable[str] = ("metagene_index",),
+                       gene_keys: Iterable[str] = ("gene_name",)) -> pd.Series:
+    """Vectorised context_key_from_row over a DataFrame (identical values)."""
+    n = len(df)
+    empty = pd.Series([""] * n, index=df.index, dtype=object)
+
+    def first_present(keys, numeric):
+        out = empty.copy()
+        for k in keys:
+            if k not in df.columns:
+                continue
+            tok = normalize_text_series(df[k], numeric=numeric)
+            fill = out == ""
+            out = out.where(~fill, tok)
+        return out
+
+    mg = first_present(metagene_keys, True)
+    gene = first_present(gene_keys, False)
+    chrom = normalize_text_series(df[chrom_key]) if chrom_key in df.columns else empty
+    key = np.where(mg != "", "MG:" + mg,
+                   np.where(gene != "", "GENE:" + gene, "CHR:" + chrom))
+    return pd.Series(key, index=df.index, dtype=object)
+
+
+def snp_context_keys_lists(df: pd.DataFrame) -> list:
+    """context_keys_from_snp_row for every row, via column-wise iteration (~30x cheaper than a
+    row-wise apply, which builds a Series per row).
+
+    A9: the mod side keys every call by the READ's assigned metagene (`assignment_metagene_index`), but
+    the SNP side keyed only by the SITE's exon annotation (`metagene_indices`), so a read assigned to a
+    fragmentform whose assembled exons do not cover the SNP (retained intron, 5' region absent from the
+    model, an alt-contig copy) could never pair with the mod calls on that same read -- 93 observations /
+    4 fully-unpairable SNPs on HG002, more where SNPs are dense. Each SNP observation therefore also
+    carries `MG:<ZM>` (the read's own metagene) when the read is assigned; the annotation keys are kept,
+    so this is a strict superset of the old contexts."""
+    mgs = df["metagene_indices"].tolist() if "metagene_indices" in df.columns else [""] * len(df)
+    gns = df["gene_names"].tolist() if "gene_names" in df.columns else [""] * len(df)
+    chs = df["chrom"].tolist() if "chrom" in df.columns else [""] * len(df)
+    zms = df["ZM"].tolist() if "ZM" in df.columns else [None] * len(df)
+    out = []
+    for mg, gn, ch, zm in zip(mgs, gns, chs, zms):
+        keys = context_keys_from_snp_row({"metagene_indices": mg, "gene_names": gn, "chrom": ch})
+        z = normalize_text_token(zm, numeric=True) if zm is not None else ""
+        if z and z != "0":
+            k = f"MG:{z}"
+            if k not in keys:
+                keys = list(keys) + [k]
+        out.append(keys)
+    return out
 
 
 def read_keys_of(df: pd.DataFrame) -> set:
