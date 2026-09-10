@@ -1003,6 +1003,22 @@ class ChromTable:
         finally:
             reader.close()
 
+    def iter_chunks(self, chrom: str, usecols=None, dtype=None, chunksize: int = 200000, **kw):
+        """Stream one chromosome as DataFrame chunks (bounded memory; the byte-range reader stays
+        open until the generator is exhausted or closed)."""
+        ranges = self.index.get(chrom)
+        if usecols is not None:
+            usecols = [c for c in usecols if c in self.header_cols]
+        if not ranges:
+            return
+        reader = io.BufferedReader(_RangeReader(self.path, self._header_bytes, ranges), buffer_size=1 << 20)
+        try:
+            for chunk in pd.read_csv(reader, sep="\t", usecols=usecols, dtype=dtype, low_memory=False,
+                                     chunksize=chunksize, **kw):
+                yield chunk
+        finally:
+            reader.close()
+
 
 def open_chrom_table(path: str, chrom_col: str = "chrom"):
     """ChromTable for a plain TSV; for a gzip/bgzip file falls back to a physical per-chrom sharding
@@ -1024,6 +1040,14 @@ def open_chrom_table(path: str, chrom_col: str = "chrom"):
                     return pd.DataFrame(columns=usecols or self.header_cols)
                 uc = [c for c in usecols if c in self.header_cols] if usecols is not None else None
                 return pd.read_csv(p, sep="\t", usecols=uc, dtype=dtype, low_memory=False, **kw)
+
+            def iter_chunks(self, chrom, usecols=None, dtype=None, chunksize=200000, **kw):
+                p = shards.get(chrom)
+                if p is None:
+                    return
+                uc = [c for c in usecols if c in self.header_cols] if usecols is not None else None
+                yield from pd.read_csv(p, sep="\t", usecols=uc, dtype=dtype, low_memory=False,
+                                       chunksize=chunksize, **kw)
 
             def close(self):
                 import shutil

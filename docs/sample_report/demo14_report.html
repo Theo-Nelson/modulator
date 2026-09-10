@@ -230,16 +230,16 @@
     </header>
     <section id='sec-run-parameters'><details class='run-manifest'><summary>Run inputs &amp; parameters <span class='muted'>(click to expand)</span></summary><pre class='manifest-pre'>modulator run manifest
 ================================================================
-Run date / time : 2026-09-01 15:27:08 EDT
+Run date / time : 2026-09-10 10:03:58 EDT
 Prefix          : demo14
-Project root    : /athena/cayuga_0003/scratch/users/thn4005/scripts/projects_v2/modulator_validation_testing/demo14genes_run
-Command         : /home/fs01/thn4005/.local/share/mamba/envs/modulator/bin/python /athena/cayuga_0003/scratch/users/thn4005/scripts/projects_v2/modulator_validation_testing/demo14genes_run/src/modulator/__main__.py run --config config/config.yaml --workdir /athena/cayuga_0003/scratch/users/thn4005/scripts/projects_v2/modulator_validation_testing/demo14genes_run --jobs 6 --stages report --set reference_fa=/athena/cayuga_0003/scratch/users/thn4005/scripts/projects_v2/modulator/modulator_06272026/hg38.fa reference_gtf=/athena/cayuga_0003/scratch/users/thn4005/scripts/projects_v2/modulator/modulator_06272026/hg38.ncbiRefSeq.gtf samplesheet=samples.tsv bams_dir=/athena/cayuga_0003/scratch/users/thn4005/scripts/projects_v2/modulator/modulator_06272026/benchmark/merged_bams bam_glob=*.bam prefix=demo14 threads=8 genotype.enable=true genotype.jobs=6
+Project root    : /athena/cayuga_0003/scratch/users/thn4005/scripts/projects_v2/modulator_validation_testing/demo14genes_v3_run
+Command         : /home/fs01/thn4005/.local/share/mamba/envs/modulator/bin/python /athena/cayuga_0003/scratch/users/thn4005/scripts/projects_v2/modulator_validation_testing/demo14genes_v3_run/src/modulator/__main__.py run --config config/config.yaml --workdir /athena/cayuga_0003/scratch/users/thn4005/scripts/projects_v2/modulator_validation_testing/demo14genes_v3_run --jobs 6 --stages report --set reference_fa=/athena/cayuga_0003/scratch/users/thn4005/scripts/projects_v2/modulator/modulator_06272026/hg38.fa reference_gtf=/athena/cayuga_0003/scratch/users/thn4005/scripts/projects_v2/modulator/modulator_06272026/hg38.ncbiRefSeq.gtf samplesheet=samples.tsv bams_dir=/athena/cayuga_0003/scratch/users/thn4005/scripts/projects_v2/modulator/modulator_06272026/benchmark/merged_bams bam_glob=*.bam prefix=demo14 threads=8 genotype.enable=true genotype.jobs=6
 
 Resolved inputs
 ----------------------------------------------------------------
 reference_fa    : /athena/cayuga_0003/scratch/users/thn4005/scripts/projects_v2/modulator/modulator_06272026/hg38.fa
 reference_gtf   : /athena/cayuga_0003/scratch/users/thn4005/scripts/projects_v2/modulator/modulator_06272026/hg38.ncbiRefSeq.gtf
-bams_dir        : /athena/cayuga_0003/scratch/users/thn4005/scripts/projects_v2/modulator_validation_testing/demo14genes_run/results/staged_bams
+bams_dir        : /athena/cayuga_0003/scratch/users/thn4005/scripts/projects_v2/modulator_validation_testing/demo14genes_v3_run/results/staged_bams
 bam_glob        : *.bam
 samplesheet     : samples.tsv
 threads         : 8
@@ -1960,55 +1960,55 @@ reference_gtf: /athena/cayuga_0003/scratch/users/thn4005/scripts/projects_v2/mod
     <tr>
       <td>AATAAA</td>
       <td>41</td>
-      <td>15.0</td>
+      <td>16.0</td>
     </tr>
     <tr>
       <td>AAGAAA</td>
       <td>32</td>
-      <td>11.0</td>
+      <td>12.0</td>
     </tr>
     <tr>
       <td>ATTAAA</td>
       <td>14</td>
-      <td>18.0</td>
+      <td>19.0</td>
     </tr>
     <tr>
       <td>AATATA</td>
       <td>10</td>
-      <td>5.0</td>
+      <td>6.0</td>
     </tr>
     <tr>
       <td>ACTAAA</td>
       <td>6</td>
-      <td>0.0</td>
+      <td>1.0</td>
     </tr>
     <tr>
       <td>AATACA</td>
       <td>3</td>
-      <td>18.0</td>
+      <td>19.0</td>
     </tr>
     <tr>
       <td>TATAAA</td>
       <td>3</td>
-      <td>14.0</td>
+      <td>15.0</td>
     </tr>
     <tr>
       <td>CATAAA</td>
       <td>1</td>
-      <td>15.0</td>
+      <td>16.0</td>
     </tr>
     <tr>
       <td>AATAGA</td>
       <td>1</td>
-      <td>11.0</td>
+      <td>12.0</td>
     </tr>
     <tr>
       <td>GATAAA</td>
       <td>1</td>
-      <td>13.0</td>
+      <td>14.0</td>
     </tr>
   </tbody>
-</table></div></div></div></details></section><section id='sec-sites-with-differential-epitranscriptomic-modification-between-fragmentforms'><details class='report-section' open><summary><h2>Sites with Differential Epitranscriptomic Modification Between Fragmentforms</h2></summary><div class='section-body'><p class='section-intro'>Positions where the modification stoichiometry differs between the fragmentforms of a gene (across all detected mod codes; sample-stratified Cochran-Mantel-Haenszel with Benjamini-Hochberg FDR). The table shows sites at <b>FDR&lt;0.05 and |Δ|≥10%</b> only — the exact thresholds this run used. Both are tunable — see input parameters classify_diffs.min_effect and classify_diffs.fdr.</p><details class='definitions'><summary>Result-column definitions</summary><dl><dt>gene_name</dt><dd>Gene label assigned to the reported row or site.</dd><dt>mod_code</dt><dd>Modification code reported by modkit or downstream aggregation.</dd><dt>chrom</dt><dd>Reference chromosome or contig containing the reported feature.</dd><dt>start0</dt><dd>0-based inclusive start coordinate of the reported modification site.</dd><dt>end0</dt><dd>0-based exclusive end coordinate of the reported modification site.</dd><dt>strand</dt><dd>Genomic strand of the reported feature.</dd><dt>p_value</dt><dd>Nominal p-value from the reported hypothesis test.</dd><dt>p_adj_bh</dt><dd>Benjamini-Hochberg false-discovery-rate adjusted p-value.</dd><dt>effect_max_abs_frac_diff</dt><dd>Maximum absolute difference in modified fraction across tested fragmentform partitions, Mantel-Haenszel-weighted over the informative sample strata (the sample-stratified effect that matches the primary p-value, NOT the sample-pooled fraction). The old sample-pooled value is kept separately as effect_max_abs_frac_diff_pooled.</dd></dl></details><div class='table-wrap'><table class="dataframe datatable">
+</table></div></div></div></details></section><section id='sec-sites-with-differential-epitranscriptomic-modification-between-fragmentforms'><details class='report-section' open><summary><h2>Sites with Differential Epitranscriptomic Modification Between Fragmentforms</h2></summary><div class='section-body'><p class='section-intro'>Positions where the modification stoichiometry differs between the fragmentforms of a gene (across all detected mod codes; sample-stratified Cochran-Mantel-Haenszel with Benjamini-Hochberg FDR). The table shows sites at <b>FDR&lt;0.05 and |Δ|≥10%</b> only — the exact thresholds this run used. Both are tunable — see input parameters classify_diffs.min_effect and classify_diffs.fdr.</p><details class='definitions'><summary>Result-column definitions</summary><dl><dt>gene_name</dt><dd>Gene label assigned to the reported row or site.</dd><dt>mod_code</dt><dd>Modification code reported by modkit or downstream aggregation.</dd><dt>chrom</dt><dd>Reference chromosome or contig containing the reported feature.</dd><dt>start0</dt><dd>0-based inclusive start coordinate of the reported modification site.</dd><dt>end0</dt><dd>0-based exclusive end coordinate of the reported modification site.</dd><dt>strand</dt><dd>Genomic strand of the reported feature.</dd><dt>p_value</dt><dd>Nominal p-value from the reported hypothesis test.</dd><dt>p_adj_bh</dt><dd>Benjamini-Hochberg false-discovery-rate adjusted p-value.</dd><dt>effect_max_abs_frac_diff</dt><dd>Maximum absolute difference in modified fraction across tested fragmentform partitions, Mantel-Haenszel-weighted over the informative sample strata (the sample-stratified effect that matches the primary p-value, NOT the sample-pooled fraction). The old sample-pooled value is kept separately as effect_max_abs_frac_diff_pooled.</dd></dl></details><div class='callout-warn'><b>Read this first — please consider both effect size and p-value.</b> Your replicates are highly reproducible: within <b>mock</b> (3 replicates) the typical site differs by only <b>~0.0 pp</b> between replicates; within <b>zikv</b> (3 replicates) the typical site differs by only <b>~0.0 pp</b> between replicates. When replicates agree this tightly the replicate-aware tests have very high power, so a shift of only a couple of percentage points can clear FDR even though it may be biologically less meaningful.</div><div class='table-wrap'><table class="dataframe datatable">
   <thead>
     <tr style="text-align: right;">
       <th>gene_name</th>
@@ -2529,7 +2529,7 @@ reference_gtf: /athena/cayuga_0003/scratch/users/thn4005/scripts/projects_v2/mod
       <td>67</td>
       <td>9</td>
       <td>1</td>
-      <td>9</td>
+      <td>8</td>
     </tr>
     <tr>
       <td>VGLL4</td>
@@ -2561,7 +2561,7 @@ reference_gtf: /athena/cayuga_0003/scratch/users/thn4005/scripts/projects_v2/mod
       <td>45</td>
       <td>1</td>
       <td>5</td>
-      <td>1,2,4,5,7</td>
+      <td>1,2,3,5,7</td>
     </tr>
     <tr>
       <td>VGLL4</td>
@@ -3832,7 +3832,7 @@ reference_gtf: /athena/cayuga_0003/scratch/users/thn4005/scripts/projects_v2/mod
       <td>7</td>
       <td>FULL_LENGTH</td>
       <td>0.8621</td>
-      <td>9</td>
+      <td>8</td>
       <td>FULL_LENGTH</td>
       <td>0.2424</td>
       <td>T3_STRONG</td>
@@ -4576,7 +4576,7 @@ reference_gtf: /athena/cayuga_0003/scratch/users/thn4005/scripts/projects_v2/mod
       <td>+</td>
       <td>SAME_3PRIME_END</td>
       <td>NaN</td>
-      <td>4</td>
+      <td>3</td>
       <td>TANDEM_APA</td>
       <td>0.0351</td>
       <td>1</td>
@@ -4771,7 +4771,7 @@ reference_gtf: /athena/cayuga_0003/scratch/users/thn4005/scripts/projects_v2/mod
       <td>+</td>
       <td>NaN</td>
       <td>NaN</td>
-      <td>3</td>
+      <td>4</td>
       <td>TANDEM_APA</td>
       <td>0.1698</td>
       <td>5</td>
@@ -5368,7 +5368,7 @@ reference_gtf: /athena/cayuga_0003/scratch/users/thn4005/scripts/projects_v2/mod
       <td>a@7115323 (0.0294)</td>
     </tr>
   </tbody>
-</table></div></div></div></details></section><section id='sec-differential-polya-tail-length-by-fragmentform-and-modification-status'><details class='report-section' open><summary><h2>Differential polyA Tail Length by Fragmentform and Modification Status</h2></summary><div class='section-body'><p class='section-intro'>Direct per-read poly(A) tail-length estimates from the dorado basecaller (pt:i tag), grouped by fragmentform (isoform). Tail length is mechanistically tied to m6A, RNA stability, and translation, so it is reported as a first-class readout: its distribution across fragmentforms, whether the fragmentforms of a gene differ in tail length, and whether modification at a site tracks with a read's tail length.</p><details class='definitions'><summary>Column definitions</summary><dl><dt>effect_median_range_nt</dt><dd>Spread (nt) of per-fragmentform median tail lengths within a gene — how differently its isoforms are tailed.</dd><dt>effect_median_diff_nt</dt><dd>Median tail length of modified reads minus unmodified reads at a site (negative = modification associates with shorter tails).</dd><dt>test</dt><dd>Sample-stratified van Elteren test (stratified Wilcoxon/Kruskal-Wallis) on tail-length distributions; the pooled Mann-Whitney/Kruskal is kept as test_name_pooled/p_value_pooled. p_adj_bh is BH-FDR.</dd></dl></details><figure class='image-card'><a class='image-link' href='demo14_report_files/fig_0152.png' target='_blank' rel='noopener noreferrer' title='Open full-size image in a new tab'><img src='demo14_report_files/fig_0152.png' alt='poly(A) tail-length distribution' loading='lazy' /><span class='expand-badge' aria-hidden='true'>↗</span></a><figcaption>Left: per-fragmentform median tail length. Right: median tail by fragmentform class.</figcaption></figure><h3>Summary Across All Poly(A) Tail Measurements</h3><ul><li><b>126</b> fragmentforms with a tail-length distribution; overall median <b>106 nt</b></li><li><b>11</b> genes with differential tail length between their fragmentforms (FDR&lt;0.05)</li><li><b>10</b> modification sites where tail length differs by modification state WITHIN (sample, fragmentform) strata (sample-stratified van Elteren test, FDR&lt;0.05; confounded sites excluded)</li></ul><div class='subsection'><h3>Differential tail length between fragmentforms of a gene</h3><details class='definitions'><summary>Column definitions</summary><dl><dt>gene_name</dt><dd>Gene label assigned to the reported row or site.</dd><dt>n_fragmentforms_tested</dt><dd>Number of the gene&#x27;s fragmentforms with enough tailed reads to compare.</dd><dt>n_reads</dt><dd>Total reads contributing to the reported test.</dd><dt>effect_median_range_nt</dt><dd>Spread (nt) of per-fragmentform median tail lengths within a gene — how differently its isoforms are tailed.</dd><dt>min_median_tail</dt><dd>Smallest per-fragmentform median tail length (nt) among the gene&#x27;s fragmentforms.</dd><dt>max_median_tail</dt><dd>Largest per-fragmentform median tail length (nt) among the gene&#x27;s fragmentforms.</dd><dt>test_name</dt><dd>Statistical test used: the sample-stratified van Elteren test (stratified Wilcoxon / Kruskal-Wallis). The sample-pooled Mann-Whitney U / Kruskal-Wallis statistic is retained separately as test_name_pooled / p_value_pooled.</dd><dt>p_value</dt><dd>Nominal p-value from the reported hypothesis test.</dd><dt>p_adj_bh</dt><dd>Benjamini-Hochberg false-discovery-rate adjusted p-value.</dd></dl></details><div class='table-wrap'><table class="dataframe datatable">
+</table></div></div></div></details></section><section id='sec-differential-polya-tail-length-by-fragmentform-and-modification-status'><details class='report-section' open><summary><h2>Differential polyA Tail Length by Fragmentform and Modification Status</h2></summary><div class='section-body'><p class='section-intro'>Direct per-read poly(A) tail-length estimates from the dorado basecaller (pt:i tag), grouped by fragmentform (isoform). Tail length is mechanistically tied to m6A, RNA stability, and translation, so it is reported as a first-class readout: its distribution across fragmentforms, whether the fragmentforms of a gene differ in tail length, and whether modification at a site tracks with a read's tail length.</p><details class='definitions'><summary>Column definitions</summary><dl><dt>effect_median_range_nt</dt><dd>Spread (nt) of per-fragmentform median tail lengths within a gene — how differently its isoforms are tailed.</dd><dt>effect_median_diff_nt</dt><dd>Median tail length of modified reads minus unmodified reads at a site (negative = modification associates with shorter tails).</dd><dt>test</dt><dd>Sample-stratified van Elteren test (stratified Wilcoxon/Kruskal-Wallis) on tail-length distributions; the pooled Mann-Whitney/Kruskal is kept as test_name_pooled/p_value_pooled. p_adj_bh is BH-FDR.</dd></dl></details><div class='callout-warn'><b>Read this first — please consider both effect size and p-value.</b> Your replicates are highly reproducible: within <b>mock</b> (3 replicates) the typical site differs by only <b>~0.0 pp</b> between replicates; within <b>zikv</b> (3 replicates) the typical site differs by only <b>~0.0 pp</b> between replicates. When replicates agree this tightly the replicate-aware tests have very high power, so a shift of only a couple of percentage points can clear FDR even though it may be biologically less meaningful.</div><figure class='image-card'><a class='image-link' href='demo14_report_files/fig_0152.png' target='_blank' rel='noopener noreferrer' title='Open full-size image in a new tab'><img src='demo14_report_files/fig_0152.png' alt='poly(A) tail-length distribution' loading='lazy' /><span class='expand-badge' aria-hidden='true'>↗</span></a><figcaption>Left: per-fragmentform median tail length. Right: median tail by fragmentform class.</figcaption></figure><h3>Summary Across All Poly(A) Tail Measurements</h3><ul><li><b>126</b> fragmentforms with a tail-length distribution; overall median <b>106 nt</b></li><li><b>11</b> genes with differential tail length between their fragmentforms (FDR&lt;0.05)</li><li><b>10</b> modification sites where tail length differs by modification state WITHIN (sample, fragmentform) strata (sample-stratified van Elteren test, FDR&lt;0.05; confounded sites excluded)</li></ul><div class='subsection'><h3>Differential tail length between fragmentforms of a gene</h3><details class='definitions'><summary>Column definitions</summary><dl><dt>gene_name</dt><dd>Gene label assigned to the reported row or site.</dd><dt>n_fragmentforms_tested</dt><dd>Number of the gene&#x27;s fragmentforms with enough tailed reads to compare.</dd><dt>n_reads</dt><dd>Total reads contributing to the reported test.</dd><dt>effect_median_range_nt</dt><dd>Spread (nt) of per-fragmentform median tail lengths within a gene — how differently its isoforms are tailed.</dd><dt>min_median_tail</dt><dd>Smallest per-fragmentform median tail length (nt) among the gene&#x27;s fragmentforms.</dd><dt>max_median_tail</dt><dd>Largest per-fragmentform median tail length (nt) among the gene&#x27;s fragmentforms.</dd><dt>test_name</dt><dd>Statistical test used: the sample-stratified van Elteren test (stratified Wilcoxon / Kruskal-Wallis). The sample-pooled Mann-Whitney U / Kruskal-Wallis statistic is retained separately as test_name_pooled / p_value_pooled.</dd><dt>p_value</dt><dd>Nominal p-value from the reported hypothesis test.</dd><dt>p_adj_bh</dt><dd>Benjamini-Hochberg false-discovery-rate adjusted p-value.</dd></dl></details><div class='table-wrap'><table class="dataframe datatable">
   <thead>
     <tr style="text-align: right;">
       <th>gene_name</th>

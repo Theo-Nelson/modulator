@@ -539,9 +539,10 @@ def _zn_int(z):
 
 
 def _iter_table_chroms(path, keep, chroms):
-    """Yield DataFrames restricted to `chroms` (and `keep` columns). Uses the chromosome byte-range
-    index sidecar (`<table>.chromidx.tsv`, built once) so only the wanted chromosomes are read; falls
-    back to a chunked full scan for a table without a chrom column."""
+    """Yield DataFrame chunks restricted to `chroms` (and `keep` columns). Uses the chromosome
+    byte-range index sidecar (`<table>.chromidx.tsv`, built once) so only the wanted chromosomes are
+    read, in bounded 200k-row chunks; falls back to a chunked full scan for a table without a chrom
+    column."""
     try:
         from genotype_utils import open_chrom_table
         tbl = open_chrom_table(path)
@@ -557,9 +558,10 @@ def _iter_table_chroms(path, keep, chroms):
         return
     try:
         for chrom in sorted(chroms):
-            df = tbl.read(chrom, usecols=keep)
-            if not df.empty:
-                yield df
+            # stream in chunks: a deep chromosome of the mod-call table is GBs on disk
+            for df in tbl.iter_chunks(chrom, usecols=keep, chunksize=200000):
+                if not df.empty:
+                    yield df
     finally:
         if hasattr(tbl, "close"):
             tbl.close()
