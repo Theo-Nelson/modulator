@@ -1777,6 +1777,11 @@ class ModulatorPipeline:
                     "--jobs", str(snp_jobs),
                     "--threads", str(self.top_threads or 8),
                     "--window-bp", str(int(geno.get("snp_scan_window_bp", 1_000_000))),
+                    # depth cap: bounds the cost of ultra-deep loci (chrM, rRNA, top genes) per window;
+                    # per-window checkpoints let a requeued/restarted stage resume the scan.
+                    "--max-depth", str(int(geno.get("snp_scan_max_depth", 1000))),
+                    "--depth-chunk-bp", str(int(geno.get("snp_scan_depth_chunk_bp", 5000))),
+                    "--shard-dir", str(self.paths.results / "tmp" / self.prefix / "snp_scan_shards"),
                     "--primary-only",
                     "--verbose",
                 ],

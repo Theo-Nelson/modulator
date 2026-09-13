@@ -4,8 +4,12 @@ import argparse
 import bisect
 from collections import defaultdict
 import os
+import pickle
 import re
+import shutil
 import sys
+import time
+import zlib
 
 import numpy as np
 import pandas as pd
@@ -47,6 +51,18 @@ def parse_args():
                          "many bp, so parallelism isn't capped at one shard per chromosome (R2).")
     ap.add_argument("--threads", type=int, default=4,
                     help="(accepted for compatibility; the per-BAM prefilter copy was removed)")
+    ap.add_argument("--max-depth", type=int, default=0,
+                    help="Per-sample depth cap: within each --depth-chunk-bp chunk, if more than this many "
+                         "filtered reads overlap the chunk, reads are SUBSAMPLED (by a hash of the read name, "
+                         "so the choice is deterministic and allele fractions stay unbiased) down to ~this "
+                         "many. Bounds the per-window cost of ultra-deep loci (chrM, rRNA, a top-expressed "
+                         "gene) that otherwise hold one worker for hours. 0 = no cap (exact counts).")
+    ap.add_argument("--depth-chunk-bp", type=int, default=5000,
+                    help="Granularity at which --max-depth is evaluated and applied.")
+    ap.add_argument("--shard-dir", default="",
+                    help="Per-window checkpoint directory: each finished window's candidate rows are written "
+                         "here and a re-run (e.g. after a walltime requeue) reloads them instead of rescanning. "
+                         "Removed on success.")
     ap.add_argument("--primary-only", action="store_true")
     ap.add_argument("--verbose", action="store_true")
     return ap.parse_args()
@@ -206,6 +222,40 @@ def _make_read_filter(exclude_flag, min_mapq):
     return _ok
 
 
+def _count_window(fh, chrom, s0, e0, min_baseq, cb, max_depth, chunk_bp, stats):
+    """(4, L) base counts for [s0, e0) with an optional per-sample depth cap.
+
+    Without a cap this is exactly pysam count_coverage over the window. With a cap, the window is
+    walked in chunks; a chunk overlapped by more than max_depth filtered reads is counted from a
+    deterministic read-name-hash subsample (keep probability max_depth / n), which bounds the pileup
+    cost of a pathological locus while leaving allele fractions unbiased. Chunking itself does not
+    change any count (each position is counted from every read that covers it, once)."""
+    if max_depth <= 0:
+        return np.array(fh.count_coverage(chrom, s0, e0, quality_threshold=int(min_baseq), read_callback=cb),
+                        dtype=np.int64)
+    L = e0 - s0
+    out = np.zeros((4, L), dtype=np.int64)
+    base_ok = cb if callable(cb) else None
+    chunk_bp = max(200, int(chunk_bp))
+    for c0 in range(s0, e0, chunk_bp):
+        c1 = min(e0, c0 + chunk_bp)
+        n = fh.count(chrom, c0, c1, read_callback=cb)
+        use_cb = cb
+        if n > max_depth:
+            thr = int(65536 * max_depth / n)
+            stats["chunks_subsampled"] += 1
+            stats["max_reads_per_chunk"] = max(stats["max_reads_per_chunk"], n)
+
+            def _sub(r, _ok=base_ok, _thr=thr):
+                if _ok is not None and not _ok(r):
+                    return False
+                return (zlib.crc32(r.query_name.encode()) & 0xFFFF) < _thr
+            use_cb = _sub
+        cnt = fh.count_coverage(chrom, c0, c1, quality_threshold=int(min_baseq), read_callback=use_cb)
+        out[:, c0 - s0:c1 - s0] = np.array(cnt, dtype=np.int64)
+    return out
+
+
 def scan_shard(chrom, intervals, bam_specs, reference_fa, min_baseq, filt, verbose=False):
     """Count bases for ONE genomic shard over ALL samples and reduce to candidate rows inside the
     worker. Returns (rows, n_positions_with_coverage, drops).
@@ -219,7 +269,10 @@ def scan_shard(chrom, intervals, bam_specs, reference_fa, min_baseq, filt, verbo
     fasta = pysam.FastaFile(reference_fa)
     rows = []
     n_cov_positions = 0
-    drops = {"low_total_cov": 0, "low_alt_reads": 0, "low_alt_frac": 0, "high_alt_frac": 0, "multiallelic": 0}
+    drops = {"low_total_cov": 0, "low_alt_reads": 0, "low_alt_frac": 0, "high_alt_frac": 0, "multiallelic": 0,
+             "chunks_subsampled": 0, "max_reads_per_chunk": 0}
+    max_depth = int(getattr(args, "max_depth", 0) or 0)
+    chunk_bp = int(getattr(args, "depth_chunk_bp", 5000) or 5000)
     try:
         for start1, end1 in intervals:
             ref_seq = fasta.fetch(chrom, start1 - 1, end1).upper()
@@ -240,9 +293,7 @@ def scan_shard(chrom, intervals, bam_specs, reference_fa, min_baseq, filt, verbo
                     continue
                 # NB: count_coverage filters on raw base quality only -- it does NOT apply BAQ (see the
                 # ADVANCED_USAGE note, finding N); counts match `samtools mpileup -B`.
-                counts = fh.count_coverage(chrom, start1 - 1, end1, quality_threshold=int(min_baseq),
-                                           read_callback=cb)
-                arr = np.array(counts, dtype=np.int64)
+                arr = _count_window(fh, chrom, start1 - 1, end1, min_baseq, cb, max_depth, chunk_bp, drops)
                 if not arr.any():
                     continue
                 total += arr
@@ -329,10 +380,30 @@ def _init_shard_worker(exon_records):
     _SHARD_G["exon_records"] = exon_records
 
 
+def _shard_ckpt_path(shard_dir, chrom, intervals):
+    return os.path.join(shard_dir, f"{chrom}_{intervals[0][0]}_{intervals[-1][1]}.pkl")
+
+
 def _scan_shard_task(task):
+    """One window. With a shard dir, a completed window is reloaded instead of rescanned (per-window
+    checkpoint: a walltime requeue resumes where it stopped instead of restarting the whole scan)."""
     chrom, intervals, bam_specs, reference_fa, min_baseq, filt = task
-    filt[3]._exon_records = _SHARD_G["exon_records"]
-    return scan_shard(chrom, intervals, bam_specs, reference_fa, min_baseq, filt)
+    args = filt[3]
+    args._exon_records = _SHARD_G["exon_records"]
+    shard_dir = getattr(args, "shard_dir", "") or ""
+    ckpt = _shard_ckpt_path(shard_dir, chrom, intervals) if shard_dir else ""
+    t0 = time.perf_counter()
+    if ckpt and os.path.exists(ckpt):
+        with open(ckpt, "rb") as fh:
+            rows, n, drops = pickle.load(fh)
+        return rows, n, drops, chrom, intervals[0][0], intervals[-1][1], 0.0, True
+    rows, n, drops = scan_shard(chrom, intervals, bam_specs, reference_fa, min_baseq, filt)
+    if ckpt:
+        tmp = ckpt + f".tmp{os.getpid()}"
+        with open(tmp, "wb") as fh:
+            pickle.dump((rows, n, drops), fh, protocol=pickle.HIGHEST_PROTOCOL)
+        os.replace(tmp, ckpt)
+    return rows, n, drops, chrom, intervals[0][0], intervals[-1][1], time.perf_counter() - t0, False
 
 
 def main():
@@ -368,13 +439,31 @@ def main():
     n_candidate_positions = 0
     drops = {"low_total_cov": 0, "low_alt_reads": 0, "low_alt_frac": 0, "high_alt_frac": 0, "multiallelic": 0}
 
+    if args.shard_dir:
+        os.makedirs(args.shard_dir, exist_ok=True)
+    n_tasks = len(tasks)
+    done = [0]
+    t_start = time.perf_counter()
+
     def _take(res):
         nonlocal n_candidate_positions
-        r, n, d = res
+        r, n, d, chrom, w0, w1, dt, reused = res
+        done[0] += 1
+        # progress heartbeat: every 25 windows, any window slower than 60 s, and the last one -- so a
+        # straggler window is visible in the log instead of looking like a hang.
+        if args.verbose and (done[0] % 25 == 0 or dt > 60 or done[0] == n_tasks):
+            extra = " (checkpoint)" if reused else (f" [{d.get('chunks_subsampled', 0)} chunks depth-capped, "
+                                                     f"max {d.get('max_reads_per_chunk', 0):,} reads/chunk]"
+                                                     if d.get("chunks_subsampled") else "")
+            print(f"[candidate_snps] window {done[0]}/{n_tasks} {chrom}:{w0}-{w1} {dt:.0f}s{extra}; "
+                  f"elapsed {time.perf_counter() - t_start:.0f}s", file=sys.stderr, flush=True)
         rows.extend(r)
         n_candidate_positions += n
         for k, v in d.items():
-            drops[k] += v
+            if k == "max_reads_per_chunk":
+                drops[k] = max(drops.get(k, 0), v)
+            else:
+                drops[k] = drops.get(k, 0) + v
 
     if jobs == 1:
         _init_shard_worker(exon_records)
@@ -391,6 +480,10 @@ def main():
 
     rows.sort(key=lambda r: (r["chrom"], r["pos1"], r["ref"]))
     df = pd.DataFrame(rows)
+    if args.verbose and drops.get("chunks_subsampled"):
+        print(f"[candidate_snps] depth cap --max-depth {args.max_depth}: {drops['chunks_subsampled']:,} chunks of "
+              f"{args.depth_chunk_bp} bp were subsampled (deepest: {drops['max_reads_per_chunk']:,} reads)",
+              file=sys.stderr, flush=True)
     # de-silence the scan: report how many candidate positions each filter removed (was invisible).
     if args.verbose:
         print(f"[candidate_snps] {n_candidate_positions:,} positions with coverage -> {len(rows):,} kept; "
@@ -408,6 +501,8 @@ def main():
     _tmp = args.out_tsv + ".tmp"                # atomic write (see build_read_assignment_table)
     df.to_csv(_tmp, sep="\t", index=False)
     os.replace(_tmp, args.out_tsv)
+    if args.shard_dir:
+        shutil.rmtree(args.shard_dir, ignore_errors=True)   # checkpoints only matter until the table exists
 
 
 if __name__ == "__main__":

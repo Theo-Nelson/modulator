@@ -226,6 +226,8 @@ genotype:
   # each BAM once with samtools (native, callback-free count_coverage) for a large per-shard speedup.
   snp_scan_jobs: 0
   snp_scan_window_bp: 1000000
+  snp_scan_max_depth: 1000           # per-sample depth cap for SNP discovery: a 5 kb chunk overlapped by more than this many reads is scanned from a deterministic read-name-hash subsample (allele fractions unbiased). Bounds the time one ultra-deep locus (chrM, rRNA, a top gene) can hold a worker; 0 = exact counts, no cap. The candidate list is the only consumer -- the per-molecule tables still use every read.
+  snp_scan_depth_chunk_bp: 5000      # granularity at which snp_scan_max_depth is evaluated.
   min_alt_reads: 4
   min_total_cov: 8
   min_alt_frac: 0.10

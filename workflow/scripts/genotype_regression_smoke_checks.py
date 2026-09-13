@@ -215,7 +215,89 @@ def main():
         if float(res.iloc[0]["effect_abs_delta_mod_frac"]) < 0.9:
             raise AssertionError("A9: the perfectly allele-linked modification should show a ~1.0 effect.")
 
+    # ---- depth cap + per-window checkpoint in discover_candidate_snps: a 3,000-read het locus and a
+    # 20-read het locus. Cap off must be exact; a cap must bound the deep locus, leave the shallow one
+    # untouched and keep the allele fraction ~0.5; a checkpointed window must be reloaded on a re-run.
+    _check_depth_cap()
+
     print("genotype_regression_smoke_checks: OK")
+
+
+def _check_depth_cap():
+    import os
+    import pickle
+    import random
+    import pysam
+    with tempfile.TemporaryDirectory(prefix="genotype_smoke_depth_") as tmpdir:
+        tmp = Path(tmpdir)
+        random.seed(7)
+        ref = "".join(random.choice("ACGT") for _ in range(400))
+        ref = ref[:149] + "A" + ref[150:]
+        ref = ref[:249] + "C" + ref[250:]
+        (tmp / "ref.fa").write_text(">chrT\n" + ref + "\n")
+        pysam.faidx(str(tmp / "ref.fa"))
+        attrs = ('gene_id "G1"; transcript_id "T1"; gene_name "G1"; ref_gene_name "G1"; zt_label "G1.G1.G1.T1"; '
+                 'gene_index "1"; transcript_index "1"; metagene_index "1"; zn_index "1";')
+        (tmp / "genes.gtf").write_text(f"chrT\tt\ttranscript\t1\t400\t.\t+\t.\t{attrs}\nchrT\tt\texon\t1\t400\t.\t+\t.\t{attrs}\n")
+        hdr = {"HD": {"VN": "1.6", "SO": "coordinate"}, "SQ": [{"SN": "chrT", "LN": 400}]}
+
+        def mk(name, n_deep, n_shallow):
+            reads = []
+            for i in range(n_deep):
+                seq = list(ref[100:200])
+                if i % 2 == 0:
+                    seq[49] = "G"
+                reads.append((100, "".join(seq), f"deep{i}"))
+            for i in range(n_shallow):
+                seq = list(ref[220:280])
+                if i % 2 == 0:
+                    seq[29] = "T"
+                reads.append((220, "".join(seq), f"shal{i}"))
+            with pysam.AlignmentFile(str(name), "wb", header=hdr) as out:
+                for start, seq, qn in sorted(reads):
+                    a = pysam.AlignedSegment()
+                    a.query_name = qn; a.query_sequence = seq; a.flag = 0; a.reference_id = 0
+                    a.reference_start = start; a.mapping_quality = 60; a.cigar = [(0, len(seq))]
+                    a.query_qualities = pysam.qualitystring_to_array("I" * len(seq))
+                    out.write(a)
+            pysam.index(str(name))
+
+        mk(tmp / "s1.bam", 3000, 20)
+        mk(tmp / "s2.bam", 1500, 20)
+        base = [sys.executable, str(ROOT / "discover_candidate_snps.py"), "--bams", str(tmp / "s1.bam"), str(tmp / "s2.bam"),
+                "--reference-fa", str(tmp / "ref.fa"), "--gtf", str(tmp / "genes.gtf"), "--min-alt-reads", "4",
+                "--min-total-cov", "8", "--jobs", "1", "--primary-only", "--verbose"]
+        run(base + ["--out-tsv", str(tmp / "off.tsv"), "--max-depth", "0"])
+        run(base + ["--out-tsv", str(tmp / "cap.tsv"), "--max-depth", "300", "--depth-chunk-bp", "200"])
+        off = pd.read_csv(tmp / "off.tsv", sep="\t")
+        cap = pd.read_csv(tmp / "cap.tsv", sep="\t")
+        if list(off["snp_id"]) != ["chrT:150:A>G", "chrT:250:C>T"] or list(cap["snp_id"]) != list(off["snp_id"]):
+            raise AssertionError(f"depth cap: candidate set changed: {list(off['snp_id'])} vs {list(cap['snp_id'])}")
+        if int(off.loc[0, "total_cov"]) != 4500 or int(off.loc[1, "total_cov"]) != 40:
+            raise AssertionError("depth cap off must give exact counts (4500 / 40)")
+        if not (int(cap.loc[0, "total_cov"]) <= 2 * 300 * 1.1) or abs(float(cap.loc[0, "alt_frac"]) - 0.5) > 0.06:
+            raise AssertionError(f"depth cap must bound the deep locus near 2x300 reads with alt_frac ~0.5 "
+                                 f"(got {int(cap.loc[0, 'total_cov'])}, {cap.loc[0, 'alt_frac']})")
+        if int(cap.loc[1, "total_cov"]) != 40 or float(cap.loc[1, "alt_frac"]) != 0.5:
+            raise AssertionError("depth cap must leave a shallow locus untouched")
+        # checkpoint: plant a completed-window checkpoint, replace s1 by an empty BAM, rerun -> capped result
+        sys.path.insert(0, str(ROOT))
+        import discover_candidate_snps as dcs
+        _exon, merged = dcs.load_gtf_exons(str(tmp / "genes.gtf"))
+        chrom, ivs = next(dcs.iter_window_shards(merged, 1_000_000))
+        shards = tmp / "shards"; shards.mkdir()
+        drops = {"low_total_cov": 0, "low_alt_reads": 0, "low_alt_frac": 0, "high_alt_frac": 0, "multiallelic": 0,
+                 "chunks_subsampled": 0, "max_reads_per_chunk": 0}
+        with open(dcs._shard_ckpt_path(str(shards), chrom, ivs), "wb") as fh:
+            pickle.dump((cap.to_dict("records"), 0, drops), fh)
+        os.remove(tmp / "s1.bam"); os.remove(tmp / "s1.bam.bai")
+        mk(tmp / "s1.bam", 0, 0)
+        run(base + ["--out-tsv", str(tmp / "ck.tsv"), "--max-depth", "300", "--depth-chunk-bp", "200", "--shard-dir", str(shards)])
+        ck = pd.read_csv(tmp / "ck.tsv", sep="\t")
+        if list(ck["snp_id"]) != list(cap["snp_id"]) or int(ck.loc[0, "total_cov"]) != int(cap.loc[0, "total_cov"]):
+            raise AssertionError("per-window checkpoint was not reused on re-run")
+        if shards.exists():
+            raise AssertionError("shard dir must be removed after a successful run")
 
 
 if __name__ == "__main__":
