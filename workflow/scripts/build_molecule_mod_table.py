@@ -16,6 +16,7 @@ import numpy as np
 import pandas as pd
 import pysam
 
+from genotype_utils import ParquetBlockWriter, is_parquet_path, write_empty_parquet
 from genotype_utils import (load_read_assignments, normalize_string_series, robust_load_summary,
                             run_process_jobs, sample_name_from_bam, safe_float, safe_int, write_chrom_index)
 
@@ -729,6 +730,9 @@ def _meta_by_zt(summary_tsv):
 
 def _empty_output(out_tsv):
     os.makedirs(os.path.dirname(out_tsv) or ".", exist_ok=True)
+    if is_parquet_path(out_tsv):
+        write_empty_parquet(out_tsv, OUTPUT_COLUMNS)
+        return
     pd.DataFrame(columns=OUTPUT_COLUMNS).to_csv(out_tsv, sep="\t", index=False)
 
 
@@ -926,7 +930,10 @@ def main():
         tmp_out = args.out_tsv + ".tmp"
         wrote_header = False
         blocks = []
-        with open(tmp_out, "w") as out_fh:
+        # parquet output: one row group per (chrom, window) block, same block order as the TSV
+        pqw = ParquetBlockWriter(args.out_tsv, [c for c in FINAL_COLUMNS] if use_tags else OUTPUT_COLUMNS) \
+            if is_parquet_path(args.out_tsv) else None
+        with (open(tmp_out, "w") if pqw is None else open(os.devnull, "w")) as out_fh:
             # Stream chromosome-by-chromosome, window-by-window, in sorted order. Each (chrom, window)
             # block's rows are joined + sorted in isolation and appended; because (chrom, start0) lead the
             # sort key and windows partition start0, appending per-window-sorted blocks reproduces the
@@ -957,13 +964,19 @@ def main():
                     df = df.sort_values(["chrom", "start0", "mod_site_id", "sample", "qname"]).reset_index(drop=True)
                     if use_tags:
                         df = df[[c for c in FINAL_COLUMNS if c in df.columns]]
-                    df.to_csv(out_fh, sep="\t", index=False, header=not wrote_header)
+                    if pqw is not None:
+                        pqw.write(chrom, df)
+                    else:
+                        df.to_csv(out_fh, sep="\t", index=False, header=not wrote_header)
                     wrote_header = True
                     del df, parts
                 out_fh.flush()
                 blocks.append((chrom, off_chrom, out_fh.tell() - off_chrom))
-        os.replace(tmp_out, args.out_tsv)
-        write_chrom_index(args.out_tsv, blocks)
+        if pqw is not None:
+            pqw.close()
+        else:
+            os.replace(tmp_out, args.out_tsv)
+            write_chrom_index(args.out_tsv, blocks)
         success = True
     finally:
         if success:

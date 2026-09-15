@@ -220,7 +220,67 @@ def main():
     # untouched and keep the allele fraction ~0.5; a checkpointed window must be reloaded on a re-run.
     _check_depth_cap()
 
+    # ---- parquet per-read tables: TSV -> parquet -> per-chromosome reads must equal the TSV reads
+    # (values, NaN pattern, and read_csv-style dtypes), and the reverse conversion must round-trip.
+    _check_parquet_roundtrip()
+
     print("genotype_regression_smoke_checks: OK")
+
+
+def _check_parquet_roundtrip():
+    import numpy as np
+    sys.path.insert(0, str(ROOT))
+    from genotype_utils import open_chrom_table
+    with tempfile.TemporaryDirectory(prefix="genotype_smoke_parquet_") as tmpdir:
+        tmp = Path(tmpdir)
+        rows = []
+        for chrom in ("chr2", "chr10"):
+            for i in range(6):
+                rows.append({"sample": "S1", "qname": f"r{chrom}_{i}", "mod_site_id": f"{chrom}:{100+i}-{101+i}:+:a",
+                             "chrom": chrom, "start0": 100 + i, "end0": 101 + i, "strand": "+", "target_mod_code": "a",
+                             "call_code": "a" if i % 2 else "-", "state_detail": "modified" if i % 2 else "canonical",
+                             "target_modified": i % 2, "call_prob": 0.5 + i / 20, "canonical_base": "A",
+                             "modified_primary_base": "A", "fail": False, "within_alignment": True,
+                             "gene_id": "G1", "gene_name": "G1", "metagene_index": 1 if chrom == "chr2" else np.nan,
+                             "ZT": "G1.G1.G1.T1", "ZG": 1, "ZN": 1, "ZM": 1, "assigned": True,
+                             "assignment_gene_id": "G1", "assignment_gene_name": "G1", "gene_index": 1,
+                             "transcript_index": 1, "assignment_metagene_index": 1, "classification": "EXACT",
+                             "usable": True})
+        df = pd.DataFrame(rows)
+        tsv = tmp / "t.tsv"; df.to_csv(tsv, sep="\t", index=False)
+        run([sys.executable, str(ROOT / "convert_table_format.py"), "--in", str(tsv), "--out", str(tmp / "t.parquet")])
+        run([sys.executable, str(ROOT / "convert_table_format.py"), "--in", str(tmp / "t.parquet"), "--out", str(tmp / "back.tsv")])
+        a, b = open_chrom_table(str(tsv)), open_chrom_table(str(tmp / "t.parquet"))
+        if a.chroms != b.chroms or a.header_cols != b.header_cols:
+            raise AssertionError("parquet: chromosome index or columns differ from the TSV")
+        for chrom in a.chroms:
+            x, y = a.read(chrom), b.read(chrom)
+            for c in x.columns:
+                if str(x[c].dtype) != str(y[c].dtype) and c != "metagene_index":
+                    raise AssertionError(f"parquet: dtype of {c} on {chrom}: {x[c].dtype} vs {y[c].dtype}")
+                try:   # 1.0 (TSV float inference for an int column with NaN elsewhere) == 1 (typed int)
+                    pd.testing.assert_series_equal(x[c].reset_index(drop=True), y[c].reset_index(drop=True),
+                                                   check_dtype=False, check_names=False, check_exact=False)
+                except AssertionError as e:
+                    raise AssertionError(f"parquet: values of {c} on {chrom} differ: {e}") from None
+        # a block larger than pyarrow's default 1,048,576-row group must not desynchronise the index
+        from genotype_utils import ParquetBlockWriter
+        import pyarrow.parquet as pq
+        big = pd.DataFrame({"sample": "S", "qname": np.arange(1_300_000).astype(str), "chrom": "chrB",
+                            "start0": np.arange(1_300_000), "target_modified": 0})
+        w = ParquetBlockWriter(str(tmp / "big.parquet"), list(big.columns)); w.write("chrB", big); w.close()
+        pf = pq.ParquetFile(str(tmp / "big.parquet"))
+        got = open_chrom_table(str(tmp / "big.parquet")).read("chrB")
+        if pf.metadata.num_row_groups != 1 or len(got) != 1_300_000 or int(got["start0"].iloc[-1]) != 1_299_999:
+            raise AssertionError("parquet: a >1M-row block must be exactly one recorded row group")
+        try:   # typed ints come back as "1" where the pandas-written TSV had "1.0": numerically equal
+            _key = ["chrom", "start0", "qname"]   # the converter writes chromosomes in sorted order
+            pd.testing.assert_frame_equal(
+                pd.read_csv(tmp / "back.tsv", sep="\t").sort_values(_key).reset_index(drop=True),
+                pd.read_csv(tsv, sep="\t").sort_values(_key).reset_index(drop=True),
+                check_dtype=False, check_exact=False)
+        except AssertionError as e:
+            raise AssertionError(f"parquet -> tsv round trip differs: {e}") from None
 
 
 def _check_depth_cap():

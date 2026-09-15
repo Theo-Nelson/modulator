@@ -9,7 +9,7 @@ import tempfile
 import pandas as pd
 import pysam
 
-from genotype_utils import run_process_jobs, sample_name_from_bam, safe_int, write_chrom_index
+from genotype_utils import ParquetBlockWriter, is_parquet_path, write_empty_parquet, run_process_jobs, sample_name_from_bam, safe_int, write_chrom_index
 
 OUT_COLS = [
     "sample", "qname", "snp_id", "chrom", "pos1", "start0", "end0", "ref", "alt",
@@ -174,6 +174,9 @@ def main():
     cand = pd.read_csv(args.candidate_snps, sep="\t", low_memory=False)
     os.makedirs(os.path.dirname(args.out_tsv) or ".", exist_ok=True)
     if cand.empty:
+        if is_parquet_path(args.out_tsv):
+            write_empty_parquet(args.out_tsv, OUT_COLS)
+            return
         out = pd.DataFrame(columns=OUT_COLS)
         _tmp = args.out_tsv + ".tmp"           # atomic write (see build_read_assignment_table)
         out.to_csv(_tmp, sep="\t", index=False)
@@ -212,9 +215,10 @@ def main():
 
         _tmp = args.out_tsv + ".tmp"               # atomic write (see build_read_assignment_table)
         blocks = []
-        with open(_tmp, "w") as out:
+        pqw = ParquetBlockWriter(args.out_tsv, OUT_COLS) if is_parquet_path(args.out_tsv) else None
+        with (open(_tmp, "w") if pqw is None else open(os.devnull, "w")) as out:
             wrote_header = False
-            if not by_chrom:
+            if not by_chrom and pqw is None:
                 pd.DataFrame(columns=OUT_COLS).to_csv(out, sep="\t", index=False)
                 wrote_header = True
             for chrom in sorted(by_chrom):
@@ -227,13 +231,19 @@ def main():
                         .drop_duplicates(["sample", "qname", "snp_id"], keep="first")
                         .reset_index(drop=True))
                 off = out.tell()
-                df.to_csv(out, sep="\t", index=False, header=not wrote_header)
+                if pqw is not None:
+                    pqw.write(chrom, df)
+                else:
+                    df.to_csv(out, sep="\t", index=False, header=not wrote_header)
                 wrote_header = True
                 out.flush()
                 blocks.append((chrom, off, out.tell() - off))
                 del df
-        os.replace(_tmp, args.out_tsv)
-        write_chrom_index(args.out_tsv, blocks, header_in_first_block=(len(blocks) > 0))
+        if pqw is not None:
+            pqw.close()
+        else:
+            os.replace(_tmp, args.out_tsv)
+            write_chrom_index(args.out_tsv, blocks, header_in_first_block=(len(blocks) > 0))
     finally:
         shutil.rmtree(shard_dir, ignore_errors=True)
 

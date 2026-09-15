@@ -56,6 +56,7 @@ STAGE_ORDER = [
 class PipelinePaths:
     root: Path
     prefix: str
+    molecule_ext: str = ".tsv"   # ".tsv" or ".parquet" for the two per-read genotype tables
 
     @property
     def results(self) -> Path:
@@ -242,7 +243,7 @@ class PipelinePaths:
 
     @property
     def geno_molecule_snps(self) -> Path:
-        return self.genotype / f"{self.prefix}_molecule_snps.tsv"
+        return self.genotype / f"{self.prefix}_molecule_snps{self.molecule_ext}"
 
     @property
     def geno_candidate_mod_sites(self) -> Path:
@@ -254,7 +255,7 @@ class PipelinePaths:
 
     @property
     def geno_molecule_mod_calls(self) -> Path:
-        return self.genotype / f"{self.prefix}_molecule_mod_calls.tsv"
+        return self.genotype / f"{self.prefix}_molecule_mod_calls{self.molecule_ext}"
 
     @property
     def geno_snp_tx(self) -> Path:
@@ -423,6 +424,10 @@ class ModulatorPipeline:
         self._substep_time: list[tuple[str, float]] | None = None
         self.prefix = str(config.get("prefix", "modulator_run"))
         self.paths = PipelinePaths(self.root, self.prefix)
+        _fmt = str(self.config.get("genotype", {}).get("molecule_table_format", "parquet")).strip().lower()
+        if _fmt not in ("parquet", "tsv"):
+            raise ValueError(f"genotype.molecule_table_format must be 'parquet' or 'tsv', got {_fmt!r}")
+        self.paths.molecule_ext = ".parquet" if _fmt == "parquet" else ".tsv"
         # Samplesheet (optional) is the sample SOURCE + the condition metadata; it stages the BAMs
         # and therefore must run before sample discovery.
         self._staged_bams_dir: Path | None = None

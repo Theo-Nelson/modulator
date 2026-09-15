@@ -20,6 +20,7 @@ dependencies = [
   "scipy",
   "matplotlib",
   "pyroaring",
+  "pyarrow",
 ]
 
 # NOTE: the stage implementations live in workflow/scripts/*.py and are executed as subprocesses by the

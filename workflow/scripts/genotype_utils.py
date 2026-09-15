@@ -775,9 +775,143 @@ def normalize_string_series(series: pd.Series, fill_value: str = "") -> pd.Serie
 # O(matching rows) instead of O(whole table).
 # --------------------------------------------------------------------------------------
 
+def is_parquet_path(path) -> bool:
+    return str(path).endswith(".parquet")
+
+
 def tsv_header(path: str) -> List[str]:
+    """Column names of a TSV (first line) or of a parquet table (schema)."""
+    if is_parquet_path(path):
+        import pyarrow.parquet as pq
+        return list(pq.ParquetFile(str(path)).schema_arrow.names)
     with open(path) as fh:
         return fh.readline().rstrip("\n").split("\t")
+
+
+# ---- parquet per-read tables ------------------------------------------------------------------
+# Per-read tables (molecule mod calls, molecule SNPs) can be written as parquet: one row group per
+# (chromosome, window) block, zstd + dictionary encoding (~5-10x smaller than the TSV), and the same
+# `.chromidx.tsv` sidecar mapping a chromosome to its row groups. Column types are FIXED by name so a
+# chromosome read back gives the dtypes pandas would infer from the TSV: nullable int64 columns come
+# back as int64 when no value is missing and float64 otherwise (exactly read_csv's behaviour), string
+# nulls come back as NaN, "" is stored as null (read_csv turns both into NaN).
+PARQUET_INT_COLS = {"start0", "end0", "pos1", "target_modified", "baseq", "mapq", "gene_index",
+                    "transcript_index", "ZG", "ZN", "ZM", "metagene_index", "assignment_metagene_index"}
+PARQUET_FLOAT_COLS = {"call_prob"}
+PARQUET_BOOL_COLS = {"fail", "within_alignment", "usable", "assigned"}
+
+
+def arrow_schema_for(columns) -> "pyarrow.Schema":
+    import pyarrow as pa
+    fields = []
+    for c in columns:
+        if c in PARQUET_INT_COLS:
+            t = pa.int64()
+        elif c in PARQUET_FLOAT_COLS:
+            t = pa.float64()
+        elif c in PARQUET_BOOL_COLS:
+            t = pa.bool_()
+        else:
+            t = pa.string()
+        fields.append(pa.field(c, t, nullable=True))
+    return pa.schema(fields)
+
+
+_TRUE = {"true", "1", "1.0"}
+_FALSE = {"false", "0", "0.0"}
+
+
+def frame_to_arrow(df: pd.DataFrame, schema) -> "pyarrow.Table":
+    """Typed conversion of a pandas block to the table schema (see PARQUET_*_COLS)."""
+    import pyarrow as pa
+    arrays = []
+    for field in schema:
+        c = field.name
+        if c in df.columns:
+            col = df[c]
+        else:
+            col = pd.Series([None] * len(df), index=df.index, dtype=object)
+        if field.type == pa.int64():
+            v = pd.to_numeric(col.replace("", np.nan), errors="coerce").astype("float64")
+            arr = pa.Array.from_pandas(v, type=pa.float64()).cast(pa.int64(), safe=False)
+        elif field.type == pa.float64():
+            arr = pa.Array.from_pandas(pd.to_numeric(col, errors="coerce").astype("float64"), type=pa.float64())
+        elif field.type == pa.bool_():
+            def _b(x):
+                if x is None or (isinstance(x, float) and np.isnan(x)):
+                    return None
+                if isinstance(x, (bool, np.bool_)):
+                    return bool(x)
+                sx = str(x).strip().lower()
+                return True if sx in _TRUE else False if sx in _FALSE else None
+            arr = pa.array([_b(x) for x in col.tolist()], type=pa.bool_())
+        else:
+            vals = col.astype(object).where(col.notna(), None).tolist()
+            vals = [None if (x is None or (isinstance(x, float) and np.isnan(x)) or str(x) == "") else str(x)
+                    for x in vals]
+            arr = pa.array(vals, type=pa.string())
+        arrays.append(arr)
+    return pa.Table.from_arrays(arrays, schema=schema)
+
+
+class ParquetBlockWriter:
+    """Streams (chrom, DataFrame) blocks into one parquet file -- one row group per block -- and
+    writes the chromosome sidecar on close. Blocks must be single-chromosome and arrive in the same
+    order a TSV writer would append them."""
+
+    def __init__(self, path: str, columns, compression: str = "zstd"):
+        import pyarrow.parquet as pq
+        self.path = str(path)
+        self.schema = arrow_schema_for(list(columns))
+        self._tmp = self.path + ".tmp"
+        self._w = pq.ParquetWriter(self._tmp, self.schema, compression=compression, use_dictionary=True,
+                                   write_statistics=True)
+        self._blocks = []   # (chrom, row_group_index, nrows)
+        self._rg = 0
+
+    MAX_ROWS_PER_GROUP = 2_000_000
+
+    def write(self, chrom: str, df: pd.DataFrame) -> None:
+        """One recorded row group per slice of <= MAX_ROWS_PER_GROUP rows. `row_group_size` is passed
+        explicitly: pyarrow otherwise splits a large table into 1,048,576-row groups on its own, which
+        would desynchronise the chromosome -> row-group index."""
+        n = len(df)
+        if n == 0:
+            return
+        for s0 in range(0, n, self.MAX_ROWS_PER_GROUP):
+            part = df.iloc[s0:s0 + self.MAX_ROWS_PER_GROUP]
+            self._w.write_table(frame_to_arrow(part, self.schema), row_group_size=len(part))
+            self._blocks.append((str(chrom), self._rg, int(len(part))))
+            self._rg += 1
+
+    def close(self) -> None:
+        self._w.close()
+        import pyarrow.parquet as pq
+        n_rg = pq.ParquetFile(self._tmp).metadata.num_row_groups
+        if n_rg != len(self._blocks):
+            raise RuntimeError(f"parquet row-group count {n_rg} != recorded blocks {len(self._blocks)} ({self.path})")
+        os.replace(self._tmp, self.path)
+        write_chrom_index(self.path, self._blocks)
+
+
+
+def write_empty_parquet(path: str, columns) -> None:
+    import pyarrow.parquet as pq
+    schema = arrow_schema_for(list(columns))
+    pq.write_table(schema.empty_table(), str(path), compression="zstd")
+    write_chrom_index(str(path), [])
+
+
+def _parquet_to_pandas(tbl, dtype=None) -> pd.DataFrame:
+    df = tbl.to_pandas(use_threads=True)
+    for c in df.columns:
+        if df[c].dtype == object:
+            df[c] = df[c].where(df[c].notna(), np.nan)   # string nulls -> NaN, as read_csv gives
+    if dtype:
+        cast = {k: v for k, v in dtype.items() if k in df.columns} if isinstance(dtype, dict) else dtype
+        if cast:
+            df = df.astype(cast)
+    return df
 
 
 def shard_tsv_by_chrom(path: str, out_dir: str, chrom_col: str = "chrom") -> Dict[str, str]:
@@ -866,6 +1000,8 @@ def load_chrom_index(path: str):
             if not first.startswith("#size\t") or int(first.split("\t")[1]) != size:
                 return None
             for line in fh:
+                if line.startswith("#"):
+                    continue
                 p = line.rstrip("\n").split("\t")
                 if len(p) >= 3:
                     out.setdefault(p[0], []).append((int(p[1]), int(p[2])))
@@ -981,6 +1117,17 @@ class ChromTable:
 
     def __init__(self, path: str, chrom_col: str = "chrom"):
         self.path = str(path)
+        self.parquet = is_parquet_path(self.path)
+        if self.parquet:
+            import pyarrow.parquet as pq
+            self._pf = pq.ParquetFile(self.path)
+            self.header_cols = list(self._pf.schema_arrow.names)
+            idx = load_chrom_index(self.path)
+            if idx is None:
+                idx = self._build_parquet_index(chrom_col)
+            self.index = idx or {}
+            self.chroms = sorted(self.index)
+            return
         self.header_cols = tsv_header(self.path) if os.path.getsize(self.path) else []
         idx = load_chrom_index(self.path)
         if idx is None:
@@ -990,7 +1137,36 @@ class ChromTable:
         with open(self.path, "rb") as fh:
             self._header_bytes = fh.readline()
 
+    def _build_parquet_index(self, chrom_col):
+        """{chrom: [(row_group, nrows)]} from the row-group statistics (each row group is one chrom)."""
+        out: Dict[str, list] = {}
+        md = self._pf.metadata
+        ci = self.header_cols.index(chrom_col) if chrom_col in self.header_cols else -1
+        for rg in range(md.num_row_groups):
+            g = md.row_group(rg)
+            st = g.column(ci).statistics if ci >= 0 else None
+            if st is not None and st.has_min_max and st.min == st.max:
+                chrom = str(st.min)
+            else:
+                chrom = str(self._pf.read_row_group(rg, columns=[chrom_col]).column(0)[0].as_py()) if g.num_rows else None
+            if chrom is not None:
+                out.setdefault(chrom, []).append((rg, g.num_rows))
+        try:
+            write_chrom_index(self.path, [(c, rg, n) for c, l in out.items() for rg, n in l])
+        except OSError:
+            pass
+        return out
+
+    def _read_parquet(self, chrom, usecols=None, dtype=None):
+        rgs = [rg for rg, _n in self.index.get(chrom, [])]
+        cols = [c for c in usecols if c in self.header_cols] if usecols is not None else None
+        if not rgs:
+            return pd.DataFrame(columns=cols if cols is not None else self.header_cols)
+        return _parquet_to_pandas(self._pf.read_row_groups(rgs, columns=cols, use_threads=True), dtype)
+
     def read(self, chrom: str, usecols=None, dtype=None, **kw) -> pd.DataFrame:
+        if self.parquet:
+            return self._read_parquet(chrom, usecols, dtype)
         ranges = self.index.get(chrom)
         if usecols is not None:
             usecols = [c for c in usecols if c in self.header_cols]
@@ -1006,6 +1182,11 @@ class ChromTable:
     def iter_chunks(self, chrom: str, usecols=None, dtype=None, chunksize: int = 200000, **kw):
         """Stream one chromosome as DataFrame chunks (bounded memory; the byte-range reader stays
         open until the generator is exhausted or closed)."""
+        if self.parquet:
+            cols = [c for c in usecols if c in self.header_cols] if usecols is not None else None
+            for rg, _n in self.index.get(chrom, []):
+                yield _parquet_to_pandas(self._pf.read_row_group(rg, columns=cols, use_threads=True), dtype)
+            return
         ranges = self.index.get(chrom)
         if usecols is not None:
             usecols = [c for c in usecols if c in self.header_cols]
