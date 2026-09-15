@@ -2,12 +2,14 @@
 
 import argparse
 import gzip
+import json
 import os
 import re
 import shutil
 import subprocess
 import sys
 import tempfile
+import zlib
 from collections import defaultdict
 
 import numpy as np
@@ -146,6 +148,15 @@ def parse_args():
                          "needed. Emits implicit-canonical calls (parse_mm_groups) so it matches modkit on "
                          "IMPLICIT-MM BAMs -- validated on real chrEBV: identical row count, canonical count "
                          "identical, 4/686765 rows differ at a float32 argmax tie-break (Jaccard 1.0000).")
+    ap.add_argument("--shard-dir", default="",
+                    help="Checkpoint directory for the per-(sample x chromosome) extraction shards (default: "
+                         "<out-tsv>.molmod_shards). A shard whose .done marker exists is reused by a re-run, so a "
+                         "requeued/restarted stage resumes instead of re-extracting every BAM. Removed on success.")
+    ap.add_argument("--max-reads-per-site", type=int, default=0,
+                    help="Per-sample cap on reads emitted per candidate site: when a site's expected per-sample "
+                         "depth (total_cov / n_samples from the candidate table) exceeds this, reads are kept by a "
+                         "deterministic read-name hash with probability cap/depth (unbiased modified fraction). "
+                         "Bounds the per-read table at ultra-deep sites. 0 = off (every covering read).")
     ap.add_argument("--verbose", action="store_true")
     return ap.parse_args()
 
@@ -444,7 +455,26 @@ def _read_tags(read):
     return (str(_g("ZT", "")), safe_int(_g("ZG", "")), safe_int(_g("ZN", "")), safe_int(_g("ZM", "")))
 
 
-def extract_rows_pysam(bam, chrom_lookup, chrom, shard_path, chunk_rows, verbose=False, window_bp=1_000_000):
+def _site_keep_prob(chrom_lookup, cap):
+    """{ref position: keep probability} for sites whose expected per-sample depth exceeds `cap`."""
+    out = {}
+    if not cap or cap <= 0:
+        return out
+    for (_c, p), sites in chrom_lookup.items():
+        best = 1.0
+        for site in sites:
+            cov = float(site.get("total_cov", 0) or 0)
+            ns = max(1, int(site.get("n_samples", 1) or 1))
+            depth = cov / ns
+            if depth > cap:
+                best = min(best, cap / depth)
+        if best < 1.0:
+            out[int(p)] = best
+    return out
+
+
+def extract_rows_pysam(bam, chrom_lookup, chrom, shard_path, chunk_rows, verbose=False, window_bp=1_000_000,
+                       max_reads_per_site=0):
     """Stream one chromosome of a modBAM with pysam and emit the same per-(read, candidate site) rows
     the modkit path produces -- one read at a time, so peak RSS is ~100MB regardless of BAM/chrom size
     (never OOMs). Reproduces modkit `extract calls --no-filtering --mapped-only` semantics -- INCLUDING
@@ -487,6 +517,8 @@ def extract_rows_pysam(bam, chrom_lookup, chrom, shard_path, chunk_rows, verbose
         bamf.close()
         return chrom, {}, 0
     call_prob1 = float(str(f32(1.0)))
+    keep_prob = _site_keep_prob(chrom_lookup, int(max_reads_per_site or 0))
+    n_capped = 0
     for read in bamf.fetch(chrom):
         if read.is_unmapped or read.is_secondary or read.is_supplementary:
             continue
@@ -527,6 +559,16 @@ def extract_rows_pysam(bam, chrom_lookup, chrom, shard_path, chunk_rows, verbose
             continue
         cand_q = dict(zip(qs[pi[hit]].tolist(), cand[hit].tolist()))   # query pos -> ref pos (ascending)
         qname = read.query_name
+        if keep_prob:
+            # deterministic per-read draw: the same read is kept/dropped consistently at every capped site
+            h = (zlib.crc32(qname.encode()) & 0xFFFF) / 65536.0
+            dropped = [q for q, rp in cand_q.items() if rp in keep_prob and h >= keep_prob[rp]]
+            if dropped:
+                n_capped += len(dropped)
+                for q in dropped:
+                    del cand_q[q]
+                if not cand_q:
+                    continue
         ref_strand = "-" if read.is_reverse else "+"
         zt, zg, zn, zm = _read_tags(read)
         nseq = len(seq)
@@ -660,7 +702,7 @@ def extract_rows_pysam(bam, chrom_lookup, chrom, shard_path, chunk_rows, verbose
     _flush()
     bamf.close()
     if verbose:
-        print(f"[info] pysam extract done: {sample} {chrom} rows={total}", file=sys.stderr, flush=True)
+        print(f"[info] pysam extract done: {sample} {chrom} rows={total}" + (f" (read-cap dropped {n_capped} site-observations)" if n_capped else ""), file=sys.stderr, flush=True)
     if n_mm_parse_fail:
         print(f"[warn] pysam extract: {sample} {chrom}: skipped {n_mm_parse_fail} read(s) whose MM tag "
               f"declared listed calls but htslib returned none (unparsable MM, e.g. low-complexity reads "
@@ -690,6 +732,51 @@ def _empty_output(out_tsv):
     pd.DataFrame(columns=OUTPUT_COLUMNS).to_csv(out_tsv, sep="\t", index=False)
 
 
+def _marker_path(shard_path):
+    return shard_path + ".done"
+
+
+def _load_marker(shard_path):
+    """Result tuple of a finished shard task, or None. Verifies every part file still exists."""
+    mp = _marker_path(shard_path)
+    if not os.path.exists(mp):
+        return None
+    try:
+        with open(mp) as fh:
+            d = json.load(fh)
+        parts = d["parts"]
+        if isinstance(parts, dict):
+            parts = {int(k): list(v) for k, v in parts.items()}
+            files = [p for pl in parts.values() for p in pl]
+        else:
+            parts = list(parts)
+            files = parts
+        if all(os.path.exists(p) for p in files):
+            return (d["chrom"], parts, int(d["nrows"]))
+    except Exception:
+        pass
+    return None
+
+
+def _write_marker(shard_path, result):
+    chrom, parts, nrows = result
+    mp = _marker_path(shard_path)
+    with open(mp + ".tmp", "w") as fh:
+        json.dump({"chrom": chrom, "parts": parts, "nrows": int(nrows or 0)}, fh)
+    os.replace(mp + ".tmp", mp)
+
+
+def _run_marked_task(kind, shard_path, task):
+    """Run one extraction task and write its .done marker (checkpoint) on completion.
+    (run_process_jobs calls fn(*args), so the three fields are positional.)"""
+    if kind == "pysam":
+        res = extract_rows_pysam(*task)
+    else:
+        res = extract_rows_from_bam(*task)
+    _write_marker(shard_path, res)
+    return res
+
+
 def main():
     args = parse_args()
     cand = pd.read_csv(args.candidate_sites_tsv, sep="\t", low_memory=False)
@@ -702,7 +789,13 @@ def main():
         key = (str(row["chrom"]), int(row["start0"]))
         lookup.setdefault(key, []).append(row)
 
-    shard_dir = tempfile.mkdtemp(prefix="molmod_shards.", dir=os.path.dirname(args.out_tsv) or ".")
+    # Deterministic checkpoint dir: a restarted run finds its finished shards (marker files) and skips
+    # them. The old per-invocation mkdtemp made every requeue start from zero on a cohort.
+    shard_dir = args.shard_dir or (args.out_tsv + ".molmod_shards")
+    os.makedirs(shard_dir, exist_ok=True)
+    if os.path.exists(args.out_tsv + ".tmp"):
+        os.remove(args.out_tsv + ".tmp")          # a half-written table from a killed attempt
+    success = False
     try:
         if args.pre_extracted:
             # Pre-extracted mode: `modkit extract calls` was run ONCE per subset BAM in a separate
@@ -729,19 +822,31 @@ def main():
             n_tasks = len(args.bams) * len(chroms)
             jobs = max(1, min(int(args.jobs), n_tasks))
             task_args = []
+            results = []
+            n_reused = 0
             for bam in args.bams:
                 sample = sample_name_from_bam(bam)
                 for chrom in chroms:
                     shard_path = os.path.join(shard_dir, f"{sample}.{chrom}.pkl")
-                    task_args.append((bam, chrom_lookups[chrom], chrom, shard_path,
-                                      args.chunk_rows, args.verbose, args.window_bp))
-            if jobs == 1:
-                results = [extract_rows_pysam(*item) for item in task_args]
-            else:
-                results = run_process_jobs(
-                    extract_rows_pysam, task_args, jobs,
-                    verbose=args.verbose, label="build_molecule_mod_table[pysam]",
-                )
+                    done = _load_marker(shard_path)
+                    if done is not None:
+                        results.append(done)
+                        n_reused += 1
+                        continue
+                    task_args.append(("pysam", shard_path, (bam, chrom_lookups[chrom], chrom, shard_path,
+                                      args.chunk_rows, args.verbose, args.window_bp, int(args.max_reads_per_site or 0))))
+            if n_reused and args.verbose:
+                print(f"[info] build_molecule_mod_table: reusing {n_reused} finished shard(s) from {shard_dir}",
+                      file=sys.stderr, flush=True)
+            jobs = max(1, min(int(args.jobs), max(1, len(task_args))))
+            if task_args:
+                if jobs == 1:
+                    results += [_run_marked_task(*item) for item in task_args]
+                else:
+                    results += run_process_jobs(
+                        _run_marked_task, task_args, jobs,
+                        verbose=args.verbose, label="build_molecule_mod_table[pysam]",
+                    )
         else:
             # B: shard per (BAM x candidate-site window) so heavy chromosomes split into many balanced
             # tasks instead of one monolithic per-chrom extract that serializes the tail.
@@ -761,13 +866,22 @@ def main():
                                       threads_per_job, wlookup, region, shard_path, args.interval_size,
                                       args.chunk_rows, args.verbose))
 
-            if jobs == 1:
-                results = [extract_rows_from_bam(*item) for item in task_args]
-            else:
-                results = run_process_jobs(
-                    extract_rows_from_bam, task_args, jobs,
-                    verbose=args.verbose, label="build_molecule_mod_table",
-                )
+            marked = []
+            results = []
+            for item in task_args:
+                done = _load_marker(item[7])
+                if done is not None:
+                    results.append(done)
+                else:
+                    marked.append(("modkit", item[7], item))
+            if marked:
+                if jobs == 1:
+                    results += [_run_marked_task(*item) for item in marked]
+                else:
+                    results += run_process_jobs(
+                        _run_marked_task, marked, jobs,
+                        verbose=args.verbose, label="build_molecule_mod_table",
+                    )
 
         # Group shard files by chromosome and window. total_rows tells us whether anything survived.
         shards_by_chrom = defaultdict(lambda: defaultdict(list))   # chrom -> window -> [parts]
@@ -850,8 +964,13 @@ def main():
                 blocks.append((chrom, off_chrom, out_fh.tell() - off_chrom))
         os.replace(tmp_out, args.out_tsv)
         write_chrom_index(args.out_tsv, blocks)
+        success = True
     finally:
-        shutil.rmtree(shard_dir, ignore_errors=True)
+        if success:
+            shutil.rmtree(shard_dir, ignore_errors=True)   # checkpoints matter only until the table exists
+        else:
+            print(f"[info] build_molecule_mod_table: keeping shard checkpoints in {shard_dir} for resume",
+                  file=sys.stderr, flush=True)
 
 
 if __name__ == "__main__":

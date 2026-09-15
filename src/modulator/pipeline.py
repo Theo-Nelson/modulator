@@ -1798,6 +1798,17 @@ class ModulatorPipeline:
             "--out-tsv", str(self.paths.geno_candidate_mod_sites),
             "--out-bed", str(self.paths.geno_candidate_mod_bed),
             "--min-total-cov", str(int(geno.get("min_mod_site_cov", 1))),
+            # Candidate mod sites: a modified-read floor (>= 1 drops positions with no modified call at
+            # all), optional fraction / cis-distance filters, and a row budget for the per-read table.
+            # Without a bound every covered position becomes a candidate (a 31-library cohort: 1.4 M
+            # sites and a ~2.8 TB per-read table that no association test can load).
+            "--min-total-nmod", str(int(geno.get("min_mod_site_nmod", 1))),
+            "--min-site-frac", str(float(geno.get("min_mod_site_frac", 0.0))),
+            "--min-frac-cov", str(int(geno.get("min_mod_site_frac_cov", 20))),
+            "--max-snp-distance-bp", str(int(geno.get("mod_site_max_snp_distance_bp", 0))),
+            # row budget: small runs keep every site; a cohort is bounded automatically by keeping the
+            # sites with the strongest evidence of modification first
+            "--max-rows", str(int(geno.get("mod_table_row_budget", 400_000_000))),
         ]
         # Restrict candidate mod sites to those that can pair with a candidate SNP (same
         # context_key on a shared read). Lossless for snp_mod_assoc/
@@ -1994,6 +2005,10 @@ class ModulatorPipeline:
             mod_args += ["--pysam"]
             if self.verbose:
                 print("[modulator] build_molecule_mod_table: pysam streaming backend", flush=True)
+        # per-(sample x chromosome) checkpoints so a requeued stage resumes the extraction, plus a
+        # per-site read cap that bounds the table at ultra-deep sites (0 = every read)
+        mod_args += ["--shard-dir", str(self.paths.results / "tmp" / self.prefix / "molmod_shards"),
+                     "--max-reads-per-site", str(int(geno.get("max_reads_per_mod_site", 1000)))]
         self.run_python_script("build_molecule_mod_table.py", mod_args, label="build_molecule_mod_table")
         self.run_python_script(
             "test_snp_transcript_assoc.py",
