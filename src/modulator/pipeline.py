@@ -2504,6 +2504,8 @@ class ModulatorPipeline:
                 # Default the cap to the reference GTF's gene count so every annotated gene is
                 # lookup-able (no silent truncation); an explicit browser_max_genes still overrides.
                 "--max-genes", str(int(report_cfg.get("browser_max_genes") or self._reference_gene_count())),
+                # bound the embedded per-gene site payload on large cohorts (0 = every site x fragmentform)
+                "--max-sites-per-gene", str(int(report_cfg.get("browser_max_sites_per_gene", 0) or 0)),
                 "--verbose",
             ]
             for flag, path in (

@@ -861,6 +861,45 @@ def read_tsv_for_samples(path, usecols, sample_col, keep_samples, *, chunksize=4
     return df
 
 
+def iter_tsv_position_blocks(path, usecols, *, chunksize=2_000_000, dtype=None,
+                             block_cols=("chrom", "start0"), verbose=False, label="table"):
+    """Stream a POSITION-SORTED TSV (e.g. the ZN long table, written per chromosome in start0 order with
+    every row of a position adjacent) in chunks that never split a (chrom, start0) block: the rows of
+    the last block in a chunk are held back and prepended to the next one. Any aggregation whose key
+    contains (chrom, start0) -- per-site sums, per-site ranges across samples, unique sites per gene --
+    is therefore exact when computed chunk by chunk, and no chunk has to hold more than `chunksize`
+    rows plus one position block. Column dtypes should be pinned with `dtype` for text columns, so a
+    chunk that happens to hold only numeric-looking values (mod_code 17596) does not change type."""
+    hdr = tsv_header(path)
+    cols = [c for c in usecols if c in hdr]
+    bc = [c for c in block_cols if c in cols]
+    carry = None
+    n_in = 0
+    t0 = time.perf_counter()
+    for chunk in pd.read_csv(path, sep="\t", usecols=cols, dtype=dtype, chunksize=chunksize, low_memory=False):
+        n_in += len(chunk)
+        if carry is not None and len(carry):
+            chunk = pd.concat([carry, chunk], ignore_index=True)
+            carry = None
+        if not len(chunk):
+            continue
+        if bc:
+            same = np.ones(len(chunk), dtype=bool)
+            for c in bc:
+                col = chunk[c].to_numpy()
+                same &= (col == col[-1])
+            rev = same[::-1]
+            n_trail = len(rev) if rev.all() else int(np.argmin(rev))
+            carry = chunk.iloc[len(chunk) - n_trail:]
+            chunk = chunk.iloc[:len(chunk) - n_trail]
+        if verbose:
+            print(f"[{label}] streamed {n_in:,} rows ({time.perf_counter() - t0:.0f}s)", file=sys.stderr, flush=True)
+        if len(chunk):
+            yield chunk
+    if carry is not None and len(carry):
+        yield carry
+
+
 # ---- parquet per-read tables ------------------------------------------------------------------
 # Per-read tables (molecule mod calls, molecule SNPs) can be written as parquet: one row group per
 # (chromosome, window) block, zstd + dictionary encoding (~5-10x smaller than the TSV), and the same

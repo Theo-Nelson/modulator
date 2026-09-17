@@ -453,7 +453,26 @@ def _check_between_conditions():
             raise AssertionError("test_condition_tail_diffs: output depends on PYTHONHASHSEED")
         if len(pd.read_csv(tmp / "tail_1.tsv", sep="\t")) < 50:
             raise AssertionError("test_condition_tail_diffs: expected >=50 tested fragmentforms")
-        # (d) the engine itself: n_workers must not change any statistic
+        # (d) position-block streaming (report + gene browser): no (chrom, start0) block may be split
+        #     across chunks, and per-block aggregation must equal the whole-table aggregation, in order
+        from genotype_utils import iter_tsv_position_blocks
+        whole_all = pd.read_csv(tmp / "long.tsv", sep="\t", low_memory=False,
+                                dtype={c: str for c in ("sample", "chrom", "strand", "mod_code", "gene_name")})
+        keys = ["gene_name", "chrom", "start0", "strand", "mod_code", "ZN_transcript_index"]
+        g_whole = whole_all.groupby(keys, sort=False)[["Nvalid_cov", "Nmod"]].sum().reset_index()
+        parts, n_rows, last_key = [], 0, None
+        for blk in iter_tsv_position_blocks(str(tmp / "long.tsv"), list(whole_all.columns), chunksize=53,
+                                            dtype={c: str for c in ("sample", "chrom", "strand", "mod_code", "gene_name")}):
+            first_key = (blk["chrom"].iloc[0], int(blk["start0"].iloc[0]))
+            if last_key is not None and first_key == last_key:
+                raise AssertionError("iter_tsv_position_blocks split a (chrom, start0) block across chunks")
+            last_key = (blk["chrom"].iloc[-1], int(blk["start0"].iloc[-1]))
+            n_rows += len(blk)
+            parts.append(blk.groupby(keys, sort=False)[["Nvalid_cov", "Nmod"]].sum().reset_index())
+        if n_rows != len(whole_all):
+            raise AssertionError(f"iter_tsv_position_blocks yielded {n_rows} rows, table has {len(whole_all)}")
+        pd.testing.assert_frame_equal(pd.concat(parts, ignore_index=True), g_whole)
+        # (e) the engine itself: n_workers must not change any statistic
         sites = []
         for i in range(300):
             n = np.array([rng.randint(5, 60) for _ in range(6)], dtype=float)

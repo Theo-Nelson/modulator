@@ -526,6 +526,7 @@ Relevant knobs:
 | `report.browser_max_genes` | all reference genes | Genes embedded in the browser payload (largest by read support first). Defaults to the number of genes in the reference GTF so every gene is lookup-able; set a smaller number to keep the file lighter. |
 | `report.max_class_figs_per_category` | `10` | Per-category classification figures embedded. |
 | `report.max_snp_figs` | `12` | Per-example SNP/haplotype figures per genotype section. |
+| `report.browser_max_sites_per_gene` | `0` | Gene browser: embed at most this many (site × fragmentform) rows per gene, best-covered first; `0` = all. A 31-library run has ~26 M such rows (a multi-GB page), so set e.g. `2000` there. The report and browser stream the ZN long table per position block instead of loading it, so memory no longer scales with the table. |
 
 The Site-Classification section shows **one structural-category distribution
 graph per detected modification** (m6A, 5mC, pseudoU, inosine, the 2′-O-methyls,

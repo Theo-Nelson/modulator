@@ -45,6 +45,9 @@ def parse_args():
     ap = argparse.ArgumentParser(description="Build the interactive gene/fragmentform browser HTML.")
     ap.add_argument("--gtf", required=True, help="Assembled fragmentform GTF (exon structures)")
     ap.add_argument("--sites-long", default="", help="*_FILTERED_sites_long.tsv (per-site x transcript x sample)")
+    ap.add_argument("--max-sites-per-gene", type=int, default=0,
+                    help="embed at most this many (site x fragmentform) rows per gene, keeping the best-covered "
+                         "(0 = all; a 31-library run has ~26 M rows, i.e. a multi-GB page)")
     ap.add_argument("--diff-results", default="", help="*__ZN_site_diff_results.tsv")
     ap.add_argument("--classification-summary", default="", help="*_classification_summary.tsv")
     ap.add_argument("--apa-motifs", default="", help="*_apa_motifs.tsv")
@@ -78,18 +81,43 @@ def _read(path):
 _SITE_COLS = ["gene_name", "chrom", "start0", "strand", "mod_code", "ZN_transcript_index", "Nvalid_cov", "Nmod"]
 
 
-def _read_sites(path):
-    """The per-site x fragmentform x sample table: read only the eight columns the browser uses, with
-    the repeated strings as categoricals (the groupby below uses observed=True; with sort=False a
-    categorical grouper keeps first-appearance order, so the payload is unchanged)."""
+def _aggregate_sites(path, chunksize=2_000_000, verbose=False):
+    """Per-(gene, site, fragmentform) pooled counts from the per-site x fragmentform x sample table,
+    computed in ONE streamed pass (the table is 40 GB / 490 M rows on a 31-library run; the old
+    whole-file read was the browser's memory peak). Returns (agg, mod_codes) where `agg` has the key
+    columns gene_name, chrom, start0, strand, mod_code, ZN_transcript_index plus Nvalid_cov, Nmod, frac,
+    in FIRST-APPEARANCE order -- exactly what the whole-table groupby(sort=False) produced, because every
+    row of a site sits in one (chrom, start0) block (see iter_tsv_position_blocks), so per-block sums are
+    the whole-table sums and block order is file order. `mod_codes` is the sorted set of codes seen."""
+    from genotype_utils import iter_tsv_position_blocks
+    empty = pd.DataFrame(), []
     if not path or not os.path.exists(path) or os.path.getsize(path) == 0:
-        return pd.DataFrame()
+        return empty
     hdr = [str(c).lstrip("#") for c in pd.read_csv(path, sep="\t", nrows=0).columns]
     use = [c for c in hdr if c in set(_SITE_COLS)]
-    dtype = {c: "category" for c in ("gene_name", "chrom", "strand", "mod_code") if c in use}
-    df = pd.read_csv(path, sep="\t", usecols=use, dtype=dtype, low_memory=False)
-    df.columns = [str(c).lstrip("#") for c in df.columns]
-    return df
+    need = {"gene_name", "chrom", "start0", "strand", "mod_code", "Nvalid_cov", "Nmod"}
+    if not need.issubset(use):
+        return empty
+    keys = ["gene_name", "chrom", "start0", "strand", "mod_code"]
+    by_zt = "ZN_transcript_index" in use
+    keys_zt = keys + (["ZN_transcript_index"] if by_zt else [])
+    dtype = {c: str for c in ("gene_name", "chrom", "strand", "mod_code") if c in use}
+    parts = []
+    codes = set()
+    for blk in iter_tsv_position_blocks(path, use, chunksize=chunksize, dtype=dtype, verbose=verbose,
+                                        label="browser sites"):
+        codes.update(blk["mod_code"].dropna().astype(str).unique().tolist())
+        g = blk.groupby(keys_zt, sort=False, observed=True)[["Nvalid_cov", "Nmod"]].sum().reset_index()
+        if not by_zt:
+            g["ZN_transcript_index"] = -1
+        parts.append(g)
+    if not parts:
+        return empty
+    g = pd.concat(parts, ignore_index=True)
+    g["frac"] = (g["Nmod"] / g["Nvalid_cov"].replace(0, np.nan)).round(4)
+    for c in keys:
+        g[c] = g[c].astype(str)
+    return g, sorted(codes)
 
 
 # Fragmentform id suffix: "G<gene_index>.T<tx_index>". Anchored at end-of-string so a dotted gene
@@ -143,7 +171,7 @@ def main():
     if args.verbose:
         print(f"[browser] {sum(len(v) for v in genes.values()):,} fragmentforms in {len(genes):,} genes", flush=True)
 
-    sites = _read_sites(args.sites_long)
+    site_agg, site_codes = _aggregate_sites(args.sites_long, verbose=args.verbose)
     diffs = _read(args.diff_results)
     summ = _read(args.classification_summary)
     apa = _read(args.apa_motifs)
@@ -180,24 +208,16 @@ def main():
                 "tail": float(getattr(r, "median_tail", float("nan"))),
                 "tail_n": int(getattr(r, "n_reads", 0) or 0)})
 
-    # per-gene site stoichiometry: collapse samples -> per (site, transcript) modified fraction
+    # per-gene site stoichiometry: samples collapsed -> per (site, transcript) modified fraction
     site_by_gene = {}
-    if not sites.empty:
-        need = {"gene_name", "chrom", "start0", "strand", "mod_code", "Nvalid_cov", "Nmod"}
-        if need.issubset(sites.columns):
-            s = sites
-            keys = ["gene_name", "chrom", "start0", "strand", "mod_code"]
-            if "ZN_transcript_index" in s.columns:
-                keys_zt = keys + ["ZN_transcript_index"]
-                g = s.groupby(keys_zt, sort=False, observed=True)[["Nvalid_cov", "Nmod"]].sum().reset_index()
-            else:
-                g = s.groupby(keys, sort=False, observed=True)[["Nvalid_cov", "Nmod"]].sum().reset_index()
-                g["ZN_transcript_index"] = -1
-            g["frac"] = (g["Nmod"] / g["Nvalid_cov"].replace(0, np.nan)).round(4)
-            for c in keys:
-                g[c] = g[c].astype(str)
-            for gene, gg in g.groupby("gene_name", sort=False):
-                site_by_gene[str(gene)] = gg
+    if not site_agg.empty:
+        for gene, gg in site_agg.groupby("gene_name", sort=False):
+            if args.max_sites_per_gene > 0 and len(gg) > args.max_sites_per_gene:
+                # bound the embedded payload: keep this gene's best-covered (site x fragmentform)
+                # rows, in their original order (a 31-library run has ~26 M rows -> a multi-GB page)
+                keep = gg["Nvalid_cov"].to_numpy().argsort(kind="stable")[::-1][:args.max_sites_per_gene]
+                gg = gg.iloc[np.sort(keep)]
+            site_by_gene[str(gene)] = gg
 
     diff_by_gene = {str(k): v for k, v in diffs.groupby("gene_name", sort=False)} if "gene_name" in diffs.columns else {}
     cond_by_gene = {str(k): v for k, v in cond.groupby("gene_name", sort=False)} if "gene_name" in cond.columns else {}
@@ -257,7 +277,7 @@ def main():
             "index": [{"g": r["gene"], "n": len(r["forms"]), "r": r["reads"], "c": r["chrom"]} for r in ranked],
             "n_total_genes": len(ranked_all), "n_shown": len(ranked)}
     # Modification-code legend for the sidebar: the codes actually present in this run's site data.
-    _codes = sorted({str(c) for c in sites["mod_code"].dropna().astype(str)}) if ("mod_code" in sites.columns and not sites.empty) else []
+    _codes = list(site_codes)
     moddefs_html = _mod_defs_html(_codes)
     os.makedirs(os.path.dirname(args.out_html) or ".", exist_ok=True)
     # Embed the JSON so it cannot break out of <script> or terminate it early: a gene_name / contrast

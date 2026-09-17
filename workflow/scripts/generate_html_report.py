@@ -12,6 +12,7 @@ import re
 import sys
 from pathlib import Path
 
+import numpy as np
 import pandas as pd
 
 
@@ -469,6 +470,80 @@ def replicate_concordance(zn_long_df, meta_df, min_cov=20):
                 entry["median_pp"] = float(rng.median() * 100.0)
         out[condition] = entry
     return out
+
+
+_ZN_LONG_STR_COLS = {c: str for c in ("sample", "chrom", "strand", "mod_code", "gene_name")}
+
+
+def scan_zn_long_table(path, meta_df, min_cov=20, chunksize=2_000_000, verbose=False):
+    """ONE streamed pass over the ZN long table for the two things the report needs from it:
+    the per-condition replicate concordance (same definition as replicate_concordance) and the number
+    of distinct modification sites per (gene, mod_code). Returns (concordance, top_gene_sites_df).
+
+    The table is the one genome-scale input the report touches -- 40 GB / 490 M rows on a 31-library
+    run, where a whole-file read is ~150 GB and the string-keyed groupby on top of it is far larger. Both
+    quantities key on the site position, so they are computed exactly per (chrom, start0) block (see
+    iter_tsv_position_blocks): a site's rows for every sample and fragmentform sit in one block, so the
+    per-site max-min range and the per-gene distinct-site count never see a split site."""
+    from genotype_utils import iter_tsv_position_blocks
+    if not path or not os.path.exists(path) or os.path.getsize(path) == 0:
+        return {}, pd.DataFrame()
+    hdr = [str(c).lstrip("#") for c in pd.read_csv(path, sep="\t", nrows=0).columns]
+    have_meta = (meta_df is not None and not meta_df.empty and "condition" in meta_df.columns
+                 and "sample" in meta_df.columns)
+    cond = dict(zip(meta_df["sample"].astype(str), meta_df["condition"].astype(str))) if have_meta else {}
+    site_keys = [k for k in ["chrom", "start0", "strand", "mod_code", "ZN_transcript_index"] if k in hdr]
+    gene_cols = {"gene_name", "chrom", "start0", "end0", "strand", "mod_code"}
+    do_genes = gene_cols.issubset(hdr)
+    want = ["sample", "chrom", "start0", "end0", "strand", "mod_code", "ZN_transcript_index",
+            "Nvalid_cov", "frac_modified", "gene_name"]
+    ranges = {}      # condition -> [np.ndarray of per-site max-min ranges]
+    reps = {}        # condition -> set of samples covering >=1 site at the floor
+    site_counts = {} # (gene_name, mod_code) -> distinct site keys
+    for blk in iter_tsv_position_blocks(path, want, chunksize=chunksize, dtype=_ZN_LONG_STR_COLS,
+                                        verbose=verbose, label="report zn-long"):
+        if have_meta:
+            df = pd.DataFrame({"sample": blk["sample"].astype(str)})
+            for k in site_keys:
+                df[k] = blk[k].astype(str).to_numpy()
+            df["_cond"] = df["sample"].map(cond)
+            df["_cov"] = pd.to_numeric(blk.get("Nvalid_cov"), errors="coerce").to_numpy()
+            df["_frac"] = pd.to_numeric(blk.get("frac_modified"), errors="coerce").to_numpy()
+            df = df[df["_cond"].notna()]
+            df = df[(df["_cov"] >= min_cov) & df["_frac"].notna()]
+            for condition, cdf in df.groupby("_cond"):
+                reps.setdefault(condition, set()).update(cdf["sample"].unique().tolist())
+                if site_keys:
+                    g = cdf.groupby(site_keys)["_frac"]
+                    rng = (g.max() - g.min())[g.count() >= 2]
+                    if len(rng):
+                        ranges.setdefault(condition, []).append(rng.to_numpy(dtype=float))
+        if do_genes:
+            keyed = pd.DataFrame({"gene_name": blk["gene_name"].astype(str).to_numpy(),
+                                  "mod_code": blk["mod_code"].astype(str).to_numpy(),
+                                  "site_key": (blk["chrom"].astype(str) + ":" + blk["start0"].astype(str)
+                                               + ":" + blk["end0"].astype(str) + ":" + blk["strand"].astype(str)
+                                               + ":" + blk["mod_code"].astype(str)).to_numpy()}).drop_duplicates()
+            for (gname, mcode), n in keyed.groupby(["gene_name", "mod_code"]).size().items():
+                site_counts[(gname, mcode)] = site_counts.get((gname, mcode), 0) + int(n)
+    concordance = {}
+    for condition in sorted(reps):
+        n_reps = len(reps[condition])
+        entry = {"n_reps": int(n_reps), "n_sites": 0, "median_pp": None}
+        if n_reps >= 2 and site_keys and ranges.get(condition):
+            allr = np.concatenate(ranges[condition])
+            entry["n_sites"] = int(len(allr))
+            entry["median_pp"] = float(pd.Series(allr).median() * 100.0)
+        concordance[condition] = entry
+    top = pd.DataFrame()
+    if do_genes and site_counts:
+        # same frame the whole-table groupby(as_index=False).nunique() produced: rows sorted by
+        # (gene_name, mod_code), RangeIndex, then the descending sort on n_sites
+        rows = sorted(site_counts.items())
+        top = pd.DataFrame({"gene_name": [k[0] for k, _ in rows], "mod_code": [k[1] for k, _ in rows],
+                            "n_sites": np.asarray([n for _, n in rows], dtype="int64")})
+        top = top.sort_values("n_sites", ascending=False)
+    return concordance, top
 
 
 def significance_note_box(concordance):
@@ -2225,12 +2300,9 @@ def main():
     read_stats_df = read_tsv(args.read_stats)
     tx_lengths_df = read_tsv(args.tx_lengths)
     partition_map_df = read_tsv(args.partition_map)
-    # The ZN long table is the one genome-scale input the report touches (31 samples ~ 25M rows); only
-    # the columns the two consumers below use are read, with the repeated strings as categoricals.
-    zn_long_df = read_tsv_cols(args.zn_long,
-                               ["sample", "chrom", "start0", "end0", "strand", "mod_code",
-                                "ZN_transcript_index", "Nvalid_cov", "Nmod", "frac_modified", "gene_name"],
-                               categorical=("sample", "chrom", "strand", "mod_code", "gene_name"))
+    # The ZN long table is the one genome-scale input the report touches (31 libraries: 40 GB / 490 M
+    # rows). It is never loaded whole: scan_zn_long_table streams it once, per position block, for the
+    # two quantities the report needs (replicate concordance, distinct sites per gene x mod).
     zt_long_df = read_tsv(args.zt_long)
     # Per-fragmentform (per-ZN) exon models, for the cis-SNP→mod stoichiometry per-fragmentform graphs.
     snp_mod_iso = {}
@@ -2242,7 +2314,8 @@ def main():
     diff_df = read_tsv(args.diff_results)
     # Data-driven "significance is cheap" callout, shown above every differential section.
     meta_df = read_tsv(args.sample_metadata) if getattr(args, "sample_metadata", "") else pd.DataFrame()
-    sig_box = significance_note_box(replicate_concordance(zn_long_df, meta_df))
+    _concordance, top_gene_sites_df = scan_zn_long_table(args.zn_long, meta_df)
+    sig_box = significance_note_box(_concordance)
     classified_df = read_tsv(args.classified_sites)
     overlap_df = read_summary_metrics(glob.glob(args.multigene_summary_glob)) if args.multigene_summary_glob else pd.DataFrame()
     candidate_snps_df = read_tsv(args.candidate_snps)
@@ -2306,20 +2379,9 @@ def main():
     ]
     top_tx_df = class_df.sort_values(["read_support", "exact_chain_reads"], ascending=False) if not class_df.empty else class_df
 
-    top_gene_sites_df = pd.DataFrame()
-    # require every column the body indexes (not just gene_name) -- a missing coord column here would
-    # raise KeyError out of main() and write NO report at all, instead of degrading this one section.
-    if not zn_long_df.empty and {"gene_name", "chrom", "start0", "end0", "strand", "mod_code"}.issubset(zn_long_df.columns):
-        top_gene_sites_df = (
-            pd.DataFrame({"gene_name": zn_long_df["gene_name"].astype(str).to_numpy(),
-                          "mod_code": zn_long_df["mod_code"].astype(str).to_numpy(),
-                          "site_key": (zn_long_df["chrom"].astype(str) + ":" + zn_long_df["start0"].astype(str)
-                                       + ":" + zn_long_df["end0"].astype(str) + ":" + zn_long_df["strand"].astype(str)
-                                       + ":" + zn_long_df["mod_code"].astype(str)).to_numpy()})
-            .groupby(["gene_name", "mod_code"], as_index=False)["site_key"].nunique()
-            .rename(columns={"site_key": "n_sites"})
-            .sort_values("n_sites", ascending=False)
-        )
+    # top_gene_sites_df (distinct sites per gene x mod_code) comes from scan_zn_long_table above; it is
+    # empty when the table lacks any of gene_name/chrom/start0/end0/strand/mod_code, so a missing coord
+    # column degrades this one section instead of raising out of main().
 
     diff_html = "<p class='muted'>No differential-site results available.</p>"
     diff_cols = []

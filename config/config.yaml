@@ -215,6 +215,8 @@ report:
   top_genes: 20
   max_class_figs_per_category: 10   # per-category figures embedded in the report
   max_snp_figs: 12                  # per-example figures per SNP/haplotype section (embedded + written to results/genotype/<prefix>__snp_figs/)
+  browser_max_sites_per_gene: 0     # gene browser: embed at most this many (site x fragmentform) rows per gene, best-covered first
+                                    # (0 = all). A 31-library run has ~26 M such rows, i.e. a multi-GB page; 2000 keeps it openable.
 
 genotype:
   enable: true       # on by default (SNP discovery + SNP/mod/fragment associations, haplotypes). Set false to skip this (slower) stage.
