@@ -49,8 +49,17 @@ def parse_args():
     ap.add_argument("--prior-weight", type=float, default=20.0)
     ap.add_argument("--ref-df", type=int, default=diffstats.REF_DF)
     ap.add_argument("--site-weight", default="auto", help="dispersion-shrinkage per-site weight; 'auto'=N_site-2 (scales with cohort)")
+    ap.add_argument("--threads", type=int, default=1, help="worker processes for the per-feature fits")
     ap.add_argument("--verbose", action="store_true")
     return ap.parse_args()
+
+
+def _write(out, path):
+    """Atomic write (.tmp + rename): a killed job never leaves a truncated table that looks finished."""
+    os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
+    tmp = path + ".tmp"
+    out.to_csv(tmp, sep="\t", index=False)
+    os.replace(tmp, path)
 
 
 def _fallback_gene_of(zt: str) -> str:
@@ -124,7 +133,7 @@ def main():
     if len(ref_in) < args.min_samples_per_group or len(test_in) < args.min_samples_per_group:
         print(f"[condition_usage] {name}: need >={args.min_samples_per_group}/group "
               f"(got {len(ref_in)} vs {len(test_in)})", file=sys.stderr, flush=True)
-        pd.DataFrame(columns=OUT_COLS).to_csv(args.out_tsv, sep="\t", index=False)
+        _write(pd.DataFrame(columns=OUT_COLS), args.out_tsv)
         return
     tx = tx[samples].fillna(0)
 
@@ -138,7 +147,7 @@ def main():
     fmap = _feature_map(args, list(tx.index), gene_of)
     fmap = fmap[fmap["zt_label"].isin(tx.index)]
     if fmap.empty:
-        pd.DataFrame(columns=OUT_COLS).to_csv(args.out_tsv, sep="\t", index=False)
+        _write(pd.DataFrame(columns=OUT_COLS), args.out_tsv)
         return
 
     # feature counts = sum of its fragmentforms; gene totals = sum of ALL the gene's fragmentforms.
@@ -177,14 +186,15 @@ def main():
         print(f"[condition_usage:{args.feature}] {name}: {len(idx):,} features testable "
               f"({len(ref_in)} {args.reference} vs {len(test_in)} {args.test})", flush=True)
     if not len(idx):
-        pd.DataFrame(columns=OUT_COLS).to_csv(args.out_tsv, sep="\t", index=False)
+        _write(pd.DataFrame(columns=OUT_COLS), args.out_tsv)
         return
 
     sites = [(i, K[i], tot[i], gidx) for i in range(K.shape[0])]
     res = diffstats.beta_binomial_diff(sites, prior_weight=args.prior_weight,
                                        min_group_samples=args.min_samples_per_group,
                                        ref_df=args.ref_df, calibrate=False,
-                                       site_weight=diffstats.parse_site_weight(args.site_weight))
+                                       site_weight=diffstats.parse_site_weight(args.site_weight),
+                                       n_workers=args.threads, verbose=args.verbose)
     rows = []
     for r in res:
         i = r["key"]
@@ -206,14 +216,13 @@ def main():
         })
     out = pd.DataFrame(rows)
     if out.empty:
-        pd.DataFrame(columns=OUT_COLS).to_csv(args.out_tsv, sep="\t", index=False)
+        _write(pd.DataFrame(columns=OUT_COLS), args.out_tsv)
         return
     out["p_adj_bh"] = benjamini_hochberg(out["p_value"].values)
     out["_abs"] = out["delta"].abs()
     out = out.sort_values(["p_adj_bh", "_abs"], ascending=[True, False]).drop(columns="_abs")
     out = out[OUT_COLS].reset_index(drop=True)
-    os.makedirs(os.path.dirname(args.out_tsv) or ".", exist_ok=True)
-    out.to_csv(args.out_tsv, sep="\t", index=False)
+    _write(out, args.out_tsv)
     if args.verbose:
         print(f"[condition_usage:{args.feature}] {name}: {len(out):,} tested, "
               f"{int((out['p_adj_bh'] < 0.05).sum()):,} at FDR<0.05 -> {args.out_tsv}", flush=True)

@@ -3,6 +3,7 @@
 from concurrent.futures import ProcessPoolExecutor, as_completed
 import gzip
 import io
+import time
 import math
 import os
 import sys
@@ -786,6 +787,78 @@ def tsv_header(path: str) -> List[str]:
         return list(pq.ParquetFile(str(path)).schema_arrow.names)
     with open(path) as fh:
         return fh.readline().rstrip("\n").split("\t")
+
+
+def read_tsv_for_samples(path, usecols, sample_col, keep_samples, *, chunksize=4_000_000,
+                         verbose=False, label="table"):
+    """Read the columns ``usecols`` of a (large) per-sample TSV, keeping only rows whose
+    ``sample_col`` is in ``keep_samples`` -- streamed in chunks so the peak footprint is the KEPT rows,
+    not the whole file (the 31-library ZN long table is 40 GB / 490 M rows; a whole-file read_csv of
+    it sits at ~150 GB even with usecols, and every contrast repeats it).
+
+    The result is meant to be a drop-in for ``pd.read_csv(path, usecols=...)`` followed by the sample
+    filter: same rows in the same (file) order, and the same dtypes read_csv would infer over the whole
+    file -- an integer column stays int64 only if EVERY chunk parsed as integers (which is exactly the
+    whole-file rule), otherwise every chunk is brought to the wider type (float, or str for a mixed
+    text column). String columns travel as categoricals between chunks and are turned back into plain
+    object columns at the end, so downstream sort/groupby order is the lexicographic one read_csv's
+    object columns give (a categorical would sort by category code instead).
+    """
+    from pandas.api.types import union_categoricals
+    hdr = tsv_header(path)
+    cols = [c for c in usecols if c in hdr]
+    if sample_col not in cols:
+        raise ValueError(f"{label}: sample column {sample_col!r} not in {path}")
+    keep = {str(s) for s in keep_samples}
+    parts = []
+    n_in = 0
+    t0 = time.perf_counter()
+    for chunk in pd.read_csv(path, sep="\t", usecols=cols, chunksize=chunksize, low_memory=False):
+        n_in += len(chunk)
+        sub = chunk[chunk[sample_col].astype(str).isin(keep)]
+        if len(sub):
+            sub = sub.copy()
+            for c in cols:
+                if sub[c].dtype == object:
+                    sub[c] = pd.Categorical(sub[c])
+            parts.append(sub)
+        if verbose:
+            print(f"[{label}] read {n_in:,} rows, kept {sum(len(p) for p in parts):,} "
+                  f"({time.perf_counter() - t0:.0f}s)", file=sys.stderr, flush=True)
+    if not parts:
+        return pd.DataFrame(columns=cols)
+    out = {}
+    for c in cols:
+        kinds = [p[c].dtype for p in parts]
+        if all(isinstance(k, pd.CategoricalDtype) for k in kinds):
+            cat = union_categoricals([p[c] for p in parts], ignore_order=True)
+            out[c] = pd.Series(cat).astype(object)
+        elif any(isinstance(k, pd.CategoricalDtype) for k in kinds):
+            # mixed text/numeric column: read_csv over the whole file would have kept every value as
+            # text -> bring the numeric chunks to str (non-null) and keep nulls as NaN
+            vals = []
+            for p in parts:
+                col = p[c]
+                if isinstance(col.dtype, pd.CategoricalDtype):
+                    vals.append(col.astype(object))
+                else:
+                    o = col.astype(object)
+                    nn = col.notna().to_numpy()
+                    o = o.where(~nn, col[nn].map(lambda v: str(int(v)) if float(v).is_integer() else str(v)))
+                    vals.append(o)
+            out[c] = pd.concat(vals, ignore_index=True)
+        elif all(k.kind == "i" for k in kinds):
+            out[c] = pd.concat([p[c] for p in parts], ignore_index=True)
+        elif all(k.kind in "if" for k in kinds):
+            out[c] = pd.concat([p[c].astype(float) for p in parts], ignore_index=True)
+        else:
+            out[c] = pd.concat([p[c] for p in parts], ignore_index=True)
+    df = pd.DataFrame(out)
+    df = df[cols]
+    if verbose:
+        print(f"[{label}] {len(df):,} rows kept of {n_in:,} ({time.perf_counter() - t0:.0f}s)",
+              file=sys.stderr, flush=True)
+    return df
 
 
 # ---- parquet per-read tables ------------------------------------------------------------------

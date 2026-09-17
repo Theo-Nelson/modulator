@@ -73,23 +73,63 @@ def load_snps(path):
     return out
 
 
-def load_mod_sites(path):
-    """(chrom,start0,strand,mod_code) -> dict(gene_name, nmod, ncov, n_samples)."""
+def _accumulate(agg, row):
+    """Fold one long-table row (a dict of strings/numbers) into the per-site aggregate."""
+    try:
+        key = (row["chrom"], int(row["start0"]), row["strand"], row["mod_code"])
+        nmod = float(row.get("Nmod", 0) or 0)
+        ncov = float(row.get("Nvalid_cov", 0) or 0)
+    except (KeyError, ValueError, TypeError):
+        return
+    d = agg.setdefault(key, dict(gene_name=row.get("gene_name", ""),
+                                 nmod=0.0, ncov=0.0, samples=set()))
+    # the ZN long table is per (site x ZN-partition x sample); count DISTINCT samples, not rows
+    # (else a single-sample run with 3 ZN partitions would report n_samples=3).
+    d["nmod"] += nmod; d["ncov"] += ncov; d["samples"].add(str(row.get("sample", "")))
+
+
+def load_mod_sites(path, snps=None, chunk_rows=4_000_000):
+    """(chrom,start0,strand,mod_code) -> dict(gene_name, nmod, ncov, n_samples).
+
+    Only sites that coincide with a candidate SNP can ever be reported (``detect`` looks each site up
+    in ``snps``), so when ``snps`` is given the table is streamed with pandas and each chunk is cut
+    down to rows at a SNP position BEFORE the (row-by-row) aggregation: the same per-site sums for
+    every site that matters, without walking 490 M rows through csv.DictReader (28 min per call on
+    the 31-library table -- and the pipeline used to call this once per contrast). Rows are folded in
+    file order, so the first-seen gene_name is unchanged; empty fields stay "" as with csv."""
     agg = {}
+    if snps is None:
+        with open(path) as fh:
+            for row in csv.DictReader(fh, delimiter="\t"):
+                _accumulate(agg, row)
+        return agg
+    import numpy as np
+    import pandas as pd
+    by_chrom = {}
+    for (chrom, pos0) in snps:
+        by_chrom.setdefault(chrom, []).append(pos0)
+    by_chrom = {c: np.unique(np.asarray(v, dtype=np.int64)) for c, v in by_chrom.items()}
+    want = ["sample", "chrom", "start0", "strand", "mod_code", "Nvalid_cov", "Nmod", "gene_name"]
     with open(path) as fh:
-        r = csv.DictReader(fh, delimiter="\t")
-        for row in r:
-            try:
-                key = (row["chrom"], int(row["start0"]), row["strand"], row["mod_code"])
-                nmod = float(row.get("Nmod", 0) or 0)
-                ncov = float(row.get("Nvalid_cov", 0) or 0)
-            except (KeyError, ValueError):
+        hdr = fh.readline().rstrip("\n").split("\t")
+    cols = [c for c in want if c in hdr]
+    str_cols = {c: str for c in ("sample", "chrom", "strand", "mod_code", "gene_name") if c in cols}
+    for chunk in pd.read_csv(path, sep="\t", usecols=cols, dtype=str_cols, keep_default_na=False,
+                             chunksize=chunk_rows, low_memory=False):
+        start0 = pd.to_numeric(chunk["start0"], errors="coerce")
+        mask = np.zeros(len(chunk), dtype=bool)
+        chroms = chunk["chrom"].to_numpy()
+        for chrom in pd.unique(chroms):
+            pos = by_chrom.get(chrom)
+            if pos is None:
                 continue
-            d = agg.setdefault(key, dict(gene_name=row.get("gene_name", ""),
-                                         nmod=0.0, ncov=0.0, samples=set()))
-            # the ZN long table is per (site x ZN-partition x sample); count DISTINCT samples, not rows
-            # (else a single-sample run with 3 ZN partitions would report n_samples=3).
-            d["nmod"] += nmod; d["ncov"] += ncov; d["samples"].add(str(row.get("sample", "")))
+            sel = chroms == chrom
+            mask[sel] = np.isin(start0.to_numpy()[sel], pos)
+        if not mask.any():
+            continue
+        hit = chunk[mask]
+        for row in hit.to_dict("records"):
+            _accumulate(agg, row)
     return agg
 
 
@@ -228,15 +268,17 @@ def main():
     a = ap.parse_args()
 
     snps = load_snps(a.candidate_snps)
-    mods = load_mod_sites(a.mod_sites)
+    mods = load_mod_sites(a.mod_sites, snps=snps)
     rows, hits = detect(snps, mods)
 
     cols = ["chrom", "pos0", "pos1", "strand", "mod_code", "canonical_base", "ref", "alt",
             "tx_ref", "tx_alt", "alt_frac", "snp_at_mod_base_class", "gene_name", "n_samples",
             "total_Nmod", "total_Nvalid_cov", "pooled_frac_mod", "snp_id"]
-    with open(a.out_tsv, "w", newline="") as fh:
+    tmp = a.out_tsv + ".tmp"
+    with open(tmp, "w", newline="") as fh:
         w = csv.DictWriter(fh, fieldnames=cols, delimiter="\t", extrasaction="ignore")
         w.writeheader(); w.writerows(rows)
+    os.replace(tmp, a.out_tsv)
     if a.verbose:
         by_cls = defaultdict(int)
         for r in rows:

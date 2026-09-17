@@ -28,6 +28,10 @@ chi2 with 1 df, on the shrunk theta.
 
 scipy only (no statsmodels).
 """
+import os
+import sys
+import time
+
 import numpy as np
 from scipy.optimize import minimize, minimize_scalar
 from scipy.special import betaln, expit, logit, polygamma
@@ -152,8 +156,133 @@ def parse_site_weight(x):
         return "auto"
 
 
+def _prepare_site(key, k, n, gidx, min_group_samples):
+    """Pass 1 for ONE site: drop uncovered samples, skip untestable sites, fit the Cox-Reid theta.
+    Returns the prepared tuple (key, k, n, gidx, theta_site, informative) or None when the site is
+    not testable. Pure function of its inputs, so the parallel path below is bit-identical to the
+    sequential one."""
+    k = np.asarray(k, dtype=float); n = np.asarray(n, dtype=float); gidx = np.asarray(gidx, dtype=int)
+    ok = n > 0
+    k, n, gidx = k[ok], n[ok], gidx[ok]
+    if (gidx == 0).sum() < min_group_samples or (gidx == 1).sum() < min_group_samples:
+        return None
+    # M5: a site all-unmodified (or all-modified) across BOTH groups admits no between-group
+    # difference -- the LRT is exactly 0 and p is exactly 1. These are UNTESTABLE, not measured
+    # negatives, yet they were emitted as "tested" rows and left in the BH family (28.9% of a real
+    # per-transcript table), inflating m and crushing every adjusted p (min p_adj 0.999 -> 0.710
+    # once dropped). Skip them BEFORE the (expensive) theta fit. One-group-degenerate sites -- a
+    # real 0%->X% effect -- have a NON-degenerate pooled mean and are kept (handled by _group_degen).
+    _mu_hat = float(k.sum() / n.sum()) if n.sum() > 0 else 0.0
+    if _mu_hat <= 1e-9 or _mu_hat >= 1.0 - 1e-9:
+        return None
+    theta_s, _ = _fit_theta(k, n, gidx, 2)
+    # Sites that carry no usable dispersion information must NOT enter the across-site prior median
+    # or they collapse it and destroy a genuine effect (prior-collapse finding). Two exclusions:
+    #   * _at_bound: theta pinned at the LOWER bound (1e-2, extreme overdispersion) -- the
+    #     pathological pin an unidentified site runs to. (The UPPER bound = near-binomial is real
+    #     low-dispersion evidence and MUST stay in the prior; dropping it biased the prior toward
+    #     overdispersion and washed out real effects.)
+    #   * _group_degen (BLOCKER, prior collapse on real low-stoichiometry data): an entire GROUP
+    #     all-unmodified/all-modified makes the Cox-Reid penalty pin theta at an ARTIFICIAL ~0.37
+    #     (dispersion ~0.73). At real stoichiometry these were the MAJORITY of the informative set
+    #     and dragged the prior to theta~0.37, over-shrinking every near-binomial site (a separated
+    #     0.2->0.72 site went p 8.5e-7 -> 0.23). Such a site is still TESTED, only barred from the
+    #     trend, because its own theta is a penalty artifact, not biology.
+    #
+    # KNOWN CAVEAT (documented, not code-changed -- old and new code are byte-identical here): a site
+    # whose group came out all-zero BY CHANCE under the null is ANTI-conservative -- at the mu=0
+    # boundary _fit_theta's penalty inflates the LRT, so P(p<0.05) among these sites reaches 0.2-0.5
+    # (the marginal null rate stays fine, ~0.026, and family-wide BH-FDR still controls). This is a
+    # boundary property of the dispersion estimator, not of the _group_degen guard. PRACTICAL
+    # CONSEQUENCE: ranking by the most extreme "0% -> X%" sites selects exactly the subset whose
+    # per-site p-values are ~4-10x optimistic; trust the FDR-adjusted q, not the raw p, for those.
+    _lt = float(np.log(theta_s))
+    _at_bound = abs(_lt - _LOG_THETA_LO) < 1e-2
+    _kg0 = k[gidx == 0]; _ng0 = n[gidx == 0]
+    _kg1 = k[gidx == 1]; _ng1 = n[gidx == 1]
+    _group_degen = (_kg0.sum() <= 1e-9 or _kg0.sum() >= _ng0.sum() - 1e-9
+                    or _kg1.sum() <= 1e-9 or _kg1.sum() >= _ng1.sum() - 1e-9)
+    informative = not (_at_bound or _group_degen)
+    return (key, k, n, gidx, theta_s, informative)
+
+
+def _prepare_chunk(args):
+    """Worker entry for pass 1: a list of (key, k, n, gidx) -> list of prepared tuples (None dropped)."""
+    chunk, min_group_samples = args
+    out = []
+    for key, k, n, gidx in chunk:
+        p = _prepare_site(key, k, n, gidx, min_group_samples)
+        if p is not None:
+            out.append(p)
+    return out
+
+
+def _test_site(prepared, shrink, eff_prior_weight, log_prior, auto_w, fixed_w):
+    """Pass 2 for ONE prepared site: shrink log-theta toward the prior, then the LRT."""
+    key, k, n, gidx, theta_s, _informative = prepared
+    if not shrink or eff_prior_weight <= 0:
+        log_shrunk = np.log(theta_s)
+    else:
+        w = max(1.0, float(len(k) - 2)) if auto_w else fixed_w
+        denom = w + eff_prior_weight
+        log_shrunk = (w * np.log(theta_s) + eff_prior_weight * log_prior) / denom if denom > 0 else np.log(theta_s)
+    theta = float(np.exp(log_shrunk))
+    mu0, mu1, stat = _site_lrt(k, n, gidx, theta)
+    return {
+        "key": key, "mu_reference": mu0, "mu_test": mu1, "delta": mu1 - mu0,
+        "theta_site": theta_s, "theta_shrunk": theta, "dispersion": 1.0 / (theta + 1.0),
+        "lrt_stat": stat,
+        "n_reference": int((gidx == 0).sum()), "n_test": int((gidx == 1).sum()),
+        "reads_reference": float(n[gidx == 0].sum()), "reads_test": float(n[gidx == 1].sum()),
+    }
+
+
+def _test_chunk(args):
+    """Worker entry for pass 2."""
+    chunk, shrink, eff_prior_weight, log_prior, auto_w, fixed_w = args
+    return [_test_site(p, shrink, eff_prior_weight, log_prior, auto_w, fixed_w) for p in chunk]
+
+
+# Sites per work unit handed to a worker. Each site costs ~5-10 ms (a handful of bounded 1-D fits),
+# so 2000 sites is ~10-20 s of work: large enough that pickling/IPC is negligible, small enough that
+# 24 workers stay balanced and the progress heartbeat stays informative.
+_CHUNK_SITES = 2000
+
+
+def _map_chunks(fn, work, n_workers, label, verbose):
+    """Order-preserving map over work units, in-process (n_workers<=1) or over a fork pool.
+
+    The result is the concatenation of fn(unit) in the ORIGINAL unit order whichever path runs,
+    so the parallel path produces the same output list, element for element, as the sequential
+    one (every unit is a pure function of its inputs). Progress goes to stderr when verbose."""
+    n_units = len(work)
+    if n_units == 0:
+        return []
+    t0 = time.perf_counter()
+    every = max(1, n_units // 20)
+    out = []
+
+    def _progress(i):
+        if verbose and (i % every == 0 or i == n_units):
+            print(f"[diffstats] {label}: {i}/{n_units} work units ({time.perf_counter() - t0:.0f}s)",
+                  file=sys.stderr, flush=True)
+
+    if n_workers <= 1 or n_units < 2:
+        for i, unit in enumerate(work, 1):
+            out.extend(fn(unit))
+            _progress(i)
+        return out
+    import multiprocessing as mp
+    ctx = mp.get_context("fork") if hasattr(os, "fork") else mp.get_context()
+    with ctx.Pool(processes=min(n_workers, n_units)) as pool:
+        for i, res in enumerate(pool.imap(fn, work, chunksize=1), 1):
+            out.extend(res)
+            _progress(i)
+    return out
+
+
 def beta_binomial_diff(sites, prior_weight=20.0, min_group_samples=2, ref_df=REF_DF,
-                       calibrate=False, site_weight="auto"):
+                       calibrate=False, site_weight="auto", n_workers=1, verbose=False):
     """Replicate-aware differential test for count data, with dispersion shrinkage across sites.
 
     ``sites``: list of (key, k, n, gidx) where k/n/gidx are equal-length arrays over samples and
@@ -168,52 +297,15 @@ def beta_binomial_diff(sites, prior_weight=20.0, min_group_samples=2, ref_df=REF
     observed LRT median (genomic-control style); it is OFF by default because real signal inflates
     that median too, so it over-corrects and destroys power (validated: at 10% true DE it called
     zero sites). Leave it off unless you have a reason.
+
+    ``n_workers`` > 1 spreads the per-site fits (both passes) over a process pool; the across-site
+    prior is computed in between from the complete pass-1 result, so the answer does not depend on
+    how the sites were chunked and is identical to the sequential path.
     """
-    prepared = []
-    for key, k, n, gidx in sites:
-        k = np.asarray(k, dtype=float); n = np.asarray(n, dtype=float); gidx = np.asarray(gidx, dtype=int)
-        ok = n > 0
-        k, n, gidx = k[ok], n[ok], gidx[ok]
-        if (gidx == 0).sum() < min_group_samples or (gidx == 1).sum() < min_group_samples:
-            continue
-        # M5: a site all-unmodified (or all-modified) across BOTH groups admits no between-group
-        # difference -- the LRT is exactly 0 and p is exactly 1. These are UNTESTABLE, not measured
-        # negatives, yet they were emitted as "tested" rows and left in the BH family (28.9% of a real
-        # per-transcript table), inflating m and crushing every adjusted p (min p_adj 0.999 -> 0.710
-        # once dropped). Skip them BEFORE the (expensive) theta fit. One-group-degenerate sites -- a
-        # real 0%->X% effect -- have a NON-degenerate pooled mean and are kept (handled by _group_degen).
-        _mu_hat = float(k.sum() / n.sum()) if n.sum() > 0 else 0.0
-        if _mu_hat <= 1e-9 or _mu_hat >= 1.0 - 1e-9:
-            continue
-        theta_s, _ = _fit_theta(k, n, gidx, 2)
-        # Sites that carry no usable dispersion information must NOT enter the across-site prior median
-        # or they collapse it and destroy a genuine effect (prior-collapse finding). Two exclusions:
-        #   * _at_bound: theta pinned at the LOWER bound (1e-2, extreme overdispersion) -- the
-        #     pathological pin an unidentified site runs to. (The UPPER bound = near-binomial is real
-        #     low-dispersion evidence and MUST stay in the prior; dropping it biased the prior toward
-        #     overdispersion and washed out real effects.)
-        #   * _group_degen (BLOCKER, prior collapse on real low-stoichiometry data): an entire GROUP
-        #     all-unmodified/all-modified makes the Cox-Reid penalty pin theta at an ARTIFICIAL ~0.37
-        #     (dispersion ~0.73). At real stoichiometry these were the MAJORITY of the informative set
-        #     and dragged the prior to theta~0.37, over-shrinking every near-binomial site (a separated
-        #     0.2->0.72 site went p 8.5e-7 -> 0.23). Such a site is still TESTED, only barred from the
-        #     trend, because its own theta is a penalty artifact, not biology.
-        #
-        # KNOWN CAVEAT (documented, not code-changed -- old and new code are byte-identical here): a site
-        # whose group came out all-zero BY CHANCE under the null is ANTI-conservative -- at the mu=0
-        # boundary _fit_theta's penalty inflates the LRT, so P(p<0.05) among these sites reaches 0.2-0.5
-        # (the marginal null rate stays fine, ~0.026, and family-wide BH-FDR still controls). This is a
-        # boundary property of the dispersion estimator, not of the _group_degen guard. PRACTICAL
-        # CONSEQUENCE: ranking by the most extreme "0% -> X%" sites selects exactly the subset whose
-        # per-site p-values are ~4-10x optimistic; trust the FDR-adjusted q, not the raw p, for those.
-        _lt = float(np.log(theta_s))
-        _at_bound = abs(_lt - _LOG_THETA_LO) < 1e-2
-        _kg0 = k[gidx == 0]; _ng0 = n[gidx == 0]
-        _kg1 = k[gidx == 1]; _ng1 = n[gidx == 1]
-        _group_degen = (_kg0.sum() <= 1e-9 or _kg0.sum() >= _ng0.sum() - 1e-9
-                        or _kg1.sum() <= 1e-9 or _kg1.sum() >= _ng1.sum() - 1e-9)
-        informative = not (_at_bound or _group_degen)
-        prepared.append((key, k, n, gidx, theta_s, informative))
+    sites = list(sites)
+    n_workers = max(1, int(n_workers or 1))
+    work = [(sites[i:i + _CHUNK_SITES], min_group_samples) for i in range(0, len(sites), _CHUNK_SITES)]
+    prepared = _map_chunks(_prepare_chunk, work, n_workers, "dispersion fits", verbose)
     if not prepared:
         return []
 
@@ -255,23 +347,9 @@ def beta_binomial_diff(sites, prior_weight=20.0, min_group_samples=2, ref_df=REF
     eff_prior_weight = prior_weight * prior_conf
     auto_w = (site_weight == "auto")
     fixed_w = None if auto_w else max(0.0, float(site_weight))
-    out = []
-    for key, k, n, gidx, theta_s, _informative in prepared:
-        if not _shrink or eff_prior_weight <= 0:
-            log_shrunk = np.log(theta_s)
-        else:
-            w = max(1.0, float(len(k) - 2)) if auto_w else fixed_w
-            denom = w + eff_prior_weight
-            log_shrunk = (w * np.log(theta_s) + eff_prior_weight * log_prior) / denom if denom > 0 else np.log(theta_s)
-        theta = float(np.exp(log_shrunk))
-        mu0, mu1, stat = _site_lrt(k, n, gidx, theta)
-        out.append({
-            "key": key, "mu_reference": mu0, "mu_test": mu1, "delta": mu1 - mu0,
-            "theta_site": theta_s, "theta_shrunk": theta, "dispersion": 1.0 / (theta + 1.0),
-            "lrt_stat": stat,
-            "n_reference": int((gidx == 0).sum()), "n_test": int((gidx == 1).sum()),
-            "reads_reference": float(n[gidx == 0].sum()), "reads_test": float(n[gidx == 1].sum()),
-        })
+    work = [(prepared[i:i + _CHUNK_SITES], _shrink, eff_prior_weight, log_prior, auto_w, fixed_w)
+            for i in range(0, len(prepared), _CHUNK_SITES)]
+    out = _map_chunks(_test_chunk, work, n_workers, "likelihood-ratio tests", verbose)
 
     # Empirical-null calibration: scale the LRT so its null bulk matches F(1, ref_df).
     stats_arr = np.array([r["lrt_stat"] for r in out])

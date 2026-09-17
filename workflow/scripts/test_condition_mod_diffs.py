@@ -19,12 +19,13 @@ import argparse
 import json
 import os
 import sys
+import time
 
 import numpy as np
 import pandas as pd
 
 import diffstats
-from genotype_utils import benjamini_hochberg
+from genotype_utils import benjamini_hochberg, read_tsv_for_samples
 
 _WANT = ["sample", "ZN_transcript_index", "chrom", "start0", "end0", "strand", "mod_code",
          "Nvalid_cov", "Nmod", "gene_name"]
@@ -65,8 +66,23 @@ def parse_args():
                     help="Test each site PER TRANSCRIPT PARTITION (ZN) instead of summing partitions: "
                          "compares the SAME transcript between conditions. Lower per-test coverage but "
                          "resolves which fragmentform carries the change.")
+    ap.add_argument("--threads", type=int, default=1,
+                    help="worker processes for the per-site dispersion fits / LRTs (the dominant cost: "
+                         "~10 ms per site single-threaded, so 1.6 M sites is ~4.5 h on one core)")
+    ap.add_argument("--chunk-rows", type=int, default=4_000_000,
+                    help="rows per read chunk of the ZN long table (streamed; only the contrast's "
+                         "samples are kept in memory)")
     ap.add_argument("--verbose", action="store_true")
     return ap.parse_args()
+
+
+def _write(out, path):
+    """Write the table atomically (.tmp + rename) so a job killed mid-write cannot leave a truncated
+    table that looks finished."""
+    os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
+    tmp = path + ".tmp"
+    out.to_csv(tmp, sep="\t", index=False)
+    os.replace(tmp, path)
 
 
 def main():
@@ -79,7 +95,7 @@ def main():
     meta = pd.read_csv(args.sample_metadata, sep="\t", low_memory=False, keep_default_na=False)
     if "sample" not in meta.columns or args.column not in meta.columns:
         print(f"[condition_mod] metadata needs 'sample' and {args.column!r}", file=sys.stderr, flush=True)
-        pd.DataFrame(columns=build_out_cols(args.by_transcript)).to_csv(args.out_tsv, sep="\t", index=False)
+        _write(pd.DataFrame(columns=build_out_cols(args.by_transcript)), args.out_tsv)
         return
     grp = dict(zip(meta["sample"].astype(str), meta[args.column].astype(str)))
     ref_s = {s for s, g in grp.items() if g == args.reference}
@@ -87,19 +103,24 @@ def main():
     if len(ref_s) < args.min_samples_per_group or len(test_s) < args.min_samples_per_group:
         print(f"[condition_mod] {name}: need >={args.min_samples_per_group} samples per group "
               f"(reference={len(ref_s)}, test={len(test_s)}); nothing to do", file=sys.stderr, flush=True)
-        pd.DataFrame(columns=build_out_cols(args.by_transcript)).to_csv(args.out_tsv, sep="\t", index=False)
+        _write(pd.DataFrame(columns=build_out_cols(args.by_transcript)), args.out_tsv)
         return
 
-    hdr = pd.read_csv(args.in_tsv, sep="\t", nrows=0).columns
-    df = pd.read_csv(args.in_tsv, sep="\t", low_memory=False, usecols=[c for c in _WANT if c in hdr])
+    # Stream the long table and keep only this contrast's samples (same rows, order and dtypes as a
+    # whole-file read followed by the sample filter, at a fraction of the memory -- see the helper).
+    t_read = time.perf_counter()
+    df = read_tsv_for_samples(args.in_tsv, _WANT, "sample", ref_s | test_s, chunksize=args.chunk_rows,
+                              verbose=args.verbose, label="condition_mod")
     df["sample"] = df["sample"].astype(str)
-    df = df[df["sample"].isin(ref_s | test_s)]
+    if args.verbose:
+        print(f"[condition_mod] {name}: {len(df):,} rows for {len(ref_s | test_s)} samples read in "
+              f"{time.perf_counter() - t_read:.0f}s", flush=True)
     if args.mod_filter:
         # compare as STRINGS: a numeric-only mod_code (e.g. 17802) is read as int64, so isin() against
         # the string CLI values silently matched nothing and dropped every row.
         df = df[df["mod_code"].astype(str).isin({str(m) for m in args.mod_filter})]
     if df.empty:
-        pd.DataFrame(columns=build_out_cols(args.by_transcript)).to_csv(args.out_tsv, sep="\t", index=False)
+        _write(pd.DataFrame(columns=build_out_cols(args.by_transcript)), args.out_tsv)
         return
 
     # Genomic key. In --by-transcript mode the transcript partition (ZN) joins the key, so each
@@ -138,7 +159,7 @@ def main():
               f"{args.min_samples_per_group} samples/group ({len(ref_s)} {args.reference} vs "
               f"{len(test_s)} {args.test})", flush=True)
     if cov.empty:
-        pd.DataFrame(columns=out_cols).to_csv(args.out_tsv, sep="\t", index=False)
+        _write(pd.DataFrame(columns=out_cols), args.out_tsv)
         return
 
     # A site may now include samples uncovered at this (site, ZN) (NaN) -- the per-group filter above
@@ -150,12 +171,17 @@ def main():
     ref_names = [s for s in samples if s in ref_s]
     test_names = [s for s in samples if s in test_s]
     sites = [(i, K[i], N[i], gidx) for i in range(K.shape[0])]
+    t_fit = time.perf_counter()
     res = diffstats.beta_binomial_diff(sites, prior_weight=args.prior_weight,
                                        min_group_samples=args.min_samples_per_group,
                                        ref_df=args.ref_df, calibrate=False,
-                                       site_weight=diffstats.parse_site_weight(args.site_weight))
+                                       site_weight=diffstats.parse_site_weight(args.site_weight),
+                                       n_workers=args.threads, verbose=args.verbose)
+    if args.verbose:
+        print(f"[condition_mod] {name}: {len(res):,} {unit}s fitted in {time.perf_counter() - t_fit:.0f}s "
+              f"({args.threads} worker(s))", flush=True)
     if not res:
-        pd.DataFrame(columns=out_cols).to_csv(args.out_tsv, sep="\t", index=False)
+        _write(pd.DataFrame(columns=out_cols), args.out_tsv)
         return
 
     idx = cov.index
@@ -191,8 +217,7 @@ def main():
     out["_abs"] = out["delta"].abs()
     out = out.sort_values(["p_adj_bh", "_abs"], ascending=[True, False]).drop(columns="_abs")
     out = out[out_cols].reset_index(drop=True)
-    os.makedirs(os.path.dirname(args.out_tsv) or ".", exist_ok=True)
-    out.to_csv(args.out_tsv, sep="\t", index=False)
+    _write(out, args.out_tsv)
     if args.verbose:
         sig = int((out["p_adj_bh"] < 0.05).sum())
         print(f"[condition_mod] {name}: {len(out):,} sites tested, {sig:,} at FDR<0.05 -> {args.out_tsv}", flush=True)

@@ -224,6 +224,11 @@ def main():
     # (values, NaN pattern, and read_csv-style dtypes), and the reverse conversion must round-trip.
     _check_parquet_roundtrip()
 
+    # ---- between_conditions at scale: the streamed sample-filtered read must equal a whole-file read
+    # (rows, order, dtypes incl. a mixed text/numeric column), and the parallel per-site fits must give
+    # the same table as the sequential ones (threads=1 vs threads=3), for both site and per-transcript.
+    _check_between_conditions()
+
     print("genotype_regression_smoke_checks: OK")
 
 
@@ -358,6 +363,108 @@ def _check_depth_cap():
             raise AssertionError("per-window checkpoint was not reused on re-run")
         if shards.exists():
             raise AssertionError("shard dir must be removed after a successful run")
+
+
+
+def _check_between_conditions():
+    import random
+    import numpy as np
+    sys.path.insert(0, str(ROOT))
+    from genotype_utils import read_tsv_for_samples
+    import diffstats
+    with tempfile.TemporaryDirectory(prefix="between_conditions_smoke_") as tmpdir:
+        tmp = Path(tmpdir)
+        rng = random.Random(11)
+        samples = [f"S{i}" for i in range(1, 7)]
+        meta = pd.DataFrame({"sample": samples, "condition": ["ref"] * 3 + ["test"] * 3})
+        meta.to_csv(tmp / "meta.tsv", sep="\t", index=False)
+        rows = []
+        for si in range(500):                      # 500 sites x up to 2 ZN partitions x 6 samples
+            chrom = "chr1" if si < 400 else "chr2"
+            start0 = 1000 + si * 7
+            mod = rng.choice(["a", "m", "17802"])    # mixed text/numeric codes -> object column
+            gene = rng.choice(["G1", "G2", ""])       # "" -> NaN after read_csv
+            for zn in (1, 2)[: rng.choice((1, 2))]:
+                p_ref = rng.uniform(0.05, 0.6)
+                p_test = p_ref + rng.choice((0.0, 0.0, 0.25))
+                for sample in samples:
+                    if rng.random() < 0.1:
+                        continue                      # uncovered (sample x site) -> NaN in the pivot
+                    n = rng.randint(5, 80)
+                    p = p_ref if sample in samples[:3] else p_test
+                    k = sum(1 for _ in range(n) if rng.random() < p)
+                    rows.append((sample, zn, chrom, start0, start0 + 1, "+", mod, n, k, gene))
+        long = pd.DataFrame(rows, columns=["sample", "ZN_transcript_index", "chrom", "start0", "end0",
+                                           "strand", "mod_code", "Nvalid_cov", "Nmod", "gene_name"])
+        long.to_csv(tmp / "long.tsv", sep="\t", index=False)
+        # (a) streamed sample-filtered read == whole-file read + filter (small chunks force many chunks,
+        #     including chunks where mod_code parses as all-numeric or gene_name as all-empty)
+        want = ["sample", "ZN_transcript_index", "chrom", "start0", "end0", "strand", "mod_code",
+                "Nvalid_cov", "Nmod", "gene_name"]
+        keep = {"S1", "S2", "S4", "S5"}
+        whole = pd.read_csv(tmp / "long.tsv", sep="\t", low_memory=False, usecols=want)
+        whole = whole[whole["sample"].astype(str).isin(keep)].reset_index(drop=True)
+        streamed = read_tsv_for_samples(str(tmp / "long.tsv"), want, "sample", keep, chunksize=37)
+        if list(streamed.columns) != list(whole.columns):
+            raise AssertionError(f"streamed read: column order differs {list(streamed.columns)}")
+        for c in want:
+            if str(streamed[c].dtype) != str(whole[c].dtype):
+                raise AssertionError(f"streamed read: dtype of {c} is {streamed[c].dtype}, whole-file {whole[c].dtype}")
+        pd.testing.assert_frame_equal(streamed, whole)
+        # (b) sequential vs parallel fits must be identical, row for row
+        for by_tx in (False, True):
+            outs = []
+            for th in (1, 3):
+                out = tmp / f"mod_{int(by_tx)}_{th}.tsv"
+                run([sys.executable, str(ROOT / "test_condition_mod_diffs.py"), "--in-tsv", str(tmp / "long.tsv"),
+                     "--sample-metadata", str(tmp / "meta.tsv"), "--out-tsv", str(out), "--test", "test",
+                     "--reference", "ref", "--min-cov", "5", "--threads", str(th), "--chunk-rows", "101"]
+                    + (["--by-transcript"] if by_tx else []))
+                outs.append(out.read_bytes())
+            if outs[0] != outs[1]:
+                raise AssertionError(f"between_conditions: threads=1 and threads=3 tables differ (by_tx={by_tx})")
+            n = len(pd.read_csv(tmp / f"mod_{int(by_tx)}_1.tsv", sep="\t"))
+            if n < 100:
+                raise AssertionError(f"between_conditions: expected >=100 tested sites, got {n} (by_tx={by_tx})")
+        # (c) the tail test must not depend on string-hash order (it iterated set-valued groups, so
+        #     Welch's t summed the replicate medians in PYTHONHASHSEED order -> last-digit p differences)
+        tail_rows = []
+        for si in range(60):
+            zt = f"G{si}.G{si}.G1.T1"
+            for sample in samples:
+                base = 60 + si + (15 if sample in samples[3:] and si % 2 == 0 else 0)
+                for r in range(12):
+                    tail_rows.append((sample, f"r{si}_{sample}_{r}", base + rng.randint(-20, 20), zt, f"G{si}"))
+        pd.DataFrame(tail_rows, columns=["sample", "qname", "tail_len", "ZT", "gene_name"]).to_csv(
+            tmp / "tails.tsv", sep="\t", index=False)
+        import os
+        outs = []
+        for seed in ("1", "2"):
+            out = tmp / f"tail_{seed}.tsv"
+            run_env = dict(os.environ, PYTHONHASHSEED=seed)
+            proc = subprocess.run([sys.executable, str(ROOT / "test_condition_tail_diffs.py"), "--tail-tsv", str(tmp / "tails.tsv"),
+                                   "--sample-metadata", str(tmp / "meta.tsv"), "--out-tsv", str(out), "--test", "test",
+                                   "--reference", "ref", "--min-reads-per-sample", "5", "--chunk-rows", "50"],
+                                  capture_output=True, text=True, env=run_env)
+            if proc.returncode != 0:
+                raise SystemExit(f"tail test failed:\n{proc.stderr}")
+            outs.append(out.read_bytes())
+        if outs[0] != outs[1]:
+            raise AssertionError("test_condition_tail_diffs: output depends on PYTHONHASHSEED")
+        if len(pd.read_csv(tmp / "tail_1.tsv", sep="\t")) < 50:
+            raise AssertionError("test_condition_tail_diffs: expected >=50 tested fragmentforms")
+        # (d) the engine itself: n_workers must not change any statistic
+        sites = []
+        for i in range(300):
+            n = np.array([rng.randint(5, 60) for _ in range(6)], dtype=float)
+            k = np.array([sum(1 for _ in range(int(nn)) if rng.random() < (0.2 if j < 3 else 0.35))
+                          for j, nn in enumerate(n)], dtype=float)
+            sites.append((i, k, n, np.array([0, 0, 0, 1, 1, 1])))
+        r1 = diffstats.beta_binomial_diff(sites, n_workers=1)
+        r3 = diffstats.beta_binomial_diff(sites, n_workers=3)
+        if [(r["key"], r["p_value"], r["lrt_stat"], r["theta_shrunk"]) for r in r1] != \
+           [(r["key"], r["p_value"], r["lrt_stat"], r["theta_shrunk"]) for r in r3]:
+            raise AssertionError("diffstats.beta_binomial_diff: parallel result differs from sequential")
 
 
 if __name__ == "__main__":

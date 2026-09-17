@@ -23,7 +23,7 @@ import numpy as np
 import pandas as pd
 
 import diffstats
-from genotype_utils import benjamini_hochberg
+from genotype_utils import benjamini_hochberg, read_tsv_for_samples
 
 OUT_COLS = ["contrast", "level", "feature", "gene_name", "n_reference", "n_test",
             "reads_reference", "reads_test", "mean_tail_reference", "mean_tail_test",
@@ -44,8 +44,19 @@ def parse_args():
                     help="min reads for a feature in EVERY sample (a median needs support)")
     ap.add_argument("--min-samples-per-group", type=int, default=2)
     ap.add_argument("--min-tail", type=int, default=1, help="drop reads with tail_len < this (pt:i:0 = no estimate)")
+    ap.add_argument("--chunk-rows", type=int, default=4_000_000,
+                    help="rows per read chunk of the per-read tail table (streamed; only the contrast's "
+                         "samples are kept in memory)")
     ap.add_argument("--verbose", action="store_true")
     return ap.parse_args()
+
+
+def _write(out, path):
+    """Atomic write (.tmp + rename): a killed job never leaves a truncated table that looks finished."""
+    os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
+    tmp = path + ".tmp"
+    out.to_csv(tmp, sep="\t", index=False)
+    os.replace(tmp, path)
 
 
 def main():
@@ -57,7 +68,7 @@ def main():
 
     meta = pd.read_csv(args.sample_metadata, sep="\t", low_memory=False, keep_default_na=False)
     if "sample" not in meta.columns or args.column not in meta.columns:
-        pd.DataFrame(columns=OUT_COLS).to_csv(args.out_tsv, sep="\t", index=False)
+        _write(pd.DataFrame(columns=OUT_COLS), args.out_tsv)
         return
     grp = dict(zip(meta["sample"].astype(str), meta[args.column].astype(str)))
     ref_s = {s for s, g in grp.items() if g == args.reference}
@@ -65,14 +76,15 @@ def main():
     if len(ref_s) < args.min_samples_per_group or len(test_s) < args.min_samples_per_group:
         print(f"[condition_tail] {name}: need >={args.min_samples_per_group}/group "
               f"({len(ref_s)} vs {len(test_s)})", file=sys.stderr, flush=True)
-        pd.DataFrame(columns=OUT_COLS).to_csv(args.out_tsv, sep="\t", index=False)
+        _write(pd.DataFrame(columns=OUT_COLS), args.out_tsv)
         return
 
     want = ["sample", "tail_len", "ZT", "gene_name"]
-    hdr = pd.read_csv(args.tail_tsv, sep="\t", nrows=0).columns
-    df = pd.read_csv(args.tail_tsv, sep="\t", low_memory=False, usecols=[c for c in want if c in hdr])
+    # Stream the per-read table keeping only this contrast's samples (26 GB / ~400 M rows on a
+    # 31-library run; a whole-file read is 5+ min and tens of GB per contrast).
+    df = read_tsv_for_samples(args.tail_tsv, want, "sample", ref_s | test_s, chunksize=args.chunk_rows,
+                              verbose=args.verbose, label="condition_tail")
     df["sample"] = df["sample"].astype(str)
-    df = df[df["sample"].isin(ref_s | test_s)]
     # pt:i:0 = dorado "no estimate", not a 0-nt tail: require an actual estimate (tail_estimated).
     _tl = pd.to_numeric(df["tail_len"], errors="coerce").fillna(0)
     if "tail_estimated" in df.columns:
@@ -81,7 +93,7 @@ def main():
         _est = _tl > 0
     df = df[_est & (_tl >= int(args.min_tail))]
     if df.empty:
-        pd.DataFrame(columns=OUT_COLS).to_csv(args.out_tsv, sep="\t", index=False)
+        _write(pd.DataFrame(columns=OUT_COLS), args.out_tsv)
         return
     feat_col = "ZT" if args.level == "fragmentform" else "gene_name"
     if "gene_name" in df.columns and "ZT" in df.columns:
@@ -138,8 +150,11 @@ def main():
     for feature, sub in per.groupby(feat_col, sort=False):
         m = dict(zip(sub["sample"], sub["median"]))
         n = dict(zip(sub["sample"], sub["size"]))
-        a = [m[s] for s in ref_s if s in m]
-        b = [m[s] for s in test_s if s in m]
+        # Iterate the (set-valued) groups in SORTED order: Welch's t sums the values in list order, and
+        # set iteration order follows string hashing (PYTHONHASHSEED), so the same data gave p-values
+        # differing in the last digits from run to run (and a non-reproducible BH ranking on ties).
+        a = [m[s] for s in sorted(ref_s) if s in m]
+        b = [m[s] for s in sorted(test_s) if s in m]
         if len(a) < args.min_samples_per_group or len(b) < args.min_samples_per_group:
             continue
         r = diffstats.continuous_diff(a, b)
@@ -197,14 +212,13 @@ def main():
         n_untestable += 1
     out = pd.DataFrame(rows)
     if out.empty:
-        pd.DataFrame(columns=OUT_COLS).to_csv(args.out_tsv, sep="\t", index=False)
+        _write(pd.DataFrame(columns=OUT_COLS), args.out_tsv)
         return
     out["p_adj_bh"] = benjamini_hochberg(out["p_value"].values)
     out["_abs"] = out["delta_nt"].abs()
     out = out.sort_values(["p_adj_bh", "_abs"], ascending=[True, False]).drop(columns="_abs")
     out = out[OUT_COLS].reset_index(drop=True)
-    os.makedirs(os.path.dirname(args.out_tsv) or ".", exist_ok=True)
-    out.to_csv(args.out_tsv, sep="\t", index=False)
+    _write(out, args.out_tsv)
     if args.verbose:
         n_tested = int(np.isfinite(pd.to_numeric(out["p_value"], errors="coerce")).sum())
         msg = (f"[condition_tail:{args.level}] {name}: {n_tested:,} features tested, "

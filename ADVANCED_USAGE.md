@@ -463,6 +463,17 @@ dispersion shrunk across features.
 > (the reference data has a biological SD of ~1 percentage point) a ~2 pp shift
 > already clears FDR. Rank by `|delta|`.
 
+**Scale and resume.** Each test script keeps only the contrast's samples in memory
+(the ZN long table and the per-read tail table are streamed in chunks) and runs the
+per-site dispersion fits on `threads` worker processes -- the fits are the dominant
+cost (about 10 ms per site on one core, so a 1.6 M-site contrast is ~4.5 h
+single-threaded and ~12 min on 24 cores); the answer is identical for any thread
+count. Every step (one test x one contrast) writes its own marker under
+`results/.checkpoints/between_conditions/` once its script exits 0, and tables are
+written atomically, so `--resume` after a killed job re-runs only the unfinished
+steps (a config change invalidates the markers). The SNP-at-modified-base flag is
+computed once per stage and applied to every site-level modification table.
+
 | Key | Default | Description |
 |-----|--------:|-------------|
 | `between_conditions.enable` | `true` | Run the stage (no-op without a samplesheet/contrasts). |

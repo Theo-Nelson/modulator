@@ -2265,6 +2265,45 @@ class ModulatorPipeline:
             args.append("--also-naive")
         self.run_python_script("test_hierarchical_stoich.py", args, label="test_hierarchical_stoich")
 
+    # ---- between_conditions: per-step resume markers -------------------------------------------
+    def _bc_step(self, label: str, outputs: list[Path], fn) -> None:
+        """Run ONE between_conditions step (one test script for one contrast) unless a per-step marker
+        says it already finished under the SAME resolved config and its outputs are non-empty.
+
+        The stage used to have a single whole-stage checkpoint, written only after every contrast's
+        every test. On a 31-library run (6 contrasts x ~10 h each on the old single-threaded fits) that
+        was longer than a 48 h job, so every `--resume` restarted at contrast 1 and the stage could
+        never finish. A marker per step lets a restart skip exactly the finished work. The marker is
+        written only after the script exits 0 (and the scripts write their tables atomically), so a
+        job killed mid-step leaves no marker and the step reruns rather than trusting a cut-off table.
+        A config change invalidates every marker (same signature rule as the stage checkpoints)."""
+        import re as _re
+        mdir = self._checkpoint_dir / "between_conditions"
+        marker = mdir / (_re.sub(r"[^A-Za-z0-9_.-]+", "_", label) + ".done")
+        sig = self._config_sig()
+        if self.resume and marker.exists() and outputs and all(self._nonempty(o) for o in outputs):
+            try:
+                prev = marker.read_text().rstrip("\n").split("\t")[-1]
+            except OSError:
+                prev = ""
+            if prev == sig:
+                if self.verbose:
+                    print(f"[modulator]   {label}: finished earlier under this config -- reusing "
+                          f"existing output, skipping", flush=True)
+                return
+        t0 = time.perf_counter()
+        fn()
+        dt = time.perf_counter() - t0
+        try:
+            mdir.mkdir(parents=True, exist_ok=True)
+            marker.write_text(f"done\t{label}\t{sig}\n")
+        except OSError as exc:
+            print(f"[modulator] warning: could not write step marker for {label!r} ({exc}); "
+                  f"--resume will re-run it.", file=sys.stderr, flush=True)
+        if self.verbose:
+            print(f"[modulator]   {label} finished in {dt:.1f}s "
+                  f"({time.strftime('%Y-%m-%d %H:%M:%S')})", flush=True)
+
     def stage_between_conditions(self) -> None:
         """Replicate-aware BETWEEN-CONDITION comparisons, for every configured contrast.
 
@@ -2274,6 +2313,11 @@ class ModulatorPipeline:
         compared across replicate summaries with Welch. NOTHING here pools reads across replicates:
         with millions of reads and n=3 per group that is pseudoreplication (measured 62% false
         positives on simulated nulls). See diffstats.py for the model and its calibration.
+
+        Every step is a resumable unit (see _bc_step). The per-site fits -- the dominant cost -- run
+        on `threads` worker processes inside each script, and the SNP-at-modified-base flag (which
+        walks the whole ZN long table and does not depend on the contrast) is computed ONCE after all
+        contrasts and applied to every site-level table, instead of once per contrast.
         """
         cfg = self.config.get("between_conditions", {})
         if not as_bool(cfg.get("enable", True), True):
@@ -2286,11 +2330,13 @@ class ModulatorPipeline:
         if not self._nonempty(self.paths.sample_metadata):
             return
         min_grp = str(int(cfg.get("min_samples_per_group", 2)))
+        threads = str(max(1, self.top_threads or 1))
         common_stat = ["--prior-weight", str(float(cfg.get("prior_weight", 20.0))),
                        "--ref-df", str(int(cfg.get("ref_df", 10))),
                        "--site-weight", str(cfg.get("site_weight", "auto")),
-                       "--min-samples-per-group", min_grp]
+                       "--min-samples-per-group", min_grp, "--threads", threads]
         mod_filter = _as_list(cfg.get("mod_filter"))
+        mod_tables: list[Path] = []      # site-level tables to flag for a SNP at the modified base
         for c in self.contrasts:
             name = c["name"]
             common = ["--sample-metadata", str(self.paths.sample_metadata), "--column", c["column"],
@@ -2307,23 +2353,17 @@ class ModulatorPipeline:
                 # whose isoform usage switches between conditions failed --min-cov in every partition and
                 # the site-level answer was lost entirely. The per-transcript view (which fragmentform
                 # carries the change) is written as an ADDITIONAL table when mod_by_transcript is on.
-                self.run_python_script("test_condition_mod_diffs.py",
-                                       ["--out-tsv", str(self.paths.cond_mod_diffs(name)), *base_args],
-                                       label=f"condition_mod_diffs:{name}")
+                label = f"condition_mod_diffs:{name}"
+                self._bc_step(label, [self.paths.cond_mod_diffs(name)], lambda: self.run_python_script(
+                    "test_condition_mod_diffs.py",
+                    ["--out-tsv", str(self.paths.cond_mod_diffs(name)), *base_args], label=label))
+                mod_tables.append(self.paths.cond_mod_diffs(name))
                 if as_bool(cfg.get("mod_by_transcript", True), True):
-                    self.run_python_script("test_condition_mod_diffs.py",
-                                           ["--out-tsv", str(self.paths.cond_mod_diffs_by_tx(name)),
-                                            "--by-transcript", *base_args],
-                                           label=f"condition_mod_diffs_by_tx:{name}")
-                # Flag between-condition sites that sit on a segregating SNP at the modified base
-                # (genotype confounder). Needs candidate SNPs from the genotype stage.
-                if self._nonempty(self.paths.geno_candidate_snps) and self._nonempty(self.paths.cond_mod_diffs(name)):
-                    self.run_python_script("find_snp_at_mod_base.py", [
-                        "--candidate-snps", str(self.paths.geno_candidate_snps),
-                        "--mod-sites", str(self.paths.zn_filtered_long),
-                        "--out-tsv", str(self.paths.geno_snp_at_mod_base),
-                        "--annotate", str(self.paths.cond_mod_diffs(name)),
-                    ], label=f"flag_snp_at_mod_base:{name}")
+                    label = f"condition_mod_diffs_by_tx:{name}"
+                    self._bc_step(label, [self.paths.cond_mod_diffs_by_tx(name)], lambda: self.run_python_script(
+                        "test_condition_mod_diffs.py",
+                        ["--out-tsv", str(self.paths.cond_mod_diffs_by_tx(name)), "--by-transcript",
+                         *base_args], label=label))
             # 2) differential usage: isoform / APA site / splice junction (one engine, three maps)
             for feature in ("isoform", "apa", "junction"):
                 if not as_bool(cfg.get(f"{feature}_usage", True), True):
@@ -2346,21 +2386,38 @@ class ModulatorPipeline:
                     if not self._nonempty(self.paths.splice_junctions):
                         continue
                     args += ["--splice-junctions", str(self.paths.splice_junctions)]
-                self.run_python_script("test_condition_usage_diffs.py", args,
-                                       label=f"condition_{feature}_usage:{name}")
+                label = f"condition_{feature}_usage:{name}"
+                self._bc_step(label, [self.paths.cond_usage_diffs(name, feature)],
+                              lambda args=args, label=label: self.run_python_script(
+                                  "test_condition_usage_diffs.py", args, label=label))
             # 3) differential poly(A) tail length (continuous -> Welch across replicates)
             if as_bool(cfg.get("tail_diffs", True), True) and self._nonempty(self.paths.polya_read_tails):
-                self.run_python_script("test_condition_tail_diffs.py", [
-                    "--tail-tsv", str(self.paths.polya_read_tails),
-                    "--out-tsv", str(self.paths.cond_tail_diffs(name)),
-                    "--level", str(cfg.get("tail_level", "fragmentform")),
-                    "--min-reads-per-sample", str(int(cfg.get("min_tail_reads_per_sample", 10))),
-                    "--min-samples-per-group", min_grp,
-                    # Use the same tail-length floor as the within-condition polya stage so the two
-                    # analyses draw on the same read set (polya.min_tail, not this script's default of 1).
-                    "--min-tail", str(int(self.config.get("polya", {}).get("min_tail", 1))),
-                    *common,
-                ], label=f"condition_tail_diffs:{name}")
+                label = f"condition_tail_diffs:{name}"
+                self._bc_step(label, [self.paths.cond_tail_diffs(name)], lambda: self.run_python_script(
+                    "test_condition_tail_diffs.py", [
+                        "--tail-tsv", str(self.paths.polya_read_tails),
+                        "--out-tsv", str(self.paths.cond_tail_diffs(name)),
+                        "--level", str(cfg.get("tail_level", "fragmentform")),
+                        "--min-reads-per-sample", str(int(cfg.get("min_tail_reads_per_sample", 10))),
+                        "--min-samples-per-group", min_grp,
+                        # Use the same tail-length floor as the within-condition polya stage so the two
+                        # analyses draw on the same read set (polya.min_tail, not this script's default of 1).
+                        "--min-tail", str(int(self.config.get("polya", {}).get("min_tail", 1))),
+                        *common,
+                    ], label=label))
+        # 4) Flag between-condition sites that sit on a segregating SNP at the modified base (genotype
+        #    confounder). Needs candidate SNPs from the genotype stage. Contrast-independent, so it is
+        #    computed once and applied to every site-level table (idempotent in-place annotation).
+        mod_tables = [t for t in mod_tables if self._nonempty(t)]
+        if mod_tables and self._nonempty(self.paths.geno_candidate_snps):
+            label = "flag_snp_at_mod_base"
+            self._bc_step(label, [self.paths.geno_snp_at_mod_base], lambda: self.run_python_script(
+                "find_snp_at_mod_base.py", [
+                    "--candidate-snps", str(self.paths.geno_candidate_snps),
+                    "--mod-sites", str(self.paths.zn_filtered_long),
+                    "--out-tsv", str(self.paths.geno_snp_at_mod_base),
+                    "--annotate", *[str(t) for t in mod_tables],
+                ], label=label))
 
     def stage_report(self) -> None:
         report_cfg = self.config.get("report", {})
