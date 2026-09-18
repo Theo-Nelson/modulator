@@ -1642,6 +1642,10 @@ class ModulatorPipeline:
             "--verbose",
         ]
         td = self.config.get("test_diffs", {})
+        if td.get("mc_min_expected") is not None:
+            args.extend(["--mc-min-expected", str(float(td["mc_min_expected"]))])
+        if td.get("mc_resamples") is not None:
+            args.extend(["--mc-resamples", str(int(td["mc_resamples"]))])
         if is_set(td.get("test")):
             args.extend(["--test", str(td["test"])])
         if td.get("pseudocount") is not None:
@@ -2506,6 +2510,9 @@ class ModulatorPipeline:
                 "--max-genes", str(int(report_cfg.get("browser_max_genes") or self._reference_gene_count())),
                 # bound the embedded per-gene site payload on large cohorts (0 = every site x fragmentform)
                 "--max-sites-per-gene", str(int(report_cfg.get("browser_max_sites_per_gene", 0) or 0)),
+                # embed the data in the page, or write a companion data folder the page loads per gene
+                "--data-mode", str(report_cfg.get("browser_data", "auto")),
+                "--companion-threshold-mb", str(float(report_cfg.get("browser_companion_threshold_mb", 50))),
                 "--verbose",
             ]
             for flag, path in (

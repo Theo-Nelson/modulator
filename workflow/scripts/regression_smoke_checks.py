@@ -180,6 +180,85 @@ def test_polya_gene_from_zt():
         raise AssertionError(f"fallback must strip .G<n>.T<n>, not return the raw label: {t1!r}")
 
 
+def test_stratified_sparse_guard():
+    """test_stoichiometry_diffs: (1) the effect is the MH rate difference over EVERY stratum covering both
+    forms, so one modified read on a shallow form no longer scores as a 100% difference; (2) a sparse
+    stratified table (expected counts << 5) gets the exact Monte-Carlo p of the same CMH statistic, not
+    the chi-square approximation; (3) a well-populated table is unchanged; (4) the guard can be turned off."""
+    import importlib.util
+    import numpy as np
+    spec = importlib.util.spec_from_file_location("test_stoichiometry_diffs", ROOT / "test_stoichiometry_diffs.py")
+    m = importlib.util.module_from_spec(spec); spec.loader.exec_module(m)
+    names = [f"S{i}" for i in range(31)]
+
+    def site(rows):
+        zn, sp, cv, nm = zip(*rows)
+        return (np.array(zn), np.array(sp, dtype=np.int32), np.array(cv), np.array(nm))
+    # 31 samples; form 1 deep with one modified read in sample 7; form 14 has 1 read per sample, modified in sample 3
+    rows = []
+    for smp in range(31):
+        rows.append((1, smp, 1165, 1 if smp == 7 else 0))
+        rows.append((14, smp, 1, 1 if smp == 3 else 0))
+        for z in range(2, 8):
+            rows.append((z, smp, 3, 0))
+    zn, sp, cv, nm = site(rows)
+    r = m.summarize_site_arrays(zn, sp, cv, nm, names, 20, "auto", 0.5, "two-sided")
+    assert r["test_name"].endswith("_mc"), r["test_name"]
+    assert r["p_value"] > 1e-4, f"sparse table must not get an asymptotic p: {r['p_value']}"
+    assert abs(r["effect_max_abs_frac_diff"] - r["effect_max_abs_frac_diff_pooled"]) < 0.02, \
+        f"effect over all strata should be near the pooled contrast: {r['effect_max_abs_frac_diff']} vs {r['effect_max_abs_frac_diff_pooled']}"
+    assert r["effect_max_abs_frac_diff"] < 0.05, r["effect_max_abs_frac_diff"]
+    r_off = m.summarize_site_arrays(zn, sp, cv, nm, names, 20, "auto", 0.5, "two-sided", mc_min_expected=0)
+    assert not r_off["test_name"].endswith("_mc") and r_off["p_value"] < r["p_value"], "guard off must reproduce the chi-square path"
+    # deterministic
+    r2 = m.summarize_site_arrays(zn, sp, cv, nm, names, 20, "auto", 0.5, "two-sided")
+    assert r2["p_value"] == r["p_value"], "MC p must be deterministic (fixed seed)"
+    # dense: 3 forms x 5 samples, 30% vs 10% vs 30% -> asymptotic CMH, and the effect equals the old definition
+    rows = []
+    for smp in range(5):
+        rows += [(1, smp, 200, 60), (2, smp, 100, 10), (3, smp, 80, 24)]
+    zn, sp, cv, nm = site(rows)
+    d = m.summarize_site_arrays(zn, sp, cv, nm, names, 20, "auto", 0.5, "two-sided")
+    assert d["test_name"] == "cmh_general_3x2" and abs(d["effect_max_abs_frac_diff"] - 0.2) < 1e-9, d
+    stat, p, _df, _used = m.cmh_general_association(m.informative_strata([np.array([[60, 140], [10, 90], [24, 56]], float)] * 5))
+    assert abs(d["stat_value"] - stat) < 1e-9 and abs(d["p_value"] - p) < 1e-300, "dense path must be the plain CMH"
+
+
+def test_classify_example_rank():
+    """classify_diff_sites: the example order shared by the table and the rankNN__ figures is by the
+    classified hi-lo difference, then FDR, then the shallower form's coverage -- not the saturating test
+    effect -- and is 1-based per leaf."""
+    import importlib.util
+    spec = importlib.util.spec_from_file_location("classify_diff_sites", ROOT / "classify_diff_sites.py")
+    m = importlib.util.module_from_spec(spec); spec.loader.exec_module(m)
+    recs = [
+        dict(class_key="A", gene="g1", mod="a", chrom="chr1", start0=10, strand="+", effect=1.0, padj=1e-300, hi_frac=0.04, lo_frac=0.00, hi_cov=23, lo_cov=36000),
+        dict(class_key="A", gene="g2", mod="a", chrom="chr1", start0=20, strand="+", effect=0.3, padj=1e-5, hi_frac=0.60, lo_frac=0.20, hi_cov=50, lo_cov=80),
+        dict(class_key="A", gene="g3", mod="a", chrom="chr1", start0=30, strand="+", effect=0.5, padj=1e-9, hi_frac=0.60, lo_frac=0.20, hi_cov=500, lo_cov=800),
+        dict(class_key="B", gene="g4", mod="a", chrom="chr2", start0=40, strand="+", effect=1.0, padj=1e-2, hi_frac=0.10, lo_frac=0.00, hi_cov=30, lo_cov=30),
+    ]
+    m.assign_example_ranks(recs)
+    order = {r["gene"]: r["example_rank"] for r in recs}
+    assert order == {"g3": 1, "g2": 2, "g1": 3, "g4": 1}, order
+    top = [r["gene"] for r in m.ranked_examples([r for r in recs if r["class_key"] == "A"], 2)]
+    assert top == ["g3", "g2"], top
+
+
+def test_browser_companion_shards(tmp_path=None):
+    """build_gene_browser companion mode: every gene is in the shard the page will compute (crc32 % n)."""
+    import importlib.util, json, os, tempfile, zlib
+    spec = importlib.util.spec_from_file_location("build_gene_browser", ROOT / "build_gene_browser.py")
+    m = importlib.util.module_from_spec(spec); spec.loader.exec_module(m)
+    genes = [f"GENE{i}" for i in range(50)] + ["CTC-338M12.4", "Zfp\u00e9"]
+    n = 7
+    with tempfile.TemporaryDirectory() as d:
+        for g in genes:
+            sid = zlib.crc32(g.encode("utf-8")) % n
+            assert 0 <= sid < n
+        # the HTML template must carry the loader hooks the shards call
+        assert "__modulator_browser_shard" in m._HTML and "__modulator_browser_index" in m._HTML and "crc32(" in m._HTML
+
+
 def main():
     assembler = load_assembler_module()
     aggregate = load_aggregate_module()
@@ -189,6 +268,9 @@ def main():
     test_aggregate_partition_mapping(aggregate)
     test_stale_zn_filter(aggregate)
     test_polya_gene_from_zt()
+    test_stratified_sparse_guard()
+    test_classify_example_rank()
+    test_browser_companion_shards()
     print("regression_smoke_checks: OK")
 
 

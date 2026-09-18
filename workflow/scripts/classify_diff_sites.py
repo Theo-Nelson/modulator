@@ -673,6 +673,32 @@ def parse_args():
     return ap.parse_args()
 
 
+def example_sort_key(rec):
+    """Sort key for the per-leaf example ranking (best first): largest classified hi-lo difference,
+    then smallest FDR, then deepest shallower form, then a stable positional tie-break."""
+    return (-float(rec.get('hi_frac', 0.0) - rec.get('lo_frac', 0.0)),
+            float(rec.get('padj', 1.0)),
+            -min(int(rec.get('hi_cov', 0)), int(rec.get('lo_cov', 0))),
+            str(rec.get('gene', '')), str(rec.get('chrom', '')), int(rec.get('start0', 0)), str(rec.get('mod', '')))
+
+
+def assign_example_ranks(fig_records):
+    """Set rec['example_rank'] (1-based within each class_key) by example_sort_key."""
+    by_cat = defaultdict(list)
+    for rec in fig_records:
+        by_cat[rec['class_key']].append(rec)
+    for recs in by_cat.values():
+        for rank, rec in enumerate(sorted(recs, key=example_sort_key), 1):
+            rec['example_rank'] = rank
+
+
+def ranked_examples(recs, per_category):
+    """The leaf's top `per_category` records in example order (ranks assigned if missing)."""
+    if any('example_rank' not in r for r in recs):
+        assign_example_ranks(recs)
+    return sorted(recs, key=lambda r: r['example_rank'])[:per_category]
+
+
 def render_category_figures(fig_records, zn_long_path, figs_dir, per_category,
                             verbose=False):
     """Render the SAME 2-panel per-site stoichiometry figure used by
@@ -717,7 +743,7 @@ def render_category_figures(fig_records, zn_long_path, figs_dir, per_category,
     # table in chunks and keep just those sites' rows instead of loading every row + a tuple per row.
     _wanted = set()
     for recs in by_cat.values():
-        for rec in sorted(recs, key=lambda d: d['effect'], reverse=True)[:per_category]:
+        for rec in ranked_examples(recs, per_category):
             _wanted.add(f"{rec['gene']}|{rec['mod']}|{rec['chrom']}|{int(rec['start0'])}|{int(rec['end0'])}|{rec['strand']}")
     _parts = []
     for chunk in pd.read_csv(zn_long_path, sep="\t", low_memory=False, usecols=sorted(need), chunksize=2_000_000):
@@ -741,10 +767,11 @@ def render_category_figures(fig_records, zn_long_path, figs_dir, per_category,
 
     made = {}
     for cat, recs in by_cat.items():
-        recs = sorted(recs, key=lambda d: d['effect'], reverse=True)[:per_category]
+        recs = ranked_examples(recs, per_category)
         cat_dir = os.path.join(figs_dir, cat)
         n = 0
-        for rank, rec in enumerate(recs, 1):
+        for rec in recs:
+            rank = rec['example_rank']
             per_tx = rec['per_tx']
             if not per_tx or len(per_tx) < 2:
                 continue
@@ -760,7 +787,8 @@ def render_category_figures(fig_records, zn_long_path, figs_dir, per_category,
             c_safe = re.sub(r'[^A-Za-z0-9._-]', '_', str(rec['chrom']))
             title = (f"{rec['gene']} | {rec['mod']} | "
                      f"{rec['chrom']}:{rec['start0']}-{rec['end0']}({rec['strand']})\n"
-                     f"{cat}   FDR={rec['padj']:.2e}, max|Δfrac|={rec['effect']:.3f}")
+                     f"{cat}   example #{rank}: HIGH ZN{rec['hiZN']} {100*rec['hi_frac']:.0f}% vs "
+                     f"LOW ZN{rec['loZN']} {100*rec['lo_frac']:.0f}%, FDR={rec['padj']:.2e}")
             os.makedirs(cat_dir, exist_ok=True)
             out_png = os.path.join(
                 cat_dir,
@@ -907,7 +935,7 @@ def plot_locus_arch(rec, iso, genes, out_png):
     else:
         lab_x, lab_ha = pos - x_off, 'right'
     ax.text(lab_x, line_top + 0.12,
-            f"{mdisp} @ {chrom}:{pos}\nΔ={eff:.2f} (hi {hf:.2f} vs lo {lf:.2f})",
+            f"{mdisp} @ {chrom}:{pos}\nHIGH {hf:.2f} vs LOW {lf:.2f} (Δ={hf - lf:.2f}); test effect {eff:.2f}",
             color='red', ha=lab_ha, va='bottom', fontsize=8)
 
     ax.set_xlim(x0, x1 + span * 1.7 + pad)   # extra right room for the (enlarged) per-ZN labels
@@ -956,10 +984,11 @@ def render_arch_figures(fig_records, iso, genes, figs_dir, per_category, verbose
         by_cat[rec['class_key']].append(rec)
     made = {}
     for cat, recs in by_cat.items():
-        recs = sorted(recs, key=lambda d: d['effect'], reverse=True)[:per_category]
+        recs = ranked_examples(recs, per_category)
         cat_dir = os.path.join(figs_dir, cat)
         n = 0
-        for rank, rec in enumerate(recs, 1):
+        for rec in recs:
+            rank = rec['example_rank']
             g_safe = re.sub(r'[^A-Za-z0-9._-]', '_', str(rec['gene']))
             c_safe = re.sub(r'[^A-Za-z0-9._-]', '_', str(rec['chrom']))
             out_png = os.path.join(
@@ -1003,6 +1032,7 @@ def main():
         'hi_ZN', 'hi_arch', 'hi_frac', 'lo_ZN', 'lo_arch', 'lo_frac', 'anchor_ZN',
         'status_hi', 'status_lo', 'jd_hi', 'jd_lo',
         'stoich_tier', 'hi_stoich_level',
+        'hi_cov', 'lo_cov', 'hi_lo_delta', 'example_rank',
     ]
     rows = []
     fig_records = []
@@ -1046,7 +1076,8 @@ def main():
                          ck, 'UNEXPLAINABLE', 'NO_MODEL', '', '',
                          r.get('n_tx_tested', ''), f"{eff:.4f}", f"{padj:.3e}",
                          '', '', '', '', '', '', '',
-                         '', '', '', '', '', ''])
+                         '', '', '', '', '', '',
+                         '', '', '', ''])
             continue
         hi = max(cov_tx, key=lambda t: t['frac'])
         lo = min(cov_tx, key=lambda t: t['frac'])
@@ -1063,7 +1094,8 @@ def main():
                          ck, 'UNEXPLAINABLE', 'NO_MODEL', '', '',
                          r.get('n_tx_tested', ''), f"{eff:.4f}", f"{padj:.3e}",
                          '', '', '', '', '', '', '',
-                         '', '', '', '', '', ''])
+                         '', '', '', '', '', '',
+                         '', '', '', ''])
             continue
         anchorZN = anchor_of(gene, genes[gene], iso)
         bucket, event, direction, info = classify_tree(
@@ -1079,6 +1111,7 @@ def main():
             'effect': eff, 'padj': padj, 'per_tx': per_tx,
             'hiZN': hiZN, 'loZN': loZN, 'anchorZN': anchorZN or '',
             'hi_frac': hi['frac'], 'lo_frac': lo['frac'],
+            'hi_cov': int(hi.get('Ncov', 0)), 'lo_cov': int(lo.get('Ncov', 0)),
         })
         jd_hi = info.get('jd_hi', ''); jd_lo = info.get('jd_lo', '')
         rows.append([
@@ -1092,9 +1125,25 @@ def main():
             jd_hi if jd_hi != '' and jd_hi != 10**9 else '',
             jd_lo if jd_lo != '' and jd_lo != 10**9 else '',
             stier, hlvl,
+            int(hi.get('Ncov', 0)), int(lo.get('Ncov', 0)), f"{hi['frac'] - lo['frac']:.4f}", '',
         ])
 
-    rows.sort(key=lambda x: (x[6], x[0], x[3]))
+    # ---- example ranking, ONE definition shared by the table and every figure ----
+    # Rank the sites of each leaf (class_key) by the contrast the leaf actually explains: the pooled
+    # modified-fraction difference between the classified HIGH and LOW fragmentforms (hi_lo_delta), then
+    # FDR, then the shallower form's coverage. The test's effect_max_abs_frac_diff is NOT used for this:
+    # it is a maximum over every tested pair and saturates at 1.0 for hundreds of sites per leaf, and the
+    # pair it comes from need not be the classified pair -- the report's table and its figures used to
+    # break those ties differently and showed different genes. `example_rank` is 1-based within the leaf;
+    # the rankNN__ figure files follow it.
+    assign_example_ranks(fig_records)
+    rank_of = {(r['class_key'], r['gene'], r['mod'], r['chrom'], int(r['start0']), r['strand']): r['example_rank']
+               for r in fig_records}
+    for row in rows:
+        k = (row[6], row[0], row[1], row[2], int(row[3]), row[5])
+        rk = rank_of.get(k)
+        row[-1] = rk if rk is not None else ''
+    rows.sort(key=lambda x: (x[6], x[-1] if x[-1] != '' else 10**9, x[0], x[3]))
     import os
     os.makedirs(os.path.dirname(args.out_tsv) or '.', exist_ok=True)
     with open(args.out_tsv, 'w', newline='') as out:

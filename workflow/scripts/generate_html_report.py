@@ -196,7 +196,7 @@ COLUMN_DEFINITIONS = {
     "n_sites": "Number of unique genomic modification sites observed for the gene and modification code.",
     "p_value": "Nominal p-value from the reported hypothesis test.",
     "p_adj_bh": "Benjamini-Hochberg false-discovery-rate adjusted p-value.",
-    "effect_max_abs_frac_diff": "Maximum absolute difference in modified fraction across tested fragmentform partitions, Mantel-Haenszel-weighted over the informative sample strata (the sample-stratified effect that matches the primary p-value, NOT the sample-pooled fraction). The old sample-pooled value is kept separately as effect_max_abs_frac_diff_pooled.",
+    "effect_max_abs_frac_diff": "Maximum absolute difference in modified fraction across tested fragmentform partitions, Mantel-Haenszel-weighted over EVERY sample covering both forms (the sample-stratified effect that matches the primary p-value, NOT the sample-pooled fraction). The old sample-pooled value is kept separately as effect_max_abs_frac_diff_pooled.",
     "effect_max_abs_tx_frac_diff": "Maximum absolute difference in fragmentform usage or stoichiometry between tested groups.",
     "effect_abs_delta_mod_frac": "Absolute difference in modified-site rate between the tested allele groups.",
     "odds_ratio": "Sample-adjusted (Mantel-Haenszel common) odds ratio of co-modification between the two sites, combining the per-sample 2x2 tables so it is not inflated by between-sample rate differences: >1 = modified together (concordant), <1 = mutually exclusive, ~1 = independent.",
@@ -244,6 +244,10 @@ COLUMN_DEFINITIONS = {
     "hi_ZN": "ZN partition index of the higher-stoichiometry isoform in the classified contrast.",
     "hi_arch": "3' architecture of the higher-stoichiometry isoform versus the gene's longest-3'UTR anchor (IPA / TANDEM_APA / FULL_LENGTH / DISTAL_EXT / REFERENCE / AMBIGUOUS).",
     "hi_frac": "Pooled modified fraction (stoichiometry) of the higher isoform at the site.",
+    "hi_cov": "Pooled valid coverage (reads) of the higher isoform at the site.",
+    "lo_cov": "Pooled valid coverage (reads) of the lower isoform at the site.",
+    "hi_lo_delta": "hi_frac minus lo_frac: the pooled stoichiometry difference between the two fragmentforms this classification compares. This is the contrast the structural event explains; the table and the example figures are ranked by it (then FDR, then coverage).",
+    "example_rank": "1-based rank of the site within its leaf (bucket / event / direction) by hi_lo_delta, then FDR, then the shallower form's coverage. The rankNN__ example figures follow this rank, so row N of the table is figure N.",
     "lo_ZN": "ZN partition index of the lower-stoichiometry isoform in the classified contrast.",
     "lo_arch": "3' architecture of the lower-stoichiometry isoform versus the gene's longest-3'UTR anchor.",
     "lo_frac": "Pooled modified fraction (stoichiometry) of the lower isoform at the site.",
@@ -2040,9 +2044,9 @@ def build_classification_section(class_df, private_df, class_figs_dir, arch_figs
         return section(title, "<p class='muted'>No classified differential sites available.</p>", intro=intro)
 
     SHARED_COLS = [c for c in [
-        "gene_name", "mod_code", "chrom", "start0", "strand", "direction", "structural_delta_nt",
-        "hi_ZN", "hi_arch", "hi_frac", "lo_ZN", "lo_arch", "lo_frac", "stoich_tier", "hi_stoich_level",
-        "effect_max_abs_frac_diff", "p_adj_bh",
+        "example_rank", "gene_name", "mod_code", "chrom", "start0", "strand", "direction", "structural_delta_nt",
+        "hi_ZN", "hi_arch", "hi_frac", "hi_cov", "lo_ZN", "lo_arch", "lo_frac", "lo_cov", "hi_lo_delta",
+        "stoich_tier", "hi_stoich_level", "effect_max_abs_frac_diff", "p_adj_bh",
     ] if class_ok and c in class_df.columns]
     PRIV_COLS = [c for c in [
         "gene_name", "mod_code", "chrom", "start0", "strand", "direction", "structural_delta_nt",
@@ -2162,9 +2166,19 @@ def build_classification_section(class_df, private_df, class_figs_dir, arch_figs
     )
 
     def render_sites(sub, bucket, cols):
-        """Table (+ architecture/mechanism figures for shared buckets) for a leaf set of sites."""
-        sort_col = "carry_frac" if bucket == "PRIVATE" else "effect_max_abs_frac_diff"
-        srt = sub.sort_values(sort_col, ascending=False) if sort_col in sub.columns else sub
+        """Table (+ architecture/mechanism figures for shared buckets) for a leaf set of sites.
+
+        Shared buckets are ordered by the classifier's `example_rank` (largest classified hi-lo
+        difference first, then FDR, then coverage) -- the SAME order the rankNN__ figures below follow,
+        so the table's top rows and the figures are the same sites. (Sorting on effect_max_abs_frac_diff
+        used to break its hundreds of ties at 1.0 differently from the figure renderer.)"""
+        if bucket == "PRIVATE":
+            srt = sub.sort_values("carry_frac", ascending=False) if "carry_frac" in sub.columns else sub
+        elif "example_rank" in sub.columns:
+            _rk = pd.to_numeric(sub["example_rank"], errors="coerce")
+            srt = sub.assign(_rk=_rk.fillna(np.inf)).sort_values(["_rk"], kind="stable").drop(columns="_rk")
+        else:
+            srt = sub.sort_values("effect_max_abs_frac_diff", ascending=False) if "effect_max_abs_frac_diff" in sub.columns else sub
         tbl = df_to_html(srt[cols] if cols else srt, max_rows=top_n)
         figs = ""
         if bucket != "PRIVATE" and "class_key" in sub.columns:

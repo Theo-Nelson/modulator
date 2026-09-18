@@ -186,6 +186,11 @@ test_diffs:
   test: auto           # auto | fisher | chi2
   pseudocount: 0.5     # for chi-square stability
   alternative: two-sided   # fisher alternative
+  mc_min_expected: 5   # sparse-table guard for the multi-sample (CMH) primary test: when any tested fragmentform has < this many
+                       # EXPECTED reads in the modified or unmodified column (summed over informative samples), the p-value comes
+                       # from the exact Monte-Carlo resampling of the same statistic (test_name *_mc) instead of the chi-square
+                       # approximation, which gives p~0 from a single modified read on a shallow form. 0 = old behaviour.
+  mc_resamples: 9999   # resamples for that exact test (adaptive: 999 first, extended only when rarely exceeded)
   gene_filter: null     # e.g., ["ALCAM","RIOK3"]
   mod_filter: null      # e.g., ["a","m"]
 
@@ -215,6 +220,10 @@ report:
   top_genes: 20
   max_class_figs_per_category: 10   # per-category figures embedded in the report
   max_snp_figs: 12                  # per-example figures per SNP/haplotype section (embedded + written to results/genotype/<prefix>__snp_figs/)
+  browser_data: auto                # gene browser data: embed (single self-contained HTML) | companion (a <browser>_data/ folder of
+                                    # per-gene shards the page loads on demand; the HTML stays small and shows EVERY gene) | auto
+                                    # (companion when the embedded payload would exceed browser_companion_threshold_mb)
+  browser_companion_threshold_mb: 50
   browser_max_sites_per_gene: 0     # gene browser: embed at most this many (site x fragmentform) rows per gene, best-covered first
                                     # (0 = all). A 31-library run has ~26 M such rows, i.e. a multi-GB page; 2000 keeps it openable.
 

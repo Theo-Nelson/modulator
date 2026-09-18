@@ -27,6 +27,12 @@ Notes
 """
 
 import os
+# The per-site loop forks worker processes that inherit the big arrays. A worker must never enter the
+# BLAS/LAPACK thread machinery: with a threaded OpenBLAS a forked child can sleep forever on a lock that was
+# held at fork time (observed: one of 48 workers asleep inside numpy.linalg.inv, the whole run hung). Pin
+# every BLAS to one thread BEFORE numpy is imported; the matrices here are at most ~40x40, threads gain nothing.
+for _v in ("OPENBLAS_NUM_THREADS", "OMP_NUM_THREADS", "MKL_NUM_THREADS", "NUMEXPR_NUM_THREADS"):
+    os.environ.setdefault(_v, "1")
 import sys
 import json
 import argparse
@@ -36,7 +42,7 @@ from itertools import combinations
 
 import numpy as np
 import pandas as pd
-from scipy.stats import chi2 as _chi2_dist, chi2_contingency, fisher_exact
+from scipy.stats import chi2 as _chi2_dist, chi2_contingency, fisher_exact, random_table
 import matplotlib.pyplot as plt
 from matplotlib.ticker import MaxNLocator
 from plot_utils import save_figure
@@ -104,6 +110,18 @@ def parse_args():
         "--jobs", type=int, default=1,
         help="Worker processes for the per-site tests (sites are independent; output is identical "
              "for any value). Default 1 = serial."
+    )
+    ap.add_argument(
+        "--mc-min-expected", type=float, default=MC_MIN_EXPECTED,
+        help="Sparse-table guard for the multi-sample (CMH) primary: if any tested fragmentform has fewer "
+             "than this many EXPECTED reads in the modified or the unmodified column (summed over the "
+             "informative samples), the p-value comes from the exact Monte-Carlo resampling of the same "
+             "statistic instead of its chi-square approximation (test_name suffixed _mc). 0 disables."
+    )
+    ap.add_argument(
+        "--mc-resamples", type=int, default=MC_RESAMPLES,
+        help="Resamples for the exact stratified test (adaptive: 999 first, extended to this only when "
+             "the observed statistic is rarely exceeded)."
     )
     return ap.parse_args()
 
@@ -203,9 +221,115 @@ def cmh_general_association(strata):
     return Q, float(_chi2_dist.sf(Q, r - 1)), r - 1, used
 
 
+def cmh_expected_margins(strata):
+    """Per-row expected counts of the stratified table under the null, SUMMED over the strata the CMH
+    uses: E[i, c] = sum_k R_ik * C_kc / N_k. This is the Mantel-Fleiss quantity that decides whether the
+    chi-square approximation of the CMH statistic can be trusted (every row x column needs enough
+    expected mass; the classical rule is >= 5)."""
+    r = strata[0].shape[0]
+    E = np.zeros((r, 2))
+    for T in strata:
+        T = np.asarray(T, dtype=float)
+        R = T.sum(axis=1); C = T.sum(axis=0); N = T.sum()
+        if N < 2 or C[0] <= 0 or C[1] <= 0 or (R > 0).sum() < 2:
+            continue
+        E += np.outer(R, C) / N
+    return E
+
+
+def _inverse_nolapack(M, tol=1e-12):
+    """Inverse of a small square matrix by Gauss-Jordan elimination with partial pivoting, using only
+    numpy element-wise/row operations -- deliberately NO BLAS/LAPACK call, so it is safe inside a forked
+    worker (see the OPENBLAS note at the top of the file). Returns None when a pivot is (numerically)
+    zero, i.e. the matrix is singular; the caller then falls back to a pseudo-inverse."""
+    M = np.array(M, dtype=float, copy=True)
+    n = M.shape[0]
+    if n == 0:
+        return M
+    aug = np.concatenate([M, np.eye(n)], axis=1)
+    scale = max(float(np.max(np.abs(M))), 1e-300)
+    for col in range(n):
+        piv = col + int(np.argmax(np.abs(aug[col:, col])))
+        if abs(aug[piv, col]) <= tol * scale:
+            return None
+        if piv != col:
+            aug[[col, piv]] = aug[[piv, col]]
+        aug[col] /= aug[col, col]
+        others = np.arange(n) != col
+        aug[others] -= np.outer(aug[others, col], aug[col])
+    return aug[:, n:]
+
+
+def cmh_general_association_mc(strata, seed=12345, n_resamples=9999, n_first=999, early_hits=10):
+    """EXACT (Monte-Carlo, conditional) version of cmh_general_association for SPARSE stratified tables.
+
+    Why: the generalized CMH statistic is referred to chi2(r-1), which is an asymptotic result that needs
+    adequate expected counts in every row of the modified AND unmodified columns. At low stoichiometry
+    it does not hold -- a site with 36,000 reads on one fragmentform and 23 on another, ONE modified
+    read on each, has an expected modified count of ~0.001 on the small form, and the chi-square gives
+    p ~ 1e-100 (the tissue run's headline example) where the exact conditional answer is ~1e-3. Here the
+    null distribution of the SAME statistic Q is obtained by Patefield resampling of every stratum with
+    both margins fixed (R's chisq.test(simulate.p.value=TRUE), per stratum): the expectation and
+    covariance V of Q depend only on the margins, so each resample only changes the numerator vector A.
+
+    Adaptive cost: `n_first` resamples first; if the observed statistic is already exceeded `early_hits`
+    times the p-value is settled at that resolution, otherwise the run is extended to `n_resamples`.
+    The same asymptotic hybrid as montecarlo_exact_test applies when NO resample reaches Q (a strong,
+    well-separated table beyond the MC resolution): the asymptotic p is reported instead of the floor.
+    Deterministic (fixed seed). Returns (statistic, p_value, df, n_informative_strata, n_resamples_used).
+    """
+    r = strata[0].shape[0]
+    if r < 2:
+        return float("nan"), float("nan"), 0, 0, 0
+    used = []
+    A = np.zeros(r - 1)
+    V = np.zeros((r - 1, r - 1))
+    for T in strata:
+        T = np.asarray(T, dtype=float)
+        R = T.sum(axis=1); C = T.sum(axis=0); N = T.sum()
+        if N < 2 or C[0] <= 0 or C[1] <= 0 or (R > 0).sum() < 2:
+            continue
+        A += T[:r - 1, 0] - R[:r - 1] * C[0] / N
+        f = C[0] * C[1] / (N * N * (N - 1))
+        V += f * (N * np.diag(R[:r - 1]) - np.outer(R[:r - 1], R[:r - 1]))
+        used.append((R, C, N))
+    if not used:
+        return float("nan"), float("nan"), r - 1, 0, 0
+    Vi = _inverse_nolapack(V)
+    if Vi is None:
+        Vi = np.linalg.pinv(V)   # singular covariance (a transcript without across-stratum variation)
+    Q = float(np.einsum("i,ij,j->", A, Vi, A))
+    if not np.isfinite(Q) or Q < 0:
+        return float("nan"), float("nan"), r - 1, len(used), 0
+    asymptotic_p = float(_chi2_dist.sf(Q, r - 1))
+    rng = np.random.default_rng(seed)
+
+    def _draw(n):
+        Asim = np.zeros((n, r - 1))
+        for R, C, N in used:
+            tabs = random_table(R.astype(int), C.astype(int)).rvs(size=n, random_state=rng)
+            Asim += tabs[:, :r - 1, 0] - R[:r - 1] * C[0] / N
+        Qs = np.einsum("ij,jk,ik->i", Asim, Vi, Asim)   # einsum: plain C loops, no BLAS dispatch
+        return int(np.sum(Qs >= Q - 1e-9))
+
+    n_done = int(n_first)
+    hits = _draw(n_done)
+    if hits < early_hits and n_resamples > n_done:
+        hits += _draw(int(n_resamples) - n_done)
+        n_done = int(n_resamples)
+    p = asymptotic_p if hits == 0 else (hits + 1) / (n_done + 1)
+    return Q, float(p), r - 1, len(used), n_done
+
+
 def mh_max_abs_rate_diff(strata):
     """Mantel-Haenszel coverage-weighted rate difference, max over transcript pairs -- the effect size
-    consistent with the stratified test (weights w_k = R_i R_j / N_k, only strata covering both)."""
+    consistent with the stratified test (weights w_k = R_i R_j / N_k, only strata covering both).
+
+    Pass EVERY stratum (every sample covering the site), not only the "informative" ones the CMH keeps.
+    A stratum with no modified read on any form contributes 0 to the CMH statistic (dropping it is
+    harmless there) but it is real evidence of a LOW rate on both forms; dropping it from the effect
+    biased the rate difference toward 1.0 at low stoichiometry (only the samples holding a modified
+    read survived, so a single modified read on a shallow form scored as a 100% difference)."""
     r = strata[0].shape[0]
     best = 0.0
     for i in range(r):
@@ -224,7 +348,29 @@ def mh_max_abs_rate_diff(strata):
     return best
 
 
-def summarize_site(df_site, min_cov, which_test, pseudocount, alternative):
+# Sparse-table guard for the stratified primary: the chi-square reference for the generalized CMH is
+# trusted only when every tested fragmentform has at least this many EXPECTED reads in both the modified
+# and the unmodified column, summed over the informative strata (Mantel-Fleiss rule); below it the p-value
+# comes from the exact conditional resampling of the same statistic. 0 disables the guard (old behaviour).
+MC_MIN_EXPECTED = 5.0
+MC_RESAMPLES = 9999
+
+
+def _stratified_primary(inf, test_label, mc_min_expected, mc_resamples):
+    """(stat, p, test_label) for >=2 informative strata: asymptotic CMH when the expected margins are
+    adequate, else the exact Monte-Carlo version of the same statistic (label suffixed `_mc`)."""
+    if mc_min_expected and mc_min_expected > 0:
+        E = cmh_expected_margins(inf)
+        rows = E.sum(axis=1) > 0                       # rows with any reads in the informative strata
+        if rows.any() and float(E[rows].min()) < float(mc_min_expected):
+            stat, p, _df, _used, _n = cmh_general_association_mc(inf, n_resamples=int(mc_resamples))
+            return stat, p, test_label + "_mc"
+    stat, p, _df, _used = cmh_general_association(inf)
+    return stat, p, test_label
+
+
+def summarize_site(df_site, min_cov, which_test, pseudocount, alternative,
+                   mc_min_expected=MC_MIN_EXPECTED, mc_resamples=MC_RESAMPLES):
     """
     Collapse per-sample rows to per-transcript totals and run the appropriate test.
     Returns dict with stats or None if <2 transcripts pass coverage.
@@ -322,10 +468,10 @@ def summarize_site(df_site, min_cov, which_test, pseudocount, alternative):
     inf = informative_strata(strata)
     n_strata = len(inf)
     if n_strata >= 2:
-        cmh_stat, cmh_p, _cmh_df, _ = cmh_general_association(inf)
         primary_test = "cmh_2x2" if len(tested_zn) == 2 else f"cmh_general_{len(tested_zn)}x2"
+        cmh_stat, cmh_p, primary_test = _stratified_primary(inf, primary_test, mc_min_expected, mc_resamples)
         primary_stat_name, primary_stat, primary_p = "cmh_chi2", cmh_stat, cmh_p
-        primary_eff = mh_max_abs_rate_diff(inf)
+        primary_eff = mh_max_abs_rate_diff(strata)
     elif n_strata == 1:
         T1 = inf[0]
         # 2x2 -> Fisher (exact); r x 2 -> the shared Monte-Carlo EXACT test (M2: the old asymptotic
@@ -334,7 +480,7 @@ def summarize_site(df_site, min_cov, which_test, pseudocount, alternative):
         # hybrid -- same code path as the five other single-stratum tests).
         primary_test, primary_stat_name, primary_stat, primary_p = (
             do_fisher_2x2(T1) if T1.shape[0] == 2 else montecarlo_exact_test(T1))
-        primary_eff = mh_max_abs_rate_diff(inf)
+        primary_eff = mh_max_abs_rate_diff(strata)
     else:
         primary_test, primary_stat_name = "untestable", "none"
         primary_stat, primary_p, primary_eff = float("nan"), float("nan"), float("nan")
@@ -386,7 +532,8 @@ def _chi2_rx2(tab, pc):
     return f"chi2_{tab.shape[0]}x{tab.shape[1]}_pc{pc:g}", "chi2", float(chi2), float(p)
 
 
-def summarize_site_arrays(zn, samp, cov, nmod, sample_names, min_cov, which_test, pseudocount, alternative):
+def summarize_site_arrays(zn, samp, cov, nmod, sample_names, min_cov, which_test, pseudocount, alternative,
+                          mc_min_expected=MC_MIN_EXPECTED, mc_resamples=MC_RESAMPLES):
     """summarize_site() on plain arrays for ONE site: `zn` (int), `samp` (int codes into
     `sample_names`, which is lexicographically sorted), `cov`/`nmod` (int). Reproduces the DataFrame
     version's numbers exactly -- per-ZN sums, the coverage filter, the pooled test, the per-sample
@@ -448,15 +595,15 @@ def summarize_site_arrays(zn, samp, cov, nmod, sample_names, min_cov, which_test
     inf = informative_strata(strata)
     n_strata = len(inf)
     if n_strata >= 2:
-        cmh_stat, cmh_p, _cmh_df, _ = cmh_general_association(inf)
         primary_test = "cmh_2x2" if len(tested_zn) == 2 else f"cmh_general_{len(tested_zn)}x2"
+        cmh_stat, cmh_p, primary_test = _stratified_primary(inf, primary_test, mc_min_expected, mc_resamples)
         primary_stat_name, primary_stat, primary_p = "cmh_chi2", cmh_stat, cmh_p
-        primary_eff = mh_max_abs_rate_diff(inf)
+        primary_eff = mh_max_abs_rate_diff(strata)
     elif n_strata == 1:
         T1 = inf[0]
         primary_test, primary_stat_name, primary_stat, primary_p = (
             _fisher_2x2(T1, alternative) if T1.shape[0] == 2 else montecarlo_exact_test(T1))
-        primary_eff = mh_max_abs_rate_diff(inf)
+        primary_eff = mh_max_abs_rate_diff(strata)
     else:
         primary_test, primary_stat_name = "untestable", "none"
         primary_stat, primary_p, primary_eff = float("nan"), float("nan"), float("nan")
@@ -506,7 +653,8 @@ def _run_site_range(task):
     for sid in range(lo, hi):
         a, b = offs[sid], offs[sid + 1]
         res = summarize_site_arrays(zn[a:b], samp[a:b], cov[a:b], nmod[a:b], names,
-                                    p["min_cov"], p["test"], p["pseudocount"], p["alternative"])
+                                    p["min_cov"], p["test"], p["pseudocount"], p["alternative"],
+                                    p.get("mc_min_expected", MC_MIN_EXPECTED), p.get("mc_resamples", MC_RESAMPLES))
         if res is None:
             continue
         g, m, chrom, s0, e0, st = keys[sid]
@@ -726,7 +874,8 @@ def main():
         nmod=df["Nmod"].to_numpy(dtype=np.int64),
         offsets=offsets, sample_names=sample_names, keys=keys,
         params=dict(min_cov=args.min_cov, test=args.test, pseudocount=args.pseudocount,
-                    alternative=args.alternative),
+                    alternative=args.alternative, mc_min_expected=args.mc_min_expected,
+                    mc_resamples=args.mc_resamples),
     )
     if args.verbose:
         print(f"[info] evaluating {n_sites} sites with min_cov={args.min_cov}, test={args.test}, jobs={args.jobs}",

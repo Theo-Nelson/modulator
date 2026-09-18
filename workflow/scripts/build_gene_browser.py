@@ -14,6 +14,7 @@ import html
 import json
 import os
 import re
+import zlib
 
 import numpy as np
 import pandas as pd
@@ -57,6 +58,15 @@ def parse_args():
                          "and the browser groups rows by the 'contrast' column)")
     ap.add_argument("--hierarchical-stoich", default="", help="*_hierarchical_stoich.tsv")
     ap.add_argument("--out-html", required=True)
+    ap.add_argument("--data-mode", choices=["auto", "embed", "companion"], default="auto",
+                    help="embed: one self-contained HTML (the old behaviour); companion: write "
+                         "<out_html minus .html>_data/ with a gene index + per-gene shards that the page "
+                         "loads on demand (small HTML, EVERY gene listed); auto: companion when the payload "
+                         "exceeds --companion-threshold-mb")
+    ap.add_argument("--companion-threshold-mb", type=float, default=50.0,
+                    help="auto mode: switch to the companion folder above this embedded payload size")
+    ap.add_argument("--shard-mb", type=float, default=4.0,
+                    help="companion mode: target size of one per-gene shard file")
     ap.add_argument("--max-genes", type=int, default=20000, help="Cap genes embedded (largest by read support); 20000 covers a full human/mouse transcriptome so every expressed gene is lookup-able")
     ap.add_argument("--title", default="modulator gene browser")
     ap.add_argument("--verbose", action="store_true")
@@ -234,10 +244,11 @@ def main():
         }
         sg = site_by_gene.get(gene)
         if sg is not None:
+            # compact row arrays [pos, mod, zn, cov, frac] (the sites dominate the payload: ~26 M rows on
+            # a 31-library run); the page expands them (see the JS `site()` helper)
             for r in sg.itertuples(index=False):
-                rec["sites"].append({"pos": int(r.start0), "mod": str(r.mod_code),
-                                     "zn": int(getattr(r, "ZN_transcript_index", -1)),
-                                     "cov": int(r.Nvalid_cov), "frac": (None if pd.isna(r.frac) else float(r.frac))})
+                rec["sites"].append([int(r.start0), str(r.mod_code), int(getattr(r, "ZN_transcript_index", -1)),
+                                     int(r.Nvalid_cov), (None if pd.isna(r.frac) else float(r.frac))])
         dg = diff_by_gene.get(gene)
         if dg is not None:
             for r in dg.itertuples(index=False):
@@ -273,26 +284,73 @@ def main():
         print(f"[browser] NOTE: {len(ranked_all) - len(ranked):,} of {len(ranked_all):,} genes omitted "
               f"(--max-genes={args.max_genes}); page shows the top {len(ranked):,} by read support.",
               file=__import__("sys").stderr, flush=True)
-    data = {"genes": {r["gene"]: r for r in ranked},
-            "index": [{"g": r["gene"], "n": len(r["forms"]), "r": r["reads"], "c": r["chrom"]} for r in ranked],
-            "n_total_genes": len(ranked_all), "n_shown": len(ranked)}
+    index = [{"g": r["gene"], "n": len(r["forms"]), "r": r["reads"], "c": r["chrom"]} for r in ranked]
     # Modification-code legend for the sidebar: the codes actually present in this run's site data.
     _codes = list(site_codes)
     moddefs_html = _mod_defs_html(_codes)
     os.makedirs(os.path.dirname(args.out_html) or ".", exist_ok=True)
-    # Embed the JSON so it cannot break out of <script> or terminate it early: a gene_name / contrast
-    # containing '</script>' would otherwise close the block and the page would never initialise.
-    # \u-escaping < > & (and the JS line separators) keeps it valid JSON while HTML-inert.
-    data_json = (json.dumps(data, separators=(",", ":"))
-                 .replace("<", "\\u003c").replace(">", "\\u003e").replace("&", "\\u0026")
-                 .replace("\u2028", "\\u2028").replace("\u2029", "\\u2029"))
+
+    def _js_safe(txt):
+        # \u-escape < > & and the JS line separators so JSON can neither close a <script> block nor
+        # break a script file; still valid JSON.
+        return (txt.replace("<", "\\u003c").replace(">", "\\u003e").replace("&", "\\u0026")
+                   .replace("\u2028", "\\u2028").replace("\u2029", "\\u2029"))
+
+    gene_json = {r["gene"]: json.dumps(r, separators=(",", ":")) for r in ranked}
+    payload_mb = sum(len(v) for v in gene_json.values()) / 1e6
+    mode = args.data_mode
+    if mode == "auto":
+        mode = "companion" if payload_mb > args.companion_threshold_mb else "embed"
+
+    if mode == "embed":
+        genes_js = "{" + ",".join(f"{json.dumps(g)}:{v}" for g, v in gene_json.items()) + "}"
+        data_json = _js_safe(json.dumps({"index": index, "n_total_genes": len(ranked_all), "n_shown": len(ranked),
+                                         "mode": "embed", "data_dir": "", "n_shards": 0},
+                                        separators=(",", ":")))
+        data_json = data_json[:-1] + ',"genes":' + _js_safe(genes_js) + "}"
+        with open(args.out_html, "w") as fh:
+            fh.write(_HTML.replace("__TITLE__", html.escape(disp_title))
+                          .replace("__MODDEFS__", moddefs_html)
+                          .replace("__DATA__", data_json))
+        if args.verbose:
+            print(f"[browser] wrote {len(ranked):,} genes (embedded, {payload_mb:.1f} MB payload) -> "
+                  f"{args.out_html} ({os.path.getsize(args.out_html)/1e6:.1f} MB)", flush=True)
+        return
+
+    # ---- companion data folder: <out>_data/index.js + shard_NNNN.js, loaded by <script src> on demand.
+    # Plain script files (not fetch/XHR) so the page works when opened from a local file:// path as
+    # well as over http; each gene lives in the shard crc32(gene) % n_shards (the page computes the
+    # same hash, so no gene->shard map is needed). Everything that was in the page is here, for
+    # every gene -- nothing is truncated.
+    data_dir = re.sub(r"\.html?$", "", args.out_html) + "_data"
+    n_shards = max(1, min(4096, int(payload_mb / max(args.shard_mb, 0.1)) + 1))
+    shards = {}
+    for g, v in gene_json.items():
+        shards.setdefault(zlib.crc32(g.encode("utf-8")) % n_shards, []).append((g, v))
+    os.makedirs(data_dir, exist_ok=True)
+    for old in os.listdir(data_dir):            # drop stale shards from a previous (larger) build
+        if old.startswith("shard_") and old.endswith(".js") or old == "index.js":
+            os.remove(os.path.join(data_dir, old))
+    for sid, items in shards.items():
+        body = "{" + ",".join(f"{json.dumps(g)}:{v}" for g, v in items) + "}"
+        with open(os.path.join(data_dir, f"shard_{sid:04d}.js"), "w") as fh:
+            fh.write(f"window.__modulator_browser_shard({sid},{_js_safe(body)});\n")
+    with open(os.path.join(data_dir, "index.js"), "w") as fh:
+        fh.write("window.__modulator_browser_index(" + _js_safe(json.dumps(
+            {"index": index, "n_total_genes": len(ranked_all), "n_shown": len(ranked), "n_shards": n_shards},
+            separators=(",", ":"))) + ");\n")
+    data_json = _js_safe(json.dumps({"index": [], "n_total_genes": len(ranked_all), "n_shown": len(ranked),
+                                     "mode": "companion", "data_dir": os.path.basename(data_dir),
+                                     "n_shards": n_shards, "genes": {}}, separators=(",", ":")))
     with open(args.out_html, "w") as fh:
         fh.write(_HTML.replace("__TITLE__", html.escape(disp_title))
                       .replace("__MODDEFS__", moddefs_html)
                       .replace("__DATA__", data_json))
     if args.verbose:
+        tot = sum(os.path.getsize(os.path.join(data_dir, f)) for f in os.listdir(data_dir))
         print(f"[browser] wrote {len(ranked):,} genes -> {args.out_html} "
-              f"({os.path.getsize(args.out_html)/1e6:.1f} MB)", flush=True)
+              f"({os.path.getsize(args.out_html)/1e6:.1f} MB) + companion folder {data_dir} "
+              f"({len(shards)} shards, {tot/1e6:.1f} MB; keep it next to the HTML)", flush=True)
 
 
 _HTML = r"""<!doctype html><html lang="en"><head><meta charset="utf-8">
@@ -360,6 +418,31 @@ button.clr:hover{border-color:var(--accent);color:var(--accent)}
 const DATA=__DATA__;
 const $=s=>document.querySelector(s);
 let cur=null, selExon=null;
+// ---- data access: embedded, or a companion folder of per-gene shard scripts loaded on demand ----
+const CRC=(()=>{const t=new Int32Array(256);for(let n=0;n<256;n++){let c=n;for(let k=0;k<8;k++)c=c&1?(0xEDB88320^(c>>>1)):(c>>>1);t[n]=c;}return t;})();
+function crc32(str){const b=new TextEncoder().encode(str);let c=-1;for(let i=0;i<b.length;i++)c=CRC[(c^b[i])&0xFF]^(c>>>8);return (c^-1)>>>0;}
+const loaded={}, pending={};
+function loadScript(rel){
+  if(loaded[rel]) return Promise.resolve();
+  if(pending[rel]) return pending[rel];
+  pending[rel]=new Promise((ok,fail)=>{const s=document.createElement("script");s.src=DATA.data_dir+"/"+rel;
+    s.onload=()=>{loaded[rel]=true;delete pending[rel];ok();};s.onerror=()=>{delete pending[rel];fail(new Error(rel));};
+    document.head.appendChild(s);});
+  return pending[rel];
+}
+window.__modulator_browser_index=d=>{DATA.index=d.index;DATA.n_shards=d.n_shards;DATA.n_total_genes=d.n_total_genes;DATA.n_shown=d.n_shown;};
+window.__modulator_browser_shard=(id,genes)=>{Object.assign(DATA.genes,genes);};
+function ensureGene(g){
+  if(DATA.genes[g]||DATA.mode!=="companion") return Promise.resolve();
+  const id=crc32(g)%DATA.n_shards;
+  return loadScript("shard_"+String(id).padStart(4,"0")+".js");
+}
+function dataError(what){
+  $("#main").innerHTML=`<div class="empty">Could not load ${esc(what)}.<br>This page reads its data from the folder
+    <code>${esc(DATA.data_dir)}</code>, which must sit next to the HTML file (same directory). Move or copy them together.</div>`;
+}
+// a site row is the compact array [pos, mod, zn, cov, frac]
+const site=a=>({pos:a[0],mod:a[1],zn:a[2],cov:a[3],frac:a[4]});
 const fmt=n=>n==null||isNaN(n)?"–":(+n).toLocaleString();
 const pct=v=>v==null||isNaN(v)?"–":(100*v).toFixed(1)+"%";
 const sci=p=>p==null||isNaN(p)?"–":(p<1e-4?p.toExponential(1):p.toFixed(4));
@@ -369,14 +452,20 @@ const esc=s=>String(s==null?"":s).replace(/[&<>"']/g,c=>({"&":"&amp;","<":"&lt;"
 
 function renderList(f){
   const q=(f||"").trim().toLowerCase();
+  // fragmentform-id search only reaches genes whose data is loaded (embedded: all; companion: visited)
   const rows=DATA.index.filter(r=>!q||r.g.toLowerCase().includes(q)||
-      (DATA.genes[r.g].forms||[]).some(x=>x.zt.toLowerCase().includes(q))).slice(0,400);
+      ((DATA.genes[r.g]||{}).forms||[]).some(x=>x.zt.toLowerCase().includes(q))).slice(0,400);
   $("#list").innerHTML=rows.map(r=>`<div class="gi${cur===r.g?' sel':''}" data-g="${esc(r.g)}">
      <b>${esc(r.g)}</b><small>${r.n} ff · ${fmt(r.r)}</small></div>`).join("")
      ||`<div class="empty" style="padding:14px">No match.</div>`;
   document.querySelectorAll(".gi").forEach(e=>e.onclick=()=>select(e.dataset.g));
 }
-function select(g){cur=g;selExon=null;renderList($("#q").value);draw();}
+function select(g){
+  cur=g;selExon=null;renderList($("#q").value);
+  if(DATA.genes[g]){draw();return;}
+  $("#main").innerHTML=`<div class="empty">Loading ${esc(g)}…</div>`;
+  ensureGene(g).then(()=>{if(cur===g)draw();}).catch(()=>dataError("the data for "+g));
+}
 
 function draw(){
   const G=DATA.genes[cur]; if(!G){return;}
@@ -434,7 +523,7 @@ function tables(){
     ? `<span class="pill">exon ${fmt(selExon[0])}–${fmt(selExon[1])}</span>
        <button class="clr" onclick="clearSel()">clear</button>`
     : `<span class="pill">all sites</span>`;
-  const S=G.sites.filter(s=>inSel(s.pos)).sort((a,b)=>a.pos-b.pos);
+  const S=G.sites.map(site).filter(s=>inSel(s.pos)).sort((a,b)=>a.pos-b.pos);
   const D=G.diffs.filter(s=>inSel(s.pos)).sort((a,b)=>a.padj-b.padj);
   const C=G.cond.filter(s=>inSel(s.pos)).sort((a,b)=>a.padj-b.padj);
   const Hh=G.hier.filter(s=>inSel(s.pos)).sort((a,b)=>a.padj-b.padj);
@@ -467,7 +556,10 @@ function tables(){
 }
 function clearSel(){selExon=null;document.querySelectorAll(".exon").forEach(x=>x.classList.remove("sel-exon"));tables();}
 $("#q").addEventListener("input",e=>renderList(e.target.value));
-renderList("");
+if(DATA.mode==="companion"){
+  $("#list").innerHTML=`<div class="empty" style="padding:14px">Loading gene index…</div>`;
+  loadScript("index.js").then(()=>renderList("")).catch(()=>{renderList("");dataError("the gene index");});
+}else{renderList("");}
 if(DATA.index.length) select(DATA.index[0].g);
 </script></body></html>"""
 

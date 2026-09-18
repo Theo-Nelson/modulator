@@ -258,6 +258,8 @@ within the same gene locus**.
 | `test_diffs.test` | str | `"auto"` | `auto` picks Fisher (2×2) or Chi-square (r×2); or force `fisher`/`chi2`. |
 | `test_diffs.pseudocount` | float | `0.5` | Chi-square cell pseudocount (ignored for Fisher). |
 | `test_diffs.alternative` | str | `"two-sided"` | Fisher alternative: `two-sided`/`greater`/`less`. |
+| `test_diffs.mc_min_expected` | `5` | Sparse-table guard for the multi-sample stratified (CMH) test: when any tested fragmentform has fewer than this many expected reads in the modified or unmodified column (summed over the informative samples), the p-value is computed by exact Monte-Carlo resampling of the same statistic (`test_name` gets an `_mc` suffix) instead of the chi-square approximation, which returns p≈0 from a single modified read on a shallow form. `0` restores the old behaviour. |
+| `test_diffs.mc_resamples` | `9999` | Resamples for that exact test (adaptive: 999 first, extended only when the observed statistic is rarely exceeded). |
 | `test_diffs.gene_filter` | list/null | `null` | Optional gene_name whitelist. |
 | `test_diffs.mod_filter` | list/null | `null` | Optional mod_code whitelist (e.g. `["a","m"]`). |
 
@@ -287,6 +289,7 @@ the gene's longest-3′UTR isoform. Covers **all** detected `mod_code`s.
 | `classify_diffs.ejc_nt` | int | `150` | EJC suppression zone (nt). |
 | `classify_diffs.figures` | bool | `true` | Render per-category isoform **architecture maps** (`__figs_by_category_arch/`) + 2-panel stoichiometry figures (`__figs_by_category/`). |
 | `classify_diffs.figs_per_category` | int | `10` | Top sites (by effect) per category to plot. |
+| *(output)* `example_rank`, `hi_lo_delta`, `hi_cov`, `lo_cov` | | Added to `*__ZN_site_classified.tsv`. `hi_lo_delta` is the pooled stoichiometry difference between the classified HIGH and LOW fragmentforms (the contrast the structural event explains). `example_rank` orders each leaf's sites by `hi_lo_delta`, then FDR, then the shallower form's coverage; the report table and the `rankNN__` example figures both follow it, so row N is figure N. The test's `effect_max_abs_frac_diff` (a maximum over all tested pairs) is the FDR-gate companion, not the example order. |
 
 **Categories:** `IPA_UNIQUE`, `SPLICED_EXON_UNIQUE`, `LAST_EXON_DISTAL_ONLY`,
 `IPA_SHARED_EJC`, `SPLICING_EJC`, `LAST_EXON_PROXIMAL_APA_FAVORED`,
@@ -526,6 +529,8 @@ Relevant knobs:
 | `report.browser_max_genes` | all reference genes | Genes embedded in the browser payload (largest by read support first). Defaults to the number of genes in the reference GTF so every gene is lookup-able; set a smaller number to keep the file lighter. |
 | `report.max_class_figs_per_category` | `10` | Per-category classification figures embedded. |
 | `report.max_snp_figs` | `12` | Per-example SNP/haplotype figures per genotype section. |
+| `report.browser_data` | `auto` | Gene browser data placement: `embed` = one self-contained HTML; `companion` = a `<prefix>_gene_browser_data/` folder next to the HTML holding the gene index and per-gene shards, loaded on demand (the page stays a few MB and lists every gene; keep the folder beside the HTML); `auto` = companion when the embedded payload would exceed `browser_companion_threshold_mb`. |
+| `report.browser_companion_threshold_mb` | `50` | Payload size above which `auto` switches to the companion folder. |
 | `report.browser_max_sites_per_gene` | `0` | Gene browser: embed at most this many (site × fragmentform) rows per gene, best-covered first; `0` = all. A 31-library run has ~26 M such rows (a multi-GB page), so set e.g. `2000` there. The report and browser stream the ZN long table per position block instead of loading it, so memory no longer scales with the table. |
 
 The Site-Classification section shows **one structural-category distribution
