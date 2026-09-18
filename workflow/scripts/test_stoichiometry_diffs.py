@@ -120,8 +120,9 @@ def parse_args():
     )
     ap.add_argument(
         "--mc-resamples", type=int, default=MC_RESAMPLES,
-        help="Resamples for the exact stratified test (adaptive: 999 first, extended to this only when "
-             "the observed statistic is rarely exceeded)."
+        help="Resamples for the exact stratified test (adaptive: 999 first, extended to this when the "
+             "observed statistic is rarely exceeded, and to 10x this when it is never exceeded; the p-value "
+             "is always the conditional estimate, floor 1/(10x+1))."
     )
     return ap.parse_args()
 
@@ -260,7 +261,7 @@ def _inverse_nolapack(M, tol=1e-12):
     return aug[:, n:]
 
 
-def cmh_general_association_mc(strata, seed=12345, n_resamples=9999, n_first=999, early_hits=10):
+def cmh_general_association_mc(strata, seed=12345, n_resamples=9999, n_first=999, early_hits=10, max_resamples=None):
     """EXACT (Monte-Carlo, conditional) version of cmh_general_association for SPARSE stratified tables.
 
     Why: the generalized CMH statistic is referred to chi2(r-1), which is an asymptotic result that needs
@@ -273,10 +274,12 @@ def cmh_general_association_mc(strata, seed=12345, n_resamples=9999, n_first=999
     covariance V of Q depend only on the margins, so each resample only changes the numerator vector A.
 
     Adaptive cost: `n_first` resamples first; if the observed statistic is already exceeded `early_hits`
-    times the p-value is settled at that resolution, otherwise the run is extended to `n_resamples`.
-    The same asymptotic hybrid as montecarlo_exact_test applies when NO resample reaches Q (a strong,
-    well-separated table beyond the MC resolution): the asymptotic p is reported instead of the floor.
-    Deterministic (fixed seed). Returns (statistic, p_value, df, n_informative_strata, n_resamples_used).
+    times the p-value is settled at that resolution, otherwise the run is extended to `n_resamples`, and
+    -- when still NO resample reaches Q -- once more to `max_resamples` (default 10 x n_resamples). The
+    p-value is always the conditional estimate (hits + 1) / (n + 1): a table reaches this function
+    precisely because its chi-square approximation is NOT trusted, so (unlike montecarlo_exact_test) it
+    never substitutes the asymptotic p when the estimate hits the resolution floor. Deterministic (fixed
+    seed). Returns (statistic, p_value, df, n_informative_strata, n_resamples_used).
     """
     r = strata[0].shape[0]
     if r < 2:
@@ -301,7 +304,6 @@ def cmh_general_association_mc(strata, seed=12345, n_resamples=9999, n_first=999
     Q = float(np.einsum("i,ij,j->", A, Vi, A))
     if not np.isfinite(Q) or Q < 0:
         return float("nan"), float("nan"), r - 1, len(used), 0
-    asymptotic_p = float(_chi2_dist.sf(Q, r - 1))
     rng = np.random.default_rng(seed)
 
     def _draw(n):
@@ -312,12 +314,17 @@ def cmh_general_association_mc(strata, seed=12345, n_resamples=9999, n_first=999
         Qs = np.einsum("ij,jk,ik->i", Asim, Vi, Asim)   # einsum: plain C loops, no BLAS dispatch
         return int(np.sum(Qs >= Q - 1e-9))
 
-    n_done = int(n_first)
+    n_resamples = max(1, int(n_resamples))
+    n_done = min(int(n_first), n_resamples)
     hits = _draw(n_done)
     if hits < early_hits and n_resamples > n_done:
-        hits += _draw(int(n_resamples) - n_done)
-        n_done = int(n_resamples)
-    p = asymptotic_p if hits == 0 else (hits + 1) / (n_done + 1)
+        hits += _draw(n_resamples - n_done)
+        n_done = n_resamples
+    n_max = int(max_resamples) if max_resamples else 10 * n_resamples
+    if hits == 0 and n_max > n_done:
+        hits += _draw(n_max - n_done)
+        n_done = n_max
+    p = (hits + 1) / (n_done + 1)
     return Q, float(p), r - 1, len(used), n_done
 
 

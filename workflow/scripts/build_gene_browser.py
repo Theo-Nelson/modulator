@@ -99,7 +99,8 @@ def _aggregate_sites(path, chunksize=2_000_000, verbose=False):
     in FIRST-APPEARANCE order -- exactly what the whole-table groupby(sort=False) produced, because every
     row of a site sits in one (chrom, start0) block (see iter_tsv_position_blocks), so per-block sums are
     the whole-table sums and block order is file order. `mod_codes` is the sorted set of codes seen."""
-    from genotype_utils import iter_tsv_position_blocks
+    from genotype_utils import iter_tsv_position_blocks, TableNotPositionSorted
+    import sys
     empty = pd.DataFrame(), []
     if not path or not os.path.exists(path) or os.path.getsize(path) == 0:
         return empty
@@ -114,16 +115,25 @@ def _aggregate_sites(path, chunksize=2_000_000, verbose=False):
     dtype = {c: str for c in ("gene_name", "chrom", "strand", "mod_code") if c in use}
     parts = []
     codes = set()
-    for blk in iter_tsv_position_blocks(path, use, chunksize=chunksize, dtype=dtype, verbose=verbose,
-                                        label="browser sites"):
-        codes.update(blk["mod_code"].dropna().astype(str).unique().tolist())
-        g = blk.groupby(keys_zt, sort=False, observed=True)[["Nvalid_cov", "Nmod"]].sum().reset_index()
+    try:
+        for blk in iter_tsv_position_blocks(path, use, chunksize=chunksize, dtype=dtype, verbose=verbose,
+                                            label="browser sites"):
+            codes.update(blk["mod_code"].dropna().astype(str).unique().tolist())
+            g = blk.groupby(keys_zt, sort=False, observed=True)[["Nvalid_cov", "Nmod"]].sum().reset_index()
+            if not by_zt:
+                g["ZN_transcript_index"] = -1
+            parts.append(g)
+        if not parts:
+            return empty
+        g = pd.concat(parts, ignore_index=True)
+    except TableNotPositionSorted as exc:
+        # not position-grouped (e.g. a sample-major table): whole-table groupby, same result, more memory
+        sys.stderr.write(f"[browser] {exc}; falling back to a whole-table read\n")
+        whole = pd.read_csv(path, sep="\t", usecols=use, dtype=dtype, low_memory=False)
+        codes = set(whole["mod_code"].dropna().astype(str).unique().tolist())
+        g = whole.groupby(keys_zt, sort=False, observed=True)[["Nvalid_cov", "Nmod"]].sum().reset_index()
         if not by_zt:
             g["ZN_transcript_index"] = -1
-        parts.append(g)
-    if not parts:
-        return empty
-    g = pd.concat(parts, ignore_index=True)
     g["frac"] = (g["Nmod"] / g["Nvalid_cov"].replace(0, np.nan)).round(4)
     for c in keys:
         g[c] = g[c].astype(str)
@@ -451,6 +461,7 @@ const sci=p=>p==null||isNaN(p)?"–":(p<1e-4?p.toExponential(1):p.toFixed(4));
 const esc=s=>String(s==null?"":s).replace(/[&<>"']/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
 
 function renderList(f){
+  if(DATA.mode==="companion" && !DATA.index.length){return;}   // index still loading
   const q=(f||"").trim().toLowerCase();
   // fragmentform-id search only reaches genes whose data is loaded (embedded: all; companion: visited)
   const rows=DATA.index.filter(r=>!q||r.g.toLowerCase().includes(q)||
@@ -558,7 +569,8 @@ function clearSel(){selExon=null;document.querySelectorAll(".exon").forEach(x=>x
 $("#q").addEventListener("input",e=>renderList(e.target.value));
 if(DATA.mode==="companion"){
   $("#list").innerHTML=`<div class="empty" style="padding:14px">Loading gene index…</div>`;
-  loadScript("index.js").then(()=>renderList("")).catch(()=>{renderList("");dataError("the gene index");});
+  loadScript("index.js").then(()=>{renderList($("#q").value);if(!cur&&DATA.index.length)select(DATA.index[0].g);})
+    .catch(()=>dataError("the gene index"));
 }else{renderList("");}
 if(DATA.index.length) select(DATA.index[0].g);
 </script></body></html>"""

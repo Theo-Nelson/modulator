@@ -489,9 +489,31 @@ def scan_zn_long_table(path, meta_df, min_cov=20, chunksize=2_000_000, verbose=F
     quantities key on the site position, so they are computed exactly per (chrom, start0) block (see
     iter_tsv_position_blocks): a site's rows for every sample and fragmentform sit in one block, so the
     per-site max-min range and the per-gene distinct-site count never see a split site."""
-    from genotype_utils import iter_tsv_position_blocks
+    from genotype_utils import iter_tsv_position_blocks, TableNotPositionSorted
     if not path or not os.path.exists(path) or os.path.getsize(path) == 0:
         return {}, pd.DataFrame()
+    try:
+        return _scan_zn_long_table_streamed(path, meta_df, min_cov, chunksize, verbose)
+    except TableNotPositionSorted as exc:
+        sys.stderr.write(f"[report] {exc}; falling back to a whole-table read\n")
+    zn = read_tsv_cols(path, ["sample", "chrom", "start0", "end0", "strand", "mod_code",
+                              "ZN_transcript_index", "Nvalid_cov", "Nmod", "frac_modified", "gene_name"],
+                       categorical=("sample", "chrom", "strand", "mod_code", "gene_name"))
+    conc = replicate_concordance(zn, meta_df, min_cov=min_cov)
+    top = pd.DataFrame()
+    if not zn.empty and {"gene_name", "chrom", "start0", "end0", "strand", "mod_code"}.issubset(zn.columns):
+        top = (pd.DataFrame({"gene_name": zn["gene_name"].astype(str).to_numpy(),
+                             "mod_code": zn["mod_code"].astype(str).to_numpy(),
+                             "site_key": (zn["chrom"].astype(str) + ":" + zn["start0"].astype(str) + ":"
+                                          + zn["end0"].astype(str) + ":" + zn["strand"].astype(str) + ":"
+                                          + zn["mod_code"].astype(str)).to_numpy()})
+               .groupby(["gene_name", "mod_code"], as_index=False)["site_key"].nunique()
+               .rename(columns={"site_key": "n_sites"}).sort_values("n_sites", ascending=False))
+    return conc, top
+
+
+def _scan_zn_long_table_streamed(path, meta_df, min_cov, chunksize, verbose):
+    from genotype_utils import iter_tsv_position_blocks
     hdr = [str(c).lstrip("#") for c in pd.read_csv(path, sep="\t", nrows=0).columns]
     have_meta = (meta_df is not None and not meta_df.empty and "condition" in meta_df.columns
                  and "sample" in meta_df.columns)

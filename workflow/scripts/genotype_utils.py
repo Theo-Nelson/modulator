@@ -861,6 +861,12 @@ def read_tsv_for_samples(path, usecols, sample_col, keep_samples, *, chunksize=4
     return df
 
 
+class TableNotPositionSorted(ValueError):
+    """Raised by iter_tsv_position_blocks when a (chrom, start0) block re-appears after a different block
+    was seen: the table is not position-grouped (e.g. a sample-major table), so per-block aggregation
+    would be wrong. Callers fall back to a whole-table read."""
+
+
 def iter_tsv_position_blocks(path, usecols, *, chunksize=2_000_000, dtype=None,
                              block_cols=("chrom", "start0"), verbose=False, label="table"):
     """Stream a POSITION-SORTED TSV (e.g. the ZN long table, written per chromosome in start0 order with
@@ -876,7 +882,40 @@ def iter_tsv_position_blocks(path, usecols, *, chunksize=2_000_000, dtype=None,
     carry = None
     n_in = 0
     t0 = time.perf_counter()
+    # Guard: the per-block aggregation the callers do is only exact when every (chrom, start0) block is
+    # contiguous. Check the cheap sufficient condition -- each chromosome is one contiguous run and the
+    # positions are non-decreasing within it -- and raise TableNotPositionSorted otherwise (a sample-major
+    # table, e.g. the sort engine's RAW long table when site filtering is off); callers then fall back to
+    # a whole-table read instead of silently mis-aggregating.
+    seen_chroms = set()
+    state = {"chrom": None, "pos": None}
+
+    def _check_order(chunk):
+        if len(bc) < 2 or not len(chunk):
+            return
+        ch = chunk[bc[0]].to_numpy()
+        ps = pd.to_numeric(chunk[bc[1]], errors="coerce").to_numpy(dtype=float)
+        starts = np.flatnonzero(np.r_[True, ch[1:] != ch[:-1]])
+        ends = list(starts[1:]) + [len(ch)]
+        for a, b in zip(starts, ends):
+            c = ch[a]
+            if c != state["chrom"]:
+                if c in seen_chroms:
+                    raise TableNotPositionSorted(f"{label}: chromosome {c!r} re-appears in {path}: the table is "
+                                                 f"not position-grouped, per-block aggregation would be wrong")
+                seen_chroms.add(c)
+                state["chrom"], state["pos"] = c, None
+            seg = ps[a:b]
+            seg = seg[~np.isnan(seg)]
+            if not seg.size:
+                continue
+            if (state["pos"] is not None and seg[0] < state["pos"]) or np.any(seg[1:] < seg[:-1]):
+                raise TableNotPositionSorted(f"{label}: positions are not sorted within {c!r} in {path}: the "
+                                             f"table is not position-grouped, per-block aggregation would be wrong")
+            state["pos"] = float(seg[-1])
+
     for chunk in pd.read_csv(path, sep="\t", usecols=cols, dtype=dtype, chunksize=chunksize, low_memory=False):
+        _check_order(chunk)
         n_in += len(chunk)
         if carry is not None and len(carry):
             chunk = pd.concat([carry, chunk], ignore_index=True)

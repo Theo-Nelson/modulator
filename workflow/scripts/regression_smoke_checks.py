@@ -208,6 +208,13 @@ def test_stratified_sparse_guard():
     assert abs(r["effect_max_abs_frac_diff"] - r["effect_max_abs_frac_diff_pooled"]) < 0.02, \
         f"effect over all strata should be near the pooled contrast: {r['effect_max_abs_frac_diff']} vs {r['effect_max_abs_frac_diff_pooled']}"
     assert r["effect_max_abs_frac_diff"] < 0.05, r["effect_max_abs_frac_diff"]
+    # an extreme sparse table (200,000 vs 3 reads, one modified each): exact p ~ 3e-5, the chi-square
+    # says 0 -- the MC path must return its floor estimate, never the chi-square value
+    rows = [(1, smp, 100000, 1 if smp == 0 else 0) for smp in range(2)] + [(2, smp, 2 if smp else 1, 1 if smp == 1 else 0) for smp in range(2)]
+    zx, sx, cx, nx = site(rows)
+    rx = m.summarize_site_arrays(zx, sx, cx, nx, names, 1, "auto", 0.5, "two-sided")
+    assert rx["test_name"].endswith("_mc") and rx["p_value"] >= 1.0 / (10 * m.MC_RESAMPLES + 1) - 1e-12, rx
+    assert rx["p_value"] < 1e-3, rx
     r_off = m.summarize_site_arrays(zn, sp, cv, nm, names, 20, "auto", 0.5, "two-sided", mc_min_expected=0)
     assert not r_off["test_name"].endswith("_mc") and r_off["p_value"] < r["p_value"], "guard off must reproduce the chi-square path"
     # deterministic
@@ -222,6 +229,49 @@ def test_stratified_sparse_guard():
     assert d["test_name"] == "cmh_general_3x2" and abs(d["effect_max_abs_frac_diff"] - 0.2) < 1e-9, d
     stat, p, _df, _used = m.cmh_general_association(m.informative_strata([np.array([[60, 140], [10, 90], [24, 56]], float)] * 5))
     assert abs(d["stat_value"] - stat) < 1e-9 and abs(d["p_value"] - p) < 1e-300, "dense path must be the plain CMH"
+
+
+def test_position_guard_fallback():
+    """iter_tsv_position_blocks must refuse a table that is not position-grouped (sample-major), and the
+    report / browser aggregations must then fall back to the whole-table result."""
+    import importlib.util, tempfile, random
+    import numpy as np
+    import pandas as pd
+    spec = importlib.util.spec_from_file_location("genotype_utils", ROOT / "genotype_utils.py")
+    gu = importlib.util.module_from_spec(spec); spec.loader.exec_module(gu)
+    rng = random.Random(3)
+    rows = []
+    for smp in ("S1", "S2", "S3", "S4"):          # sample-major: every site re-appears per sample
+        for si in range(40):
+            n = rng.randint(20, 60); k = rng.randint(0, n)
+            rows.append((smp, 1, "chr1", 100 + si * 5, 101 + si * 5, "+", "a", n, k, k / n, f"G{si % 4}"))
+    cols = ["sample", "ZN_transcript_index", "chrom", "start0", "end0", "strand", "mod_code", "Nvalid_cov", "Nmod", "frac_modified", "gene_name"]
+    with tempfile.TemporaryDirectory() as d:
+        path = str(pathlib.Path(d) / "long.tsv")
+        pd.DataFrame(rows, columns=cols).to_csv(path, sep="\t", index=False)
+        try:
+            for _ in gu.iter_tsv_position_blocks(path, cols, chunksize=17):
+                pass
+            raise AssertionError("sample-major table was accepted as position-grouped")
+        except gu.TableNotPositionSorted:
+            pass
+        meta = pd.DataFrame({"sample": ["S1", "S2", "S3", "S4"], "condition": ["A", "A", "B", "B"]})
+        spec = importlib.util.spec_from_file_location("generate_html_report", ROOT / "generate_html_report.py")
+        rep = importlib.util.module_from_spec(spec); spec.loader.exec_module(rep)
+        conc, top = rep.scan_zn_long_table(path, meta)
+        assert conc["A"]["n_sites"] == 40 and conc["B"]["n_sites"] == 40, conc
+        assert int(top["n_sites"].sum()) == 40, top
+        spec = importlib.util.spec_from_file_location("build_gene_browser", ROOT / "build_gene_browser.py")
+        br = importlib.util.module_from_spec(spec); spec.loader.exec_module(br)
+        agg, codes = br._aggregate_sites(path)
+        assert len(agg) == 40 and codes == ["a"], (len(agg), codes)
+        # and a position-grouped copy streams without the fallback and gives the same aggregate
+        srt = pd.DataFrame(rows, columns=cols).sort_values(["chrom", "start0", "sample"], kind="stable")
+        srt.to_csv(path, sep="\t", index=False)
+        agg2, _ = br._aggregate_sites(path)
+        a = agg.sort_values(["start0"]).reset_index(drop=True)[["Nvalid_cov", "Nmod"]]
+        b = agg2.sort_values(["start0"]).reset_index(drop=True)[["Nvalid_cov", "Nmod"]]
+        pd.testing.assert_frame_equal(a, b)
 
 
 def test_classify_example_rank():
@@ -269,6 +319,7 @@ def main():
     test_stale_zn_filter(aggregate)
     test_polya_gene_from_zt()
     test_stratified_sparse_guard()
+    test_position_guard_fallback()
     test_classify_example_rank()
     test_browser_companion_shards()
     print("regression_smoke_checks: OK")

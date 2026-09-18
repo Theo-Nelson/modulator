@@ -2270,7 +2270,7 @@ class ModulatorPipeline:
         self.run_python_script("test_hierarchical_stoich.py", args, label="test_hierarchical_stoich")
 
     # ---- between_conditions: per-step resume markers -------------------------------------------
-    def _bc_step(self, label: str, outputs: list[Path], fn) -> None:
+    def _bc_step(self, label: str, outputs: list[Path], fn, done_check=None) -> None:
         """Run ONE between_conditions step (one test script for one contrast) unless a per-step marker
         says it already finished under the SAME resolved config and its outputs are non-empty.
 
@@ -2285,7 +2285,8 @@ class ModulatorPipeline:
         mdir = self._checkpoint_dir / "between_conditions"
         marker = mdir / (_re.sub(r"[^A-Za-z0-9_.-]+", "_", label) + ".done")
         sig = self._config_sig()
-        if self.resume and marker.exists() and outputs and all(self._nonempty(o) for o in outputs):
+        if self.resume and marker.exists() and outputs and all(self._nonempty(o) for o in outputs) \
+                and (done_check is None or done_check()):
             try:
                 prev = marker.read_text().rstrip("\n").split("\t")[-1]
             except OSError:
@@ -2415,7 +2416,15 @@ class ModulatorPipeline:
         mod_tables = [t for t in mod_tables if self._nonempty(t)]
         if mod_tables and self._nonempty(self.paths.geno_candidate_snps):
             label = "flag_snp_at_mod_base"
-            self._bc_step(label, [self.paths.geno_snp_at_mod_base], lambda: self.run_python_script(
+
+            def _all_flagged(tables=tuple(mod_tables)) -> bool:
+                # the marker alone is not enough: a site-level table rebuilt under the same config (e.g.
+                # a contrast added through the samplesheet) has no flag columns yet -> re-run the step
+                try:
+                    return all("snp_at_mod_base" in open(t).readline().split("\t") for t in tables)
+                except OSError:
+                    return False
+            self._bc_step(label, [self.paths.geno_snp_at_mod_base], done_check=_all_flagged, fn=lambda: self.run_python_script(
                 "find_snp_at_mod_base.py", [
                     "--candidate-snps", str(self.paths.geno_candidate_snps),
                     "--mod-sites", str(self.paths.zn_filtered_long),

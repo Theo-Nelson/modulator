@@ -258,8 +258,8 @@ within the same gene locus**.
 | `test_diffs.test` | str | `"auto"` | `auto` picks Fisher (2×2) or Chi-square (r×2); or force `fisher`/`chi2`. |
 | `test_diffs.pseudocount` | float | `0.5` | Chi-square cell pseudocount (ignored for Fisher). |
 | `test_diffs.alternative` | str | `"two-sided"` | Fisher alternative: `two-sided`/`greater`/`less`. |
-| `test_diffs.mc_min_expected` | `5` | Sparse-table guard for the multi-sample stratified (CMH) test: when any tested fragmentform has fewer than this many expected reads in the modified or unmodified column (summed over the informative samples), the p-value is computed by exact Monte-Carlo resampling of the same statistic (`test_name` gets an `_mc` suffix) instead of the chi-square approximation, which returns p≈0 from a single modified read on a shallow form. `0` restores the old behaviour. |
-| `test_diffs.mc_resamples` | `9999` | Resamples for that exact test (adaptive: 999 first, extended only when the observed statistic is rarely exceeded). |
+| `test_diffs.mc_min_expected` | float | `5` | Sparse-table guard for the multi-sample stratified (CMH) test: when any tested fragmentform has fewer than this many expected reads in the modified or unmodified column (summed over the informative samples), the p-value is computed by exact Monte-Carlo resampling of the same statistic (`test_name` gets an `_mc` suffix) instead of the chi-square approximation, which returns p≈0 from a single modified read on a shallow form. `0` restores the old behaviour. |
+| `test_diffs.mc_resamples` | int | `9999` | Resamples for that exact test (adaptive: 999 first, extended to this when the observed statistic is rarely exceeded and to 10x this when it is never exceeded; the p-value is always the conditional estimate, never the chi-square value). |
 | `test_diffs.gene_filter` | list/null | `null` | Optional gene_name whitelist. |
 | `test_diffs.mod_filter` | list/null | `null` | Optional mod_code whitelist (e.g. `["a","m"]`). |
 
