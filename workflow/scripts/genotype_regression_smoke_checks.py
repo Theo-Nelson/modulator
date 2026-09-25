@@ -224,6 +224,11 @@ def main():
     # (values, NaN pattern, and read_csv-style dtypes), and the reverse conversion must round-trip.
     _check_parquet_roundtrip()
 
+    # ---- SNP x mod positional ladder on the SPLICED distance: a SNP 2 exonic bases from the modified base
+    # but 5 kb away on the genome (across a junction) must be IN_MOTIF_CORE, not DISTAL_CIS; without a GTF
+    # the genomic distance is used and the same pair is DISTAL_CIS.
+    _check_spliced_distance()
+
     # ---- between_conditions at scale: the streamed sample-filtered read must equal a whole-file read
     # (rows, order, dtypes incl. a mixed text/numeric column), and the parallel per-site fits must give
     # the same table as the sequential ones (threads=1 vs threads=3), for both site and per-transcript.
@@ -484,6 +489,37 @@ def _check_between_conditions():
         if [(r["key"], r["p_value"], r["lrt_stat"], r["theta_shrunk"]) for r in r1] != \
            [(r["key"], r["p_value"], r["lrt_stat"], r["theta_shrunk"]) for r in r3]:
             raise AssertionError("diffstats.beta_binomial_diff: parallel result differs from sequential")
+
+
+
+def _check_spliced_distance():
+    import random
+    with tempfile.TemporaryDirectory(prefix="spliced_dist_") as tmpdir:
+        tmp = Path(tmpdir)
+        random.seed(5)
+        ref = "".join(random.choice("ACGT") for _ in range(12000))
+        # exon 1: 1001-1100 (+), exon 2: 6001-6100. Modified base at 6002 (2nd base of exon 2), SNP at 1099
+        # (2nd-last base of exon 1): spliced distance 2, genomic distance 4903.
+        (tmp / "ref.fa").write_text(">chrS\n" + ref + "\n")
+        import pysam
+        pysam.faidx(str(tmp / "ref.fa"))
+        gtf = ('chrS\tmod\ttranscript\t1001\t6100\t.\t+\t.\tgene_id "G1"; transcript_id "G1.G1.G1.T1"; ref_gene_name "G1";\n'
+               'chrS\tmod\texon\t1001\t1100\t.\t+\t.\tgene_id "G1"; transcript_id "G1.G1.G1.T1"; ref_gene_name "G1";\n'
+               'chrS\tmod\texon\t6001\t6100\t.\t+\t.\tgene_id "G1"; transcript_id "G1.G1.G1.T1"; ref_gene_name "G1";\n')
+        (tmp / "ff.gtf").write_text(gtf)
+        assoc = pd.DataFrame([{"snp_id": "chrS:1099:A>G", "mod_site_id": "chrS:6001-6002:+:a", "gene_names": "G1",
+                               "ref_mod_rate": 0.6, "alt_mod_rate": 0.1, "n_reads": 40, "effect_abs_delta_mod_frac": 0.5, "p_adj_bh": 1e-3}])
+        assoc.to_csv(tmp / "assoc.tsv", sep="\t", index=False)
+        for gtf_arg, expect in (([], "DISTAL_CIS"), (["--gtf", str(tmp / "ff.gtf")], "IN_MOTIF_CORE")):
+            run([sys.executable, str(ROOT / "classify_snp_mod_mechanism.py"), "--snp-mod-assoc", str(tmp / "assoc.tsv"),
+                 "--reference-fa", str(tmp / "ref.fa"), "--out-tsv", str(tmp / "out.tsv"), *gtf_arg])
+            out = pd.read_csv(tmp / "out.tsv", sep="\t")
+            assert len(out) == 1 and out.loc[0, "positional_class"] == expect, (gtf_arg, out.to_dict("records"))
+            assert int(out.loc[0, "distance_bp"]) == 4903
+            if gtf_arg:
+                assert int(out.loc[0, "distance_spliced_bp"]) == 2 and out.loc[0, "distance_source"] == "spliced"
+            else:
+                assert out.loc[0, "distance_source"] == "genomic"
 
 
 if __name__ == "__main__":

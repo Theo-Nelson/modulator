@@ -2058,6 +2058,8 @@ class ModulatorPipeline:
                     "--reference-fa", str(self._require_reference_fa()),
                     "--out-tsv", str(self.paths.geno_snp_mod_mechanism),
                     "--proximal-bp", str(int(geno.get("mechanism_proximal_bp", 50))),
+                    # distance along the spliced fragmentform (exonic bases), not the genome
+                    *(["--gtf", str(self.paths.out_gtf)] if self._nonempty(self.paths.out_gtf) else []),
                     "--verbose",
                 ],
                 label="classify_snp_mod_mechanism",

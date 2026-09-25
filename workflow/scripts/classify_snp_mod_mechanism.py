@@ -47,7 +47,7 @@ SELF_REPORT_SIGNATURE = {
 }
 
 OUT_COLS = ["snp_id", "mod_site_id", "chrom", "snp_pos1", "mod_pos1", "strand", "target_mod_code",
-            "gene_names", "distance_bp", "positional_class", "snp_ref_tx", "snp_alt_tx",
+            "gene_names", "distance_bp", "distance_spliced_bp", "distance_source", "positional_class", "snp_ref_tx", "snp_alt_tx",
             "ref_5mer", "alt_5mer", "ref_9mer", "alt_9mer",
             "motif_effect", "artifact_flag", "mod_base_ablated", "ref_mod_rate", "alt_mod_rate",
             "observed_direction", "predicted_direction", "direction_concordance", "class_key",
@@ -64,6 +64,11 @@ def parse_args():
     ap.add_argument("--reference-fa", required=True, help="Reference FASTA (indexed)")
     ap.add_argument("--out-tsv", required=True)
     ap.add_argument("--proximal-bp", type=int, default=50, help="max distance for PROXIMAL_CIS before DISTAL_CIS")
+    ap.add_argument("--gtf", default="", help="the run's assembled fragmentform GTF. When given, the positional ladder "
+                    "uses the SPLICED distance: exonic bases between the SNP and the modified base along the gene's "
+                    "fragmentforms that hold both (minimum over forms). Two bases that are kilobases apart on the "
+                    "genome but adjacent across a splice junction are then classified by their distance on the "
+                    "mature RNA. The genomic distance is kept as distance_bp; distance_source says which was used.")
     ap.add_argument("--verbose", action="store_true")
     return ap.parse_args()
 
@@ -91,8 +96,50 @@ def _sub(kmer, half, genomic_offset, alt_base, strand):
     return kmer[:idx] + alt_t + kmer[idx + 1:]
 
 
+def load_exons_by_gene(gtf_path):
+    """gene name -> list of fragmentform exon lists [(start1, end1), ...] sorted by start, from the assembled GTF."""
+    import collections, re as _re
+    ex = collections.defaultdict(list)
+    with open(gtf_path) as fh:
+        for line in fh:
+            if line.startswith("#"):
+                continue
+            f = line.split("\t")
+            if len(f) < 9 or f[2] != "exon":
+                continue
+            g = _re.search(r'ref_gene_name "([^"]+)"', f[8]) or _re.search(r'gene_name "([^"]+)"', f[8])
+            t = _re.search(r'transcript_id "([^"]+)"', f[8])
+            if not g or not t:
+                continue
+            ex[(g.group(1), t.group(1))].append((int(f[3]), int(f[4])))
+    by_gene = collections.defaultdict(list)
+    for (g, _t), e in ex.items():
+        by_gene[g].append(sorted(e))
+    return by_gene
+
+
+def spliced_distance(by_gene, genes, a1, b1):
+    """Exonic bases between 1-based positions a1 and b1, minimised over the fragmentforms (of any of the
+    listed genes) in which BOTH positions are exonic. None when no fragmentform holds both."""
+    best = None
+    lo, hi = (a1, b1) if a1 <= b1 else (b1, a1)
+    for g in genes:
+        for exons in by_gene.get(g, ()):
+            if not any(s <= a1 <= e for s, e in exons) or not any(s <= b1 <= e for s, e in exons):
+                continue
+            d = 0
+            for s, e in exons:
+                if e < lo or s > hi:
+                    continue
+                d += min(e, hi) - max(s, lo)
+            if best is None or d < best:
+                best = d
+    return best
+
+
 def main():
     args = parse_args()
+    by_gene = load_exons_by_gene(args.gtf) if args.gtf and os.path.exists(args.gtf) else None
     try:
         df = pd.read_csv(args.snp_mod_assoc, sep="\t", low_memory=False)
     except Exception:
@@ -123,7 +170,14 @@ def main():
         mod_pos1 = mod_pos0 + 1
         snp_pos0 = snp_pos1 - 1
         gen_off = snp_pos0 - mod_pos0            # genomic offset of the SNP from the modified base
-        d = abs(gen_off)
+        d_gen = abs(gen_off)
+        d_spl = None
+        if by_gene is not None:
+            genes = [x for x in str(getattr(r, "gene_names", "")).replace(";", ",").split(",") if x and x != "nan"]
+            d_spl = spliced_distance(by_gene, genes, snp_pos1, mod_pos1)
+        # the ladder is read on the mature RNA when a fragmentform holds both positions; genomic otherwise
+        d = d_spl if d_spl is not None else d_gen
+        d_source = "spliced" if d_spl is not None else "genomic"
 
         # ---- Axis A: positional ladder ----
         if d == 0:
@@ -203,7 +257,8 @@ def main():
         rows.append({
             "snp_id": r.snp_id, "mod_site_id": r.mod_site_id, "chrom": s_chrom,
             "snp_pos1": snp_pos1, "mod_pos1": mod_pos1, "strand": strand, "target_mod_code": code,
-            "gene_names": getattr(r, "gene_names", ""), "distance_bp": d,
+            "gene_names": getattr(r, "gene_names", ""), "distance_bp": d_gen,
+            "distance_spliced_bp": d_spl if d_spl is not None else "", "distance_source": d_source,
             "positional_class": positional, "snp_ref_tx": ref_t, "snp_alt_tx": alt_t,
             "ref_5mer": ref5 or "", "alt_5mer": alt5 or "",
             "ref_9mer": ref9 or "", "alt_9mer": alt9 or "",
