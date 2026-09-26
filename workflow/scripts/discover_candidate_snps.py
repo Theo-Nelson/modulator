@@ -36,7 +36,7 @@ def parse_args():
                          "but simultaneously LOOSENED the multiallelic gate, so sites appeared only at a "
                          "stricter setting.")
     ap.add_argument("--min-total-cov", type=int, default=8)
-    ap.add_argument("--min-alt-frac", type=float, default=0.10)
+    ap.add_argument("--min-alt-frac", type=float, default=0.30)
     ap.add_argument("--max-alt-frac", type=float, default=0.90)
     ap.add_argument("--multiallelic-frac", type=float, default=0.10,
                     help="A site is dropped as multiallelic only if its SECOND-most-common alt is both "

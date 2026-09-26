@@ -1779,7 +1779,7 @@ class ModulatorPipeline:
                     "--min-alt-reads", str(int(geno.get("min_alt_reads", 4))),
                     "--min-second-alt-reads", str(int(geno.get("min_second_alt_reads", 4))),
                     "--min-total-cov", str(int(geno.get("min_total_cov", 8))),
-                    "--min-alt-frac", str(float(geno.get("min_alt_frac", 0.10))),
+                    "--min-alt-frac", str(float(geno.get("min_alt_frac", 0.30))),
                     "--max-alt-frac", str(float(geno.get("max_alt_frac", 0.90))),
                     "--min-baseq", str(int(geno.get("min_baseq", 20))),
                     "--min-mapq", str(int(geno.get("min_mapq", self.config.get("assembler", {}).get("min_mapq", 10)))),

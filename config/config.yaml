@@ -241,7 +241,7 @@ genotype:
   snp_scan_depth_chunk_bp: 5000      # granularity at which snp_scan_max_depth is evaluated.
   min_alt_reads: 4
   min_total_cov: 8
-  min_alt_frac: 0.10
+  min_alt_frac: 0.30                 # raised from 0.10 (2026-09-26): against the GIAB HG002 truth set, 0.10 gave 82 % precision (52 % at 20 to 50 reads); 0.30 gives 93 % precision at 93 % recall. Calls absent from the truth set were low-fraction basecalling errors, not modifications.
   max_alt_frac: 0.90
   min_baseq: 20
   min_mapq: 10
