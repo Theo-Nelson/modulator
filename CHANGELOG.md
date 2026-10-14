@@ -6,6 +6,8 @@ All notable changes to Modulator are documented here. The format follows
 
 ## [2.0.0] - 2026-10-14
 
+Archived at Zenodo: https://doi.org/10.5281/zenodo.23381616
+
 This is the release described in the Modulator manuscript (Nelson et al. 2026)
 and used for every analysis in it (HG002, Huh7 Mock and ZIKV-infected). It is a
 rewrite of the 1.x Snakemake workflow as a Python package with a single

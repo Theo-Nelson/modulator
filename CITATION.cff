@@ -4,6 +4,7 @@ title: "Modulator"
 version: 2.0.0
 date-released: 2026-10-14
 license: Apache-2.0
+doi: 10.5281/zenodo.23381616
 repository-code: "https://github.com/Theo-Nelson/modulator"
 authors:
   - family-names: Nelson

@@ -1,5 +1,7 @@
 ![modulator](workflow/images/modulator_banner.png)
 
+[![DOI](https://zenodo.org/badge/DOI/10.5281/zenodo.23381616.svg)](https://doi.org/10.5281/zenodo.23381616)
+
 # modulator
 
 > Transcript-fragment-resolved RNA-modification analysis for long-read direct-RNA sequencing.
