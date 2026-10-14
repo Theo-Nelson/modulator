@@ -58,8 +58,7 @@ at tag `v1.0.0`; 2.0.0 shares no code with it.
   `resources/test_bams/README.md`; the published sample report in
   `docs/sample_report` is regenerated from them on this version. A synthetic
   three-exon fixture is used by the regression tests.
-- `ADVANCED_USAGE.md` with the full parameter, output, and HPC reference, and
-  `STRESS_TEST_FINDINGS.md` with the review log.
+- `ADVANCED_USAGE.md` with the full parameter, output, and HPC reference.
 
 ### Changed
 
