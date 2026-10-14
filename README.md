@@ -202,12 +202,5 @@ modulator run --workdir "$RUNDIR" --config config/config.yaml --jobs "$JOBS" \
 - [Theodore Nelson](https://github.com/Theo-Nelson), Weill Cornell Medicine
 - [Michael Goneos](https://github.com/mgoneos), Weill Cornell Medicine
 
-T.M.N. was supported by a Medical Scientist Training Program grant from the National Institute of
-General Medical Sciences of the National Institutes of Health under award number: T32GM152349 to the
-Weill Cornell/Rockefeller/Sloan Kettering Tri-Institutional MD-PhD Program. T.M.N. was also supported
-with computational resources from the National Science Foundation ACCESS Allocation Request
-BIO240371. T.M.N. gratefully acknowledge use of the research computing resources of the Empire AI
-Consortium, Inc, with support from Empire State Development of the State of New York, the Simons
-Foundation, and the Secunda Family Foundation (10.1145/3708035.3736070). The computations by T.M.N.
-were also run with additional HPC resources supported by the Scientific Computing Unit at Weill
-Cornell Medicine.
+T.M.N. was supported by a Medical Scientist Training Program grant from the National Institute of General Medical Sciences of the National Institutes of Health under award number: T32GM152349 to the Weill Cornell/Rockefeller/Sloan Kettering Tri-Institutional MD-PhD Program. T.M.N. was also supported with computational resources from the National Science Foundation ACCESS Allocation Request BIO240371. T.M.N. gratefully acknowledge use of the research computing resources of the Empire AI Consortium, Inc, with support from Empire State Development of the State of New York, the Simons Foundation, and the Secunda Family Foundation (10.1145/3708035.3736070). T.M.N. also acknowledges the Weill Cornell Medicine High-Performance Computing Core for providing computational resources and support that contributed to the results reported in this paper. RRID:SCR_028969.
+
