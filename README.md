@@ -15,7 +15,7 @@ base-modification tags and, in a single command:
 
 The supported interface is the `modulator` Python CLI.
 
-**See a live example → [sample HTML report](https://rawcdn.githack.com/Theo-Nelson/modulator/76bf6053647e39aa6546094053f7617264de4371/docs/sample_report/demo14_report.html) · [sample gene browser](https://rawcdn.githack.com/Theo-Nelson/modulator/76bf6053647e39aa6546094053f7617264de4371/docs/sample_report/demo14_gene_browser.html)** (both rendered from the bundled 14-gene demo). <!-- commit-pinned rawcdn URL: immutable, so the HTML and its externalized figures always match; re-pin the SHA whenever docs/sample_report is regenerated. -->
+**See a live example → [sample HTML report](https://rawcdn.githack.com/Theo-Nelson/modulator/76bf6053647e39aa6546094053f7617264de4371/docs/sample_report/demo14_report.html) · [sample gene browser](https://rawcdn.githack.com/Theo-Nelson/modulator/76bf6053647e39aa6546094053f7617264de4371/docs/sample_report/demo14_gene_browser.html)** (both rendered from a 14-gene run over the union of the bundled test regions; see [resources/test_bams/README.md](resources/test_bams/README.md)). <!-- commit-pinned rawcdn URL: immutable, so the HTML and its externalized figures always match; re-pin the SHA whenever docs/sample_report is regenerated. -->
 
 
 **Full parameter, output, and HPC reference -> [ADVANCED_USAGE.md](ADVANCED_USAGE.md)**
@@ -66,7 +66,8 @@ python workflow/scripts/genotype_regression_smoke_checks.py
 ## Input requirements
 
 - **BAMs**: coordinate-sorted and indexed (`.bai`), aligned to your genome
-  (e.g. `minimap2 -ax splice -uf` for ONT dRNA), one per sample.
+  (e.g. `minimap2 -ax splice -uf -k14 -y --secondary=no` for ONT dRNA; `-y` carries the
+  `MM`/`ML` modification tags from the unaligned BAM into the alignment), one per sample.
 - **Modification tags**: `MM`/`ML` tags from a modification-aware basecaller
   (e.g. Dorado). modulator does not call modifications from the signal — it
   summarizes the modification tags already present in the reads.
@@ -94,7 +95,7 @@ Outputs land in `results/` under the working directory.
 
 ## What modulator does
 
-Fifteen stages, run in order and individually **resumable** (`--resume`):
+Sixteen stages, run in order and individually **resumable** (`--resume`):
 
 | # | stage | what it does | headline output |
 |---|-------|--------------|-----------------|
@@ -102,7 +103,7 @@ Fifteen stages, run in order and individually **resumable** (`--resume`):
 | 2 | `read_stats` | per-sample read-retention funnel + length summaries | `<prefix>_per_sample_read_stats.tsv` |
 | 3 | `splice_junctions` | donor/acceptor dinucleotides of every assembled intron | `<prefix>_splice_junctions.tsv` |
 | 4 | `apa_motifs` | polyadenylation-signal check per APA site + internal-priming flag | `<prefix>_apa_motifs.tsv` |
-| 5 | `modkit_zn` | `modkit pileup` partitioned by `ZN` (per-transcript modification calls) | `modkit_zn/<sample>/*.bed` |
+| 5 | `modkit_zn` | `modkit pileup` partitioned by `ZN` (per-transcript modification calls) | `modkit_zn/<sample>/*.bed.gz` (+ `.tbi`) |
 | 6 | `aggregate_zn` | merge into per-site × transcript × sample stoichiometry | `<prefix>_FILTERED_sites_long.tsv` |
 | 7 | `novel_loci` | read-backed loci matching no reference gene | `<prefix>_novel_loci.tsv` |
 | 8 | `sequence_elements` | annotate PAS / 3'UTR / codon context around each fragmentform's modification sites | `<prefix>_sequence_elements.tsv` |
@@ -161,7 +162,7 @@ Where to look first (all under `results/`):
   comparisons (needs a `samplesheet` with a `condition` column).
 - Every figure is written as PNG, PDF, and SVG.
 
-See [ADVANCED_USAGE.md](ADVANCED_USAGE.md#outputs) for the complete file list.
+See [ADVANCED_USAGE.md](ADVANCED_USAGE.md#outputs) for the main file list.
 
 ## Command-line interface
 
@@ -173,15 +174,17 @@ modulator validate-config --config config/config.yaml [--set k=v …]
 
 - `--set` takes simple `key=value` or `nested.key=value` overrides.
 - `--stages` runs a comma-separated subset (e.g. `--stages assemble,read_stats`).
-- `--resume` skips stages whose outputs already exist.
+- `--resume` skips stages whose `results/.checkpoints/<stage>.done` marker matches the current config (any config change re-runs the stage).
 
 Full flag reference: [ADVANCED_USAGE.md -> CLI](ADVANCED_USAGE.md#command-line-interface).
 
 ## Configuration
 
-Nested settings live in `config/config.yaml` under sections `assembler`,
-`multigene`, `modkit`, `aggregation`, `test_diffs`, `classify_diffs`,
-`genotype`, and `report`; override any of them on the command line with
+Nested settings live in `config/config.yaml` under sections `preflight`,
+`assembler`, `splice_junctions`, `novel_loci`, `sequence_elements`,
+`multigene_filter`, `toggles`, `modkit`, `aggregation`, `test_diffs`,
+`classify_diffs`, `apa_motifs`, `genotype`, `polya`, `hierarchical_stoich`,
+`between_conditions`, and `report`; override any of them on the command line with
 `--set nested.key=value`. Every parameter is documented in
 [ADVANCED_USAGE.md -> Stages & parameters](ADVANCED_USAGE.md#stages--parameters).
 

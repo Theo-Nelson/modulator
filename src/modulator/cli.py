@@ -28,7 +28,7 @@ def build_parser() -> argparse.ArgumentParser:
     run.add_argument("--set", dest="overrides", nargs="*", default=[], help="Simple overrides like key=value or nested.key=value.")
     run.add_argument("--jobs", type=int, default=1, help="Number of independent sample-level jobs to run in parallel.")
     run.add_argument("--stages", default="all", help=f"Comma-separated subset of stages to run. Valid: {', '.join(STAGE_ORDER)}")
-    run.add_argument("--resume", action="store_true", help="Skip stages whose outputs already exist in the results folder (checkpoint resume).")
+    run.add_argument("--resume", action="store_true", help="Skip stages whose results/.checkpoints/<stage>.done marker matches the current config (checkpoint resume).")
 
     validate = sub.add_parser("validate-config", help="Load the config, apply overrides, and print the resolved project root.")
     validate.add_argument("--config", default="config/config.yaml")

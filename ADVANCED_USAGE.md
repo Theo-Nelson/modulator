@@ -1,7 +1,7 @@
 # modulator — Advanced Usage
 
-Complete reference for the command-line interface, configuration, every stage's
-parameters, outputs, the genotype module, HPC execution, and troubleshooting.
+Reference for the command-line interface, configuration, stage parameters,
+outputs, the genotype module, HPC execution, and troubleshooting.
 For installation and a quick start, see [README.md](README.md).
 
 > **Terminology:** *fragment* (equivalently *fragmented / partial transcript*)
@@ -47,7 +47,7 @@ modulator run --config config/config.yaml [--workdir .] [--jobs N] [--stages all
 | `--workdir` | `.` | Project dir containing `workflow/`, `config/`, `results/`, `resources/`. |
 | `--jobs` | `1` | Independent sample-level jobs in parallel. (`genotype.jobs` is separate.) |
 | `--stages` | `all` | Comma-separated subset of: `assemble, read_stats, splice_junctions, apa_motifs, modkit_zn, aggregate_zn, novel_loci, sequence_elements, test_diffs, classify_diffs, multigene_filter, genotype, polya, hierarchical_stoich, between_conditions, report` (this is the execution order). |
-| `--resume` | off | Skip stages whose outputs (or `results/.checkpoints/<stage>.done` markers) already exist. |
+| `--resume` | off | Skip stages whose `results/.checkpoints/<stage>.done` marker carries the current config signature. Outputs without a marker, and any stage whose config changed, re-run. |
 | `--set` | — | Simple overrides: `key=value` / `nested.key=value` (e.g. `genotype.enable=true`). |
 
 ```bash
@@ -59,7 +59,8 @@ modulator validate-config --config config/config.yaml [--set …]
   include `MXD1_reads` (single gene, the default) and `ALCAM_NHSL1_SERAC1_MXD1_RIOK3_reads`
   (five genes); `--mode full` enables the heavier path.
 - `validate-config` loads the config, applies `--set`, and prints the resolved
-  project root — use it to dry-check overrides before a long run.
+  project root, `prefix`, the number of samples found, `reference_fa` and
+  `reference_gtf` — use it to dry-check overrides before a long run.
 
 The package runner executes the existing `workflow/scripts/*` directly, so the
 algorithms are unchanged; only the launch UX differs.
@@ -68,9 +69,11 @@ algorithms are unchanged; only the launch UX differs.
 
 `config/config.yaml` holds top-level inputs and the nested per-stage sections.
 Top-level keys (usually set with `--set`): `reference_fa`, `reference_gtf`,
-`bams_dir`, `bam_glob`, `prefix`, `threads`. Nested sections: `assembler`,
-`multigene`, `modkit` (`common` / `zn` / `zt`), `aggregation` (`zn` / `zt`),
-`test_diffs`, `classify_diffs`, `genotype`, `report`. Override anything with
+`bams_dir`, `bam_glob`, `prefix`, `threads`, `min_cov`. Nested sections:
+`preflight`, `assembler`, `splice_junctions`, `novel_loci`, `sequence_elements`,
+`multigene_filter`, `toggles`, `modkit` (`common` / `zn`), `aggregation` (`zn`),
+`test_diffs`, `classify_diffs`, `apa_motifs`, `genotype`, `polya`,
+`hierarchical_stoich`, `between_conditions`, `report`. Override anything with
 `--set nested.key=value`.
 
 ---
@@ -158,20 +161,29 @@ partition index, not a within-gene fragment index.
 > `assembler.min_introns=0` **and** `assembler.min_introns_read=0`, or assembly
 > will discard every (intronless) read.
 
-### 2. Multigene filter
+### 2. Multigene filter (`multigene_filter`)
 
-Scans each tagged BAM, summarizes overlap against assembled gene exon-unions,
-and writes a cleaned BAM for `modkit`. Overlapping reads are kept and categorized.
+Runs after `classify_diffs` (stage 11). Scans each ZT-tagged BAM, summarizes
+overlap against the assembled gene exon-unions, and writes a cleaned BAM
+(`assemble/zt_filtered/<sample>.zt_tagged.clean.bam`) that the `genotype` and
+`polya` stages read. `modkit` itself reads the ZT-tagged BAM directly, because
+its `ZN` partitioning already excludes untagged reads.
 
 | Parameter | Type | Default | Description |
 |-----------|------|---------|-------------|
-| `enable` | bool | `true` | Run the overlap filter between assembly and modkit. |
+| `enable` | bool | `true` | Run the overlap filter. |
 | `zero_gene_action` | string | `"keep"` | Reads overlapping zero assembled genes: `keep` or `scrap`. |
+| `multi_gene_action` | string | `"scrap_unresolved"` | Reads exonically overlapping more than one gene: `scrap_unresolved` (scrap reads with no ZT tag and ZT conflicts), `scrap_conflict` (scrap only ZT conflicts), or `keep`. Reads resolved by their ZT tag are always kept. |
+
+The three one-key stages `splice_junctions`, `novel_loci` and `sequence_elements`
+each take `enable` (default `true`); `sequence_elements` also takes `pas_window`
+(`60` nt upstream of the 3′ end scanned for a PAS hexamer) and `utr3_window`
+(`400` nt of 3′ UTR scanned for ARE/CPE/GRE motifs when no stop codon is annotated).
 
 ### 3. modkit pileup (modkit_zn)
 
 `modkit pileup` is run **per `ZN` partition** (`--partition-tag ZN`) on the
-cleaned tagged BAMs. Keys under `modkit.common` map directly to modkit flags
+ZT-tagged sample BAMs (`assemble/zt_tagged/<sample>.zt_tagged.bam`). Keys under `modkit.common` map directly to modkit flags
 (see ONT's [Advanced Usage](https://github.com/nanoporetech/modkit/blob/master/book/src/advanced_usage.md)):
 
 | Key | Type | Default | Maps to |
@@ -182,17 +194,7 @@ cleaned tagged BAMs. Keys under `modkit.common` map directly to modkit flags
 | `include_bed` | str/null | `null` | `--include-bed` |
 | `include_unmapped` | bool | `false` | `--include-unmapped` |
 | `edge_filter` / `invert_edge_filter` | str/bool | `null`/`false` | `--edge-filter` / `--invert-edge-filter` |
-
-> **`max_depth` and what it does to the denominator.** At a site deeper than `max_depth`, modkit
-> *subsamples* to that many reads. The modified **fraction** stays unbiased (subsampling, not
-> head-truncation — measured mean shift +0.004 pp, median |shift| 0.02 pp on a 6,000× locus), but
-> `Nvalid_cov` — the binomial **denominator** every differential test uses, and the depth that
-> `min_cov` / `test_diffs.min_cov` filter on — is the **capped** number, not the true depth. On deep
-> direct-RNA (real loci exceed 5,000×) the default `1000` discards ~2/3 of the evidence at the deepest
-> sites, so those sites are tested at n≈1,500 regardless of true coverage. This is a **precision**
-> setting, not an accuracy one. Raise it (e.g. `--set modkit.common.max_depth=10000`) to keep the full
-> depth in the denominator; higher values cost modkit time and memory.
-| `threads` | int | top-level `threads` | `-t/--threads` |
+| `threads` | int | top-level `threads` divided by `min(--jobs, samples)` | `-t/--threads` |
 | `interval_size` | int | `100000` | `--interval-size` |
 | `queue_size` | int | `1000` | `--queue-size` |
 | `chunk_size` | int/null | `null` | `--chunk-size` |
@@ -208,12 +210,21 @@ cleaned tagged BAMs. Keys under `modkit.common` map directly to modkit flags
 | `only_tabs` / `mixed_delim` | bool | `false` | output delimiter control |
 | `suppress_progress` | bool | `true` | `--suppress-progress` |
 
+> **`max_depth` and what it does to the denominator.** At a site deeper than `max_depth`, modkit
+> *subsamples* to that many reads. The modified **fraction** stays unbiased (subsampling, not
+> head-truncation — measured mean shift +0.004 pp, median |shift| 0.02 pp on a 6,000× locus), but
+> `Nvalid_cov` — the binomial **denominator** every differential test uses, and the depth that
+> `min_cov` / `test_diffs.min_cov` filter on — is the **capped** number, not the true depth. On deep
+> direct-RNA (real loci exceed 5,000×) the default `1000` discards ~2/3 of the evidence at the deepest
+> sites, so those sites are tested at n≈1,500 regardless of true coverage. This is a **precision**
+> setting, not an accuracy one. Raise it (e.g. `--set modkit.common.max_depth=10000`) to keep the full
+> depth in the denominator; higher values cost modkit time and memory.
+
 Partition tags are hard-coded to split reads by fragment assignment:
 
 | Section | Key | Default | Meaning |
 |---------|-----|--------:|---------|
 | `zn` | `partition_tag` | `"ZN"` | metagene-aware partition index from the assembler |
-| `zt` | `partition_tag` | `"ZT"` | gene+fragment human-readable code |
 
 > `modkit` is pinned to **0.5.0**: 0.6.x removed `--partition-tag`, which the
 > per-isoform pileup relies on.
@@ -223,8 +234,8 @@ Partition tags are hard-coded to split reads by fragment assignment:
 Merges the per-`ZN` modkit bedMethyl into long tables and per-gene/per-mod pivots.
 
 > **Site-keeping rule (when `filter_enable`):** a row **fails** if
-> `Ndiff > count_diff_factor·Nvalid_cov` **or** `Nmod ≤ nfail_score_k·Nfail` (the NFail-SCORE
-> k-ratio; `nfail_score_k: 0` disables the second term, `1` reproduces the old `Nmod > Nfail` rule).
+> `Ndiff > count_diff_factor·Nvalid_cov` **or** `Nmod < nfail_score_k·(Nfail + 1)` (the NFail-SCORE
+> k-ratio; `nfail_score_k: 0` disables the second term, `1` gives the `Nfail + 1 ≤ Nmod` rule).
 > A **site is kept** in *FILTERED* outputs if **any** row at that site passes;
 > when kept, **all** rows for that site (every ZN/sample) are retained. `min_cov`
 > only zeroes the displayed `frac_modified` (`Nvalid_cov < min_cov`); it does not
@@ -243,8 +254,8 @@ Merges the per-`ZN` modkit bedMethyl into long tables and per-gene/per-mod pivot
 | `write_pivots` | `auto`/`on`/`off` | `auto` | ZN/ZT | Emit per-gene × mod pivots (coverage, fraction, Nmod). `auto` writes them unless the run exceeds `pivot_max_groups` (2000) gene×mod groups. |
 | `write_raw_per_gene` | bool | `false` | ZN | Per-gene tables for *RAW*. |
 | `write_filtered_per_gene` | bool | `true` | ZN | Per-gene tables for *FILTERED*. |
-| `min_cov` | int | `0` | ZN/ZT | Zero `frac_modified` when `Nvalid_cov < min_cov` (row kept). |
-| `gtf` | path | assembled GTF | ZN | GTF to map sites -> genes (uses `zn_index` first, gene-exon fallback). |
+| top-level `min_cov` | int | `5` | ZN | Zero `frac_modified` when `Nvalid_cov < min_cov` (row kept). Set at the top level of the config, not under `aggregation`. |
+| *(fixed)* `gtf` | path | assembled GTF | ZN | The assembled GTF is always used to map sites -> genes (`zn_index` first, gene-exon fallback); not configurable. |
 
 ### 5. Differential test (test_diffs)
 
@@ -284,27 +295,35 @@ the gene's longest-3′UTR isoform. Covers **all** detected `mod_code`s.
 | `classify_diffs.fdr` | float | `0.05` | Maximum BH-FDR. |
 | `classify_diffs.mod_filter` | list/null | `null` | mod_code(s) to classify (`null` = all detected). |
 | `classify_diffs.min_cov` | int | `0` | Extra per-isoform `Ncov` floor on JSON entries. |
-| `classify_diffs.tes_tol` | int | `200` | TES match tolerance for architecture/APA calls (the run scripts set `25` to match the assembler). |
+| `classify_diffs.tes_tol` | int | `25` | TES match tolerance for architecture/APA calls (matches the assembler's `tes_match_tol`). |
 | `classify_diffs.arch_tol` | int | `50` | Isoform-architecture (IPA vs full-length) classification tolerance (bp): how far a TES may sit inside/outside the reference terminal exon. |
-| `classify_diffs.ejc_nt` | int | `150` | EJC suppression zone (nt). |
+| `classify_diffs.ejc_nt` | int | `150` | Near-versus-distal boundary (nt) from the site to the separating junction, used to split `IPA_NO_EXTENSION` from `DISTAL_APA`. |
+| `classify_diffs.private_min_frac` | float | `0.10` | Private sites (`__ZN_site_private.tsv`): minimum stoichiometry in the fragmentform that carries the site. |
+| `classify_diffs.private_min_cov` | int | `20` | Private sites: minimum valid coverage in that fragmentform. |
 | `classify_diffs.figures` | bool | `true` | Render per-category isoform **architecture maps** (`__figs_by_category_arch/`) + 2-panel stoichiometry figures (`__figs_by_category/`). |
 | `classify_diffs.figs_per_category` | int | `10` | Top sites (by effect) per category to plot. |
 | *(output)* `example_rank`, `hi_lo_delta`, `hi_cov`, `lo_cov` | | Added to `*__ZN_site_classified.tsv`. `hi_lo_delta` is the pooled stoichiometry difference between the classified HIGH and LOW fragmentforms (the contrast the structural event explains). `example_rank` orders each leaf's sites by `hi_lo_delta`, then FDR, then the shallower form's coverage; the report table and the `rankNN__` example figures both follow it, so row N is figure N. The test's `effect_max_abs_frac_diff` (a maximum over all tested pairs) is the FDR-gate companion, not the example order. |
 
-**Categories:** `IPA_UNIQUE`, `SPLICED_EXON_UNIQUE`, `LAST_EXON_DISTAL_ONLY`,
-`IPA_SHARED_EJC`, `SPLICING_EJC`, `LAST_EXON_PROXIMAL_APA_FAVORED`,
-`LAST_EXON_DISTAL_APA_FAVORED`, `ALTERNATIVE_LAST_EXON`,
-`SHARED_TERMINAL_EXON`, `SHARED_INTERNAL_EXON`,
-`UNEXPLAINED_SHARED`, `HI_INTRONIC_ARTIFACT`, `UNCLASSIFIED`.
+**Categories.** Each classified site gets a `bucket`, an `event` and a `direction`:
+- `PRIVATE` (the site is intronic or absent in the less-modified fragmentform): `SKIPPED_EXON`, `INTRONIC_POLYA`, `THREE_PRIME_EXTENSION`, `ALT_LAST_EXON`.
+- `SHARED_LOCAL` (exonic in both, local splice or poly(A) difference): `ALT_DONOR`, `ALT_ACCEPTOR`, `ALT_EXON`, `ALT_POLYA_SITE`, `RETAINED_INTRON`, `IPA_EXTENSION`, `IPA_NO_EXTENSION`.
+- `SHARED_DISTAL` (exonic in both, difference elsewhere): `DISTAL_APA`, `DISTAL_SPLICING`.
+- `UNEXPLAINABLE`: `FIVE_PRIME_UNCERTAIN`, `INTRON_READ_ARTIFACT`, `NO_MODEL`, `UNRESOLVED`.
+Private sites (present in one fragmentform, absent from another, no test needed) are written separately to `<prefix>__ZN_site_private.tsv`.
 
-### 7. Genotype (optional)
+### 7. Genotype
 
 Uses the cleaned tagged BAMs to add read-level SNP, modification, and haplotype
-association layers. Enable with `--set genotype.enable=true`.
+association layers. On by default; skip the (slower) stage with
+`--set genotype.enable=false`. Keys not listed here (`snp_scan_jobs`,
+`snp_scan_window_bp`, `snp_scan_depth_chunk_bp`, `subset_bams.*`,
+`mod_scan_window_bp`, `mod_interval_size`, `snp_at_mod_base`,
+`colocalized_mods.*`, `molecule_table_format`) are documented inline in
+`config/config.yaml`.
 
 | Parameter | Type | Default | Description |
 |-----------|------|---------|-------------|
-| `enable` | bool | `false` | Turn on the genotype module. |
+| `enable` | bool | `true` | Run the genotype module. |
 | `jobs` | int | `2` | BAMs processed in parallel (the BAM-heavy steps shard per BAM × chromosome — raise on compute nodes). |
 | `min_alt_reads` | int | `4` | Minimum alt-base support for a candidate SNP. |
 | `min_total_cov` | int | `8` | Minimum total depth at a candidate SNP. |
@@ -495,6 +514,7 @@ computed once per stage and applied to every site-level modification table.
 | `between_conditions.mod_filter` | `[]` | Restrict differential modification to these mod codes, e.g. `["a"]` for m6A only. |
 | `between_conditions.prior_weight` | `20.0` | Dispersion-shrinkage strength. |
 | `between_conditions.ref_df` | `10` | `F(1, df)` reference for the LRT — **dispersion-dependent, see below**. |
+| `between_conditions.site_weight` | `auto` | Per-site weight of the dispersion shrinkage. `auto` = number of samples at the site minus 2, so shrinkage fades as the cohort grows; a fixed number forces a constant weight (`1` = legacy). |
 
 **Calibrating `ref_df` on new data.** `chi2(1)` is invalid at n=3v3 — not because
 of the small sample per se (with the *true* dispersion the LRT is already
@@ -569,16 +589,20 @@ pivots. FILTERED long tables keep every ZN/sample row at kept sites.
 
 **Genotype** (`genotype/`, when enabled):
 - `<prefix>_candidate_snps.tsv` — segregating SNP candidates
-- `<prefix>_molecule_snps.tsv` — one row per read per candidate SNP
-- `<prefix>_candidate_mod_sites.tsv`, `<prefix>_molecule_mod_calls.tsv`
-- `<prefix>_snp_transcript_assoc.tsv`, `<prefix>_snp_mod_assoc.tsv`
+- `<prefix>_molecule_snps.parquet` — one row per read per candidate SNP (`.tsv` when `genotype.molecule_table_format: tsv`)
+- `<prefix>_candidate_mod_sites.tsv`, `<prefix>_molecule_mod_calls.parquet` (same format rule)
+- `<prefix>_snp_transcript_assoc.tsv`, `<prefix>_snp_mod_assoc.tsv`, `<prefix>_snp_mod_mechanism.tsv` (distance class and motif effect per SNP-site pair), `<prefix>_snp_at_mod_base.tsv` (SNPs that replace the modified nucleotide), `<prefix>_mod_mod_assoc.tsv`
+- `<prefix>_candidate_regions.bed`, `<prefix>_read_assignments_candidate_regions.tsv`, `subset_bams/`, `<prefix>_molecule_haplotypes.tsv`
 - `<prefix>_haplotype_blocks.tsv` (gene_names / region / span_bp / snp_coords), `<prefix>_haplotype_transcript_assoc.tsv`, `<prefix>_haplotype_mod_assoc.tsv`
 - `<prefix>__snp_figs/` — per-example figures
 
-**Report**: `report/<prefix>_report.html` + `report/<prefix>_report_files/`.
+**Report**: `report/<prefix>_report.html` + `report/<prefix>_report_files/`, and the
+gene browser `report/<prefix>_gene_browser.html` (+ `<prefix>_gene_browser_data/` in
+companion mode).
 
-**Timing**: `stage_timings.tsv` (per-stage seconds + `TOTAL`) is written at the
-end of every run.
+**Timing and memory**: `stage_timings.tsv` (per-stage seconds + `TOTAL`) and
+`stage_memory.tsv` are written at the end of every run; the genotype stage also
+writes `genotype_timing.tsv` and `genotype_memory.tsv`.
 
 ---
 
@@ -665,7 +689,7 @@ Recommendations:
   flags **self-reporting** variants — A-to-I and pseudouridine alter the basecall,
   so they are called as SNPs at their own site and the association is circular.
   Association engines rewritten as roaring-bitmap engines (~10x less memory).
-- **Figures**: every graph is now written as **PNG and SVG** (`plot_utils.save_figure`).
+- **Figures**: every graph is now written as **PNG, PDF and SVG** (`plot_utils.save_figure`).
 - **Report**: one structural-category graph **per modification** (not a single
   hard-labeled chart); images **externalized** to a sidecar folder + lightbox
   (small HTML that opens in Chrome); haplotype blocks annotated with gene names

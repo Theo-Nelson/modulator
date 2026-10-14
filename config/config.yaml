@@ -127,6 +127,8 @@ toggles:
   enable_zn_pileup: true
   enable_zn_aggregate: true
   enable_test_diffs: true
+  enable_zt_pileup: false           # per-ZT pileup/aggregation are not pipeline stages; kept false
+  enable_zt_aggregate: false
 
 # NEW: authoritative home for aggregation options
 aggregation:
@@ -215,6 +217,8 @@ classify_diffs:
 report:
   enable: true
   title: "modulator HTML report"
+  gene_browser: true                # also build the interactive gene browser (report/<prefix>_gene_browser.html)
+  browser_max_genes: null           # genes embedded in the browser payload, largest by read support first; null = every gene in the reference GTF
   max_diff_figs: 6
   top_transcripts: 20
   top_genes: 20
