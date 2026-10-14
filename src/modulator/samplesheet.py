@@ -3,8 +3,8 @@
 A TSV (or CSV) with one row per sample::
 
     sample   bam                             condition   replicate
-    M1       HornerLab_M1pA_...sorted.bam    mock        1
-    Z1       HornerLab_Z1pA_...sorted.bam    zikv        1
+    M1       M1pA_5genes.bam                  mock        1
+    Z1       Z1pA_5genes.bam                  zikv        1
 
 ``sample`` and ``bam`` are required; ``condition`` is required to run any between-condition test.
 Any further columns are carried through as covariates.

@@ -124,8 +124,8 @@ at a TSV:
 
 ```tsv
 sample	bam	condition	replicate
-M1	HornerLab_M1pA_*.bam	mock	1
-Z1	HornerLab_Z1pA_*.bam	zikv	1
+M1	M1pA_*.bam	mock	1
+Z1	Z1pA_*.bam	zikv	1
 ```
 
 The samplesheet then becomes the **sample source** (it replaces `bam_glob`): each

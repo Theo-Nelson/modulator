@@ -56,7 +56,7 @@ modulator validate-config --config config/config.yaml [--set …]
 ```
 
 - `demo` runs a fast bundled dataset (default: MXD1-only, genotype off). Datasets
-  include `RPL13_reads` (single gene) and `ALCAM_NHSL1_SERAC1_MXD1_RIOK3_reads`
+  include `MXD1_reads` (single gene, the default) and `ALCAM_NHSL1_SERAC1_MXD1_RIOK3_reads`
   (five genes); `--mode full` enables the heavier path.
 - `validate-config` loads the config, applies `--set`, and prints the resolved
   project root — use it to dry-check overrides before a long run.
@@ -86,9 +86,9 @@ Setting `samplesheet:` changes that. It becomes the **sample source** (replacing
 
 ```tsv
 sample	bam	condition	replicate
-M1	HornerLab_M1pA_*.bam	mock	1
-M2	HornerLab_M2pA_*.bam	mock	2
-Z1	HornerLab_Z1pA_*.bam	zikv	1
+M1	M1pA_*.bam	mock	1
+M2	M2pA_*.bam	mock	2
+Z1	Z1pA_*.bam	zikv	1
 ```
 
 - `sample` — **required**; a short id with no spaces or path separators (it becomes a filename).

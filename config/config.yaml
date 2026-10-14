@@ -10,8 +10,8 @@ bam_glob: "*.bam"
 # <sample>.bam, so your short ids become the sample names in every output (no 60-char BAM stems):
 #
 #   sample   bam                      condition   replicate
-#   M1       HornerLab_M1pA_*.bam     mock        1
-#   Z1       HornerLab_Z1pA_*.bam     zikv        1
+#   M1       M1pA_*.bam     mock        1
+#   Z1       Z1pA_*.bam     zikv        1
 #
 # `sample` and `bam` are required; `condition` is required for any between-condition test; any other
 # columns ride along as covariates. `bam` may be absolute, relative to bams_dir, or a glob matching
