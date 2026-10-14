@@ -1,0 +1,31 @@
+cff-version: 1.2.0
+message: "If you use Modulator, please cite the manuscript below."
+title: "Modulator"
+version: 2.0.0
+date-released: 2026-10-14
+license: Apache-2.0
+repository-code: "https://github.com/Theo-Nelson/modulator"
+authors:
+  - family-names: Nelson
+    given-names: Theodore M.
+    affiliation: Weill Cornell Medicine
+  - family-names: Goneos
+    given-names: Michael
+    affiliation: Weill Cornell Medicine
+preferred-citation:
+  type: article
+  title: "Modulator resolves transcript-, allele-, and condition-associated RNA modification differences from direct RNA sequencing"
+  authors:
+    - family-names: Nelson
+      given-names: Theodore M.
+    - family-names: Goneos
+      given-names: Michael
+    - family-names: Aufgebauer
+      given-names: Caroline J.
+    - family-names: Horner
+      given-names: Stacy M.
+    - family-names: Mason
+      given-names: Christopher E.
+  year: 2026
+  journal: "Nucleic Acids Research"
+  notes: "Submitted"
