@@ -16,6 +16,7 @@ import pandas as pd
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "..", "workflow", "scripts"))
 import test_snp_mod_assoc as T  # noqa: E402
+from genotype_utils import ChromTable  # noqa: E402
 
 
 def _write(tmp):
@@ -47,7 +48,11 @@ def main():
         args = SimpleNamespace(min_allele_reads=2, min_total_reads=4, pseudocount=0.5,
                                test="fisher", molecule_mods=mod_p, molecule_snps=snp_p,
                                out_tsv=os.path.join(tmp, "out.tsv"))
-        rows = T._pairs_for_one_chrom(mod_p, snp_p, args)
+        # the pairing function takes per-chromosome table objects (ChromTable) and a chromosome,
+        # not file paths (changed when the per-read tables moved to Parquet, 2026-09)
+        mod_tbl = ChromTable(mod_p)
+        snp_tbl = ChromTable(snp_p)
+        rows = T._pairs_for_one_chrom(mod_tbl, snp_tbl, "chr1", args)
         got = [r for r in rows if r.get("snp_id") == "chr1:150:A>G"]
         checks = [
             ("multi-metagene SNP produces >=1 association row", len(got) >= 1),

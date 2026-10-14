@@ -20,7 +20,7 @@ Total size ~300 KB.
 | `samples.tsv` | samplesheet (sample → bam, condition, replicate) |
 | `ground_truth/ground_truth.tsv` | machine-readable expectation per feature |
 | `GROUND_TRUTH.md` | full design + expected-vs-observed table + notes |
-| `run_pipeline.sh` | runs all 15 stages on this dataset |
+| `run_pipeline.sh` | runs all 16 stages on this dataset |
 | `validate_outputs.py` | checks the end-to-end outputs against ground truth (30 assertions) |
 | `test_classify_categories.py` | unit-validates all 13 `classify_diffs` structural categories |
 | `run_tests.sh` | one entry point: smoke checks + classify unit test + pipeline + validation |
@@ -63,7 +63,7 @@ bash resources/synthetic_3exon/run_pipeline.sh                                  
 `run_pipeline.sh` runs the local checkout via `PYTHONPATH=src python -m modulator`
 using the `modulator` conda env's tools (modkit 0.5.0, samtools). It enables
 `genotype`, `hierarchical_stoich`, and the between-condition comparisons, i.e. all
-15 stages.
+16 stages.
 
 ## Calibrating the between-condition test
 

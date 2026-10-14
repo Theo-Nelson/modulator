@@ -2,7 +2,7 @@
 # End-to-end regression suite for modulator, driven by the synthetic fixture.
 #   1. repo smoke checks (assembler + genotype unit logic)
 #   2. classify_diffs taxonomy unit test (all 13 structural categories)
-#   3. full 15-stage pipeline on the synthetic dataset
+#   3. full 16-stage pipeline on the synthetic dataset
 #   4. validate_outputs.py -- 30 ground-truth assertions
 # Exits non-zero if anything fails. Run from the repo root.
 set -uo pipefail
@@ -30,6 +30,10 @@ echo "### 2/4 classify_diffs taxonomy + snp-at-mod-base unit tests"
 "$PY" "$HERE/test_usage_dotted_gene.py" || rc=1
 PYTHONPATH=src "$PY" "$HERE/test_reference_contig_guard.py" || rc=1
 PYTHONPATH=src "$PY" "$HERE/test_scaling_features.py" || rc=1
+PYTHONPATH=src "$PY" "$HERE/test_zn_collision.py" || rc=1
+PYTHONPATH=src "$PY" "$HERE/test_report_robustness.py" || rc=1
+PYTHONPATH=src "$PY" "$HERE/test_snp_multimetagene_pairing.py" || rc=1
+PYTHONPATH=src "$PY" "$HERE/test_modmod_zero_cell.py" || rc=1
 
 echo "### 3/4 full pipeline on the synthetic dataset"
 bash "$HERE/run_pipeline.sh" || rc=1
